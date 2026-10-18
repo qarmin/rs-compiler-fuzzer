@@ -1,0 +1,98 @@
+name: miscompilation-fuzz
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      duration_minutes:
+        description: "How long to keep starting new batches"
+        default: "45"
+      target_lines:
+        description: "Lines per generated batch file"
+        default: "20000"
+      seed:
+        description: "Fuzzer seed (empty = time based)"
+        default: ""
+      strategies:
+        description: "Comma separated strategies or `all`"
+        default: "all"
+  pull_request:
+  push:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Fast check on every push/PR: the fuzzer builds and every strategy emits code that type-checks.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install stable --profile minimal && rustup default stable
+      - run: cargo test --release
+
+  fuzz:
+    # Long fuzzing only on schedule / manual runs; PRs get a short smoke run.
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: [nightly, stable]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchains (fuzzer is built with stable, the target toolchain is tested)
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup toolchain install ${{ matrix.toolchain }} --profile minimal
+          rustc +${{ matrix.toolchain }} -vV
+
+      - name: Build fuzzer
+        run: cargo +stable build --release
+
+      - name: Canary (known miscompilation #163311 - proves the detector can fire)
+        continue-on-error: true
+        run: ./target/release/rs-compiler-fuzzer canary --rustc "rustc +${{ matrix.toolchain }}" --configs O0,O3,O3-lto-fat --out fuzz-out
+
+      - name: Fuzz
+        id: fuzz
+        env:
+          DURATION_MIN: ${{ github.event_name == 'pull_request' && '4' || github.event_name == 'push' && '4' || inputs.duration_minutes || '45' }}
+          TARGET_LINES: ${{ (github.event_name == 'pull_request' || github.event_name == 'push') && '3000' || inputs.target_lines || '20000' }}
+          STRATEGIES: ${{ inputs.strategies || 'all' }}
+          SEED: ${{ inputs.seed }}
+        run: |
+          seed_arg=()
+          if [ -n "$SEED" ]; then seed_arg=(--seed "$SEED"); fi
+          ./target/release/rs-compiler-fuzzer fuzz \
+            --rustc "rustc +${{ matrix.toolchain }}" \
+            --duration $((DURATION_MIN * 60)) \
+            --target-lines "$TARGET_LINES" \
+            --strategies "$STRATEGIES" \
+            --compile-timeout 600 \
+            --out fuzz-out \
+            "${seed_arg[@]}"
+
+      - name: Summarise findings
+        if: always()
+        run: |
+          shopt -s nullglob
+          for r in fuzz-out/findings/*/report.md; do
+            echo "<details><summary>$r</summary>" >> "$GITHUB_STEP_SUMMARY"
+            echo >> "$GITHUB_STEP_SUMMARY"
+            cat "$r" >> "$GITHUB_STEP_SUMMARY"
+            echo "</details>" >> "$GITHUB_STEP_SUMMARY"
+          done
+
+      - name: Upload findings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: findings-${{ matrix.toolchain }}
+          path: |
+            fuzz-out/findings
+            fuzz-out/generator-bugs
+          if-no-files-found: ignore
