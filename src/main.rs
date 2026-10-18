@@ -20,13 +20,15 @@ USAGE:
   rs-compiler-fuzzer fuzz   [options]   generate, compile with all configs, compare, minimise
   rs-compiler-fuzzer gen    [options]   only print a generated batch (or one case) to stdout / --out FILE
   rs-compiler-fuzzer canary [options]   check the detector against a known miscompilation
+  rs-compiler-fuzzer verify --dir DIR   re-run stored findings (case.rs + repro.cfg); writes fixed.txt/still.txt to --out
   rs-compiler-fuzzer list               list strategies and default configurations
 
 OPTIONS:
   --seed N              base seed (default: time based, printed at start)
   --duration SECS       stop starting new batches after this many seconds
   --rounds N            number of rounds (each round = one batch per strategy)
-  --target-lines N      lines per generated batch file (default 20000)
+  --target-lines N      lines per batch file for every strategy (default: per strategy, 5k-150k)
+  --scale PERCENT       multiply the batch size, e.g. 50 or 300 (default 100)
   --strategies a,b|all  strategies to use (default all)
   --out DIR             output directory for findings (default fuzz-out)
   --jobs N              configurations compiled in parallel (default: cores/2)
@@ -38,6 +40,8 @@ OPTIONS:
   --max-findings N      stop after N findings (default 10)
   --minimize-budget N   max extra compilations spent shrinking one finding (default 40)
   --fail-on-known       exit 2 also for findings that match a known upstream bug
+  --batch-seed N        reproduce one batch: the `seed N` printed in the logs (with --strategies X --target-lines L --rounds 1)
+  --timeouts-are-findings  report compile timeouts as findings (default: log only)
 gen only:
   --strategy NAME       strategy to generate (required)
   --case-seed N         generate the single case with this seed
@@ -57,7 +61,9 @@ fn main() {
     let mut seed: Option<u64> = None;
     let mut duration = None;
     let mut rounds = None;
-    let mut target_lines = 20000usize;
+    let mut target_lines: Option<usize> = None;
+    let mut scale = 100usize;
+    let mut dir_arg: Option<PathBuf> = None;
     let mut strategies = "all".to_string();
     let mut out = PathBuf::from("fuzz-out");
     let mut jobs = std::thread::available_parallelism().map(|n| (n.get() / 2).max(1)).unwrap_or(1);
@@ -69,6 +75,8 @@ fn main() {
     let mut max_findings = 10usize;
     let mut minimize_budget = 40usize;
     let mut fail_on_known = false;
+    let mut timeouts_are_findings = false;
+    let mut batch_seed: Option<u64> = None;
     let mut strategy: Option<String> = None;
     let mut case_seed: Option<u64> = None;
     let mut gen_out: Option<PathBuf> = None;
@@ -81,7 +89,9 @@ fn main() {
             "--seed" => seed = Some(num(val())),
             "--duration" => duration = Some(Duration::from_secs(num(val()))),
             "--rounds" => rounds = Some(num(val())),
-            "--target-lines" => target_lines = num(val()) as usize,
+            "--target-lines" => target_lines = Some(num(val()) as usize),
+            "--scale" => scale = num(val()).max(1) as usize,
+            "--dir" => dir_arg = Some(PathBuf::from(val())),
             "--strategies" => strategies = val(),
             "--out" => {
                 let v = val();
@@ -101,6 +111,8 @@ fn main() {
             "--max-findings" => max_findings = num(val()) as usize,
             "--minimize-budget" => minimize_budget = num(val()) as usize,
             "--fail-on-known" => fail_on_known = true,
+            "--timeouts-are-findings" => timeouts_are_findings = true,
+            "--batch-seed" => batch_seed = Some(num(val())),
             "--strategy" => strategy = Some(val()),
             "--case-seed" => case_seed = Some(num(val())),
             "-h" | "--help" => {
@@ -133,7 +145,7 @@ fn main() {
             let s = strategies::find(&name).unwrap_or_else(|| die("unknown strategy"));
             let cases = match case_seed {
                 Some(cs) => vec![batch::Case { id: 0, strategy: s.name, seed: cs, body: (s.generate)(&mut rng::Rng::new(cs)) }],
-                None => fuzz::generate_batch(s, seed, target_lines),
+                None => fuzz::generate_batch(s, seed, target_lines.unwrap_or(s.lines) * scale / 100),
             };
             let refs: Vec<&batch::Case> = cases.iter().collect();
             let src = batch::assemble(&refs).source;
@@ -142,7 +154,7 @@ fn main() {
                 None => print!("{src}"),
             }
         }
-        "fuzz" | "canary" => {
+        "fuzz" | "canary" | "verify" => {
             let version = fuzz::rustc_version(&rustc_argv);
             let mut configs = fuzz::default_configs(fuzz::is_nightly(&version));
             configs.extend(extra);
@@ -153,7 +165,7 @@ fn main() {
                 }
                 configs = picked;
             }
-            if configs.len() < 2 {
+            if configs.len() < 2 && cmd != "verify" {
                 die("need at least two configurations");
             }
             let strategies = fuzz::strategies_by_name(&strategies).unwrap_or_else(|e| die(&e));
@@ -167,6 +179,7 @@ fn main() {
                 duration,
                 rounds,
                 target_lines,
+                scale,
                 strategies,
                 out,
                 jobs,
@@ -176,8 +189,18 @@ fn main() {
                 max_findings,
                 minimize_budget,
                 fail_on_known,
+                timeouts_are_findings,
+                batch_seed,
             };
-            let code = if cmd == "fuzz" { fuzz::run(&opts) } else { fuzz::canary(&opts) };
+            let code = match cmd.as_str() {
+                "fuzz" => fuzz::run(&opts),
+                "canary" => fuzz::canary(&opts),
+                _ => {
+                    let dir = dir_arg.unwrap_or_else(|| die("verify needs --dir"));
+                    let report = opts.out.clone();
+                    fuzz::verify(&opts, &dir, &report)
+                }
+            };
             std::process::exit(code);
         }
         _ => {

@@ -15,7 +15,10 @@ pub struct Opts {
     pub seed: u64,
     pub duration: Option<Duration>,
     pub rounds: Option<u64>,
-    pub target_lines: usize,
+    /// Fixed batch size for every strategy; `None` = per-strategy default.
+    pub target_lines: Option<usize>,
+    /// Percentage applied to the batch size (100 = as is).
+    pub scale: usize,
     pub strategies: Vec<&'static Strategy>,
     pub out: PathBuf,
     pub jobs: usize,
@@ -26,6 +29,11 @@ pub struct Opts {
     pub minimize_budget: usize,
     /// Count findings that match a known upstream bug (`// known-bug:` marker) towards the exit code.
     pub fail_on_known: bool,
+    /// Report compile timeouts as findings (default: only log them - big batches under LTO can
+    /// legitimately be slow, and a timeout cannot be attributed to a case).
+    pub timeouts_are_findings: bool,
+    /// Use exactly this batch seed (the `seed N` printed in the logs) instead of deriving one.
+    pub batch_seed: Option<u64>,
 }
 
 /// Configurations that must agree for any UB-free program. The first one is the baseline.
@@ -73,6 +81,7 @@ struct Fuzzer<'a> {
     work: PathBuf,
     findings: usize,
     known: usize,
+    seen_crashes: BTreeSet<(String, String)>,
 }
 
 pub fn generate_batch(s: &Strategy, batch_seed: u64, target_lines: usize) -> Vec<Case> {
@@ -130,11 +139,33 @@ fn known_bug(body: &str) -> Option<&str> {
     Some(l.split("// known-bug:").nth(1)?.trim())
 }
 
+const KNOWN_BUGS: &str = include_str!("../known-bugs.txt");
+
+/// Is this crash signature listed in known-bugs.txt?
+fn known_signature(sig: &str) -> Option<&'static str> {
+    KNOWN_BUGS
+        .lines()
+        .map(|l| l.split("    #").next().unwrap_or(l).trim())
+        .find(|l| !l.is_empty() && !l.starts_with('#') && sig.contains(l))
+}
+
 fn append_config(dir: &Path, cfg: &str) {
     use std::io::Write;
     if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(dir.join("report.md")) {
         let _ = writeln!(f, "\n- also diverges from the baseline under: `{cfg}`");
     }
+}
+
+/// Stable fingerprint of a compiler crash, so the same crash found again (other batch, other
+/// run) is recognised: the first line naming an LLVM error / ICE / signal, digits normalised.
+fn crash_signature(o: &Outcome) -> Option<String> {
+    let Outcome::CompileFail(e) = o else { return None };
+    let line = e
+        .lines()
+        .find(|l| l.contains("LLVM ERROR") || l.contains("internal compiler error") || l.contains("interrupted by SIG") || l.contains("panicked at") || l.contains("Assertion"))
+        .or_else(|| e.lines().find(|l| l.starts_with("error")))?;
+    let norm: String = line.chars().map(|c| if c.is_ascii_digit() { '#' } else { c }).collect();
+    Some(norm.chars().take(160).collect())
 }
 
 fn now_secs() -> u64 {
@@ -215,7 +246,18 @@ impl Fuzzer<'_> {
 
     fn write_finding(&mut self, kind: &str, strategy: &str, cases: &[Case], batch_seed: u64, base: (&Config, &Outcome), bad: (&Config, &Outcome)) -> PathBuf {
         let known: BTreeSet<&str> = cases.iter().filter_map(|c| known_bug(&c.body)).collect();
-        let is_known = !cases.is_empty() && cases.iter().all(|c| known_bug(&c.body).is_some());
+        let sig_known = crash_signature(bad.1).and_then(|s| known_signature(&s)).is_some();
+        // Known when every case whose output line differs carries a `known-bug` marker (cases kept
+        // only because the bug needs neighbours in the file do not have to).
+        let differing: BTreeSet<usize> = match (base.1, bad.1) {
+            (Outcome::Ran { stdout: x, .. }, Outcome::Ran { stdout: y, .. }) => {
+                let (lx, ly) = (parse_lines(x), parse_lines(y));
+                lx.keys().chain(ly.keys()).copied().filter(|k| lx.get(k) != ly.get(k)).collect()
+            }
+            _ => cases.iter().map(|c| c.id).collect(),
+        };
+        let marked = |id: usize| cases.iter().any(|c| c.id == id && known_bug(&c.body).is_some());
+        let is_known = sig_known || (!differing.is_empty() && differing.iter().all(|&id| marked(id)));
         let (bucket, n) = if is_known { self.known += 1; ("known", self.known) } else { self.findings += 1; ("findings", self.findings) };
         let dir = self.o.out.join(bucket).join(format!("{}_{}_{}_{}", now_secs(), strategy, bad.0.name, n));
         std::fs::create_dir_all(&dir).unwrap();
@@ -225,7 +267,7 @@ impl Fuzzer<'_> {
         let mut r = String::new();
         let _ = writeln!(r, "# {kind}: `{}` vs `{}` ({strategy})\n", base.0.name, bad.0.name);
         if is_known {
-            let _ = writeln!(r, "**Matches a known upstream bug:** {} - not counted as a new finding.\n", known.iter().copied().collect::<Vec<_>>().join(", "));
+            let _ = writeln!(r, "**Matches a known bug** ({}) - not counted as a new finding.\n", if known.is_empty() { "known-bugs.txt".to_string() } else { known.iter().copied().collect::<Vec<_>>().join(", ") });
         }
         let _ = writeln!(r, "- cases kept after minimisation: {}", cases.iter().map(|c| format!("`case_{}` ({}, seed {})", c.id, c.strategy, c.seed)).collect::<Vec<_>>().join(", "));
         let _ = writeln!(r, "- batch seed: {batch_seed}, fuzzer seed: {}", self.o.seed);
@@ -249,6 +291,18 @@ impl Fuzzer<'_> {
         }
         let _ = writeln!(r, "\nBefore reporting upstream: check the case is free of UB (e.g. run it under Miri) and shrink it by hand; the `*-checks` configs and `PANIC` lines can also indicate a generator bug rather than a compiler bug.");
         std::fs::write(dir.join("report.md"), r).unwrap();
+        let meta = format!(
+            "strategy={strategy}\nbase_name={}\nbase_flags={}\nbad_name={}\nbad_flags={}\nbatch_seed={batch_seed}\ntoolchain={}\n",
+            base.0.name,
+            base.0.flags.join(" "),
+            bad.0.name,
+            bad.0.flags.join(" "),
+            self.version.lines().find(|l| l.starts_with("release:")).unwrap_or("release: ?").trim_start_matches("release: ")
+        );
+        std::fs::write(dir.join("repro.cfg"), meta).unwrap();
+        if let Some(sig) = crash_signature(bad.1) {
+            std::fs::write(dir.join("signature.txt"), sig).unwrap();
+        }
         eprintln!("  {} {kind} `{}` vs `{}` -> {}", if is_known { "~~ (known)" } else { "!!" }, base.0.name, bad.0.name, dir.display());
         dir
     }
@@ -288,7 +342,19 @@ impl Fuzzer<'_> {
         let lines = a.source.lines().count();
         let outs = par_map(&self.o.configs, self.o.jobs, |c| self.eval(&a, c));
         let keys: Vec<String> = outs.iter().map(Outcome::key).collect();
-        let diverging: Vec<usize> = (1..outs.len()).filter(|&i| keys[i] != keys[0]).collect();
+        // Baseline = first configuration that compiled and ran. If e.g. O0 crashes the compiler, the
+        // others are still compared with each other and O0 is reported as a compile failure.
+        let b = outs.iter().position(|o| matches!(o, Outcome::Ran { .. })).unwrap_or(0);
+        let diverging: Vec<usize> = (0..outs.len())
+            .filter(|&i| i != b && keys[i] != keys[b])
+            .filter(|&i| {
+                let skip = matches!(outs[i], Outcome::CompileTimeout) && !self.o.timeouts_are_findings;
+                if skip {
+                    eprintln!("  (compile of `{}` timed out - inconclusive, not reported; use --timeouts-are-findings)", self.o.configs[i].name);
+                }
+                !skip
+            })
+            .collect();
         eprintln!(
             "[{}] seed {batch_seed}: {} cases ({} dropped as invalid), {lines} lines, check {:.1}s, total {:.1}s, divergent configs: {}",
             s.name,
@@ -301,7 +367,8 @@ impl Fuzzer<'_> {
         let _ = total_cases;
 
         if diverging.is_empty() {
-            if matches!(outs[0], Outcome::CompileFail(_) | Outcome::CompileTimeout | Outcome::RunTimeout) {
+            let all_same = keys.iter().all(|k| *k == keys[0]);
+            if all_same && (matches!(outs[0], Outcome::CompileFail(_) | Outcome::RunTimeout) || (self.o.timeouts_are_findings && matches!(outs[0], Outcome::CompileTimeout))) {
                 let _ = self.write_finding("uniform failure", s.name, &cases, batch_seed, (&self.o.configs[0], &outs[0]), (&self.o.configs[1], &outs[1]));
             }
             return;
@@ -313,8 +380,14 @@ impl Fuzzer<'_> {
             if self.findings >= self.o.max_findings {
                 return;
             }
-            let (base, bad) = (&self.o.configs[0], &self.o.configs[i]);
-            if let (Outcome::Ran { stdout: x, .. }, Outcome::Ran { stdout: y, .. }) = (&outs[0], &outs[i]) {
+            let (base, bad) = (&self.o.configs[b], &self.o.configs[i]);
+            if let Some(sig) = crash_signature(&outs[i]) {
+                if !self.seen_crashes.insert((bad.name.clone(), sig.clone())) {
+                    eprintln!("  (same crash as before under `{}`: {sig})", bad.name);
+                    continue;
+                }
+            }
+            if let (Outcome::Ran { stdout: x, .. }, Outcome::Ran { stdout: y, .. }) = (&outs[b], &outs[i]) {
                 let (lx, ly) = (parse_lines(x), parse_lines(y));
                 let ids: BTreeSet<usize> = lx.keys().chain(ly.keys()).copied().filter(|k| lx.get(k) != ly.get(k)).collect();
                 if let Some((_, dir)) = handled.iter().find(|(h, _)| !ids.is_empty() && ids.is_subset(h)) {
@@ -322,14 +395,14 @@ impl Fuzzer<'_> {
                     continue;
                 }
             }
-            let min = self.minimize(&cases, base, bad, &outs[0], &outs[i]);
+            let min = self.minimize(&cases, base, bad, &outs[b], &outs[i]);
             let ids: BTreeSet<usize> = min.iter().map(|c| c.id).collect();
             if let Some((_, dir)) = handled.iter().find(|(h, _)| *h == ids) {
                 append_config(dir, &bad.name);
                 continue;
             }
             // re-evaluate the minimised set to record what each side really did
-            let (bo, xo) = self.diverges(&min, base, bad).unwrap_or_else(|| (outs[0].clone(), outs[i].clone()));
+            let (bo, xo) = self.diverges(&min, base, bad).unwrap_or_else(|| (outs[b].clone(), outs[i].clone()));
             let kind = match (&bo, &xo) {
                 (Outcome::Ran { .. }, Outcome::Ran { .. }) => "MISCOMPILE candidate",
                 (_, Outcome::CompileFail(_)) | (_, Outcome::CompileTimeout) => "compile failure/hang",
@@ -355,7 +428,7 @@ pub fn run(o: &Opts) -> i32 {
     eprintln!("configs: {}", o.configs.iter().map(|c| c.name.as_str()).collect::<Vec<_>>().join(", "));
     let work = o.out.join("work");
     std::fs::create_dir_all(&work).unwrap();
-    let mut f = Fuzzer { o, version, work, findings: 0, known: 0 };
+    let mut f = Fuzzer { o, version, work, findings: 0, known: 0, seen_crashes: BTreeSet::new() };
     let start = Instant::now();
     let mut round = 0u64;
     loop {
@@ -366,8 +439,9 @@ pub fn run(o: &Opts) -> i32 {
             if o.duration.is_some_and(|d| start.elapsed() >= d) || f.findings >= o.max_findings {
                 break;
             }
-            let batch_seed = Rng::mix(o.seed, round * 1000 + si as u64);
-            let cases = generate_batch(s, batch_seed, o.target_lines);
+            let batch_seed = o.batch_seed.unwrap_or_else(|| Rng::mix(o.seed, round * 1000 + si as u64));
+            let lines = o.target_lines.unwrap_or(s.lines) * o.scale / 100;
+            let cases = generate_batch(s, batch_seed, lines.max(200));
             f.process_batch(s, batch_seed, cases);
         }
         round += 1;
@@ -421,6 +495,57 @@ pub fn canary(o: &Opts) -> i32 {
         eprintln!("canary: NO known bug reproduced - all fixed on this toolchain, or the detector is broken");
         1
     }
+}
+
+/// Re-run stored findings (dirs with `case.rs` + `repro.cfg`) on the current toolchain.
+/// Prints `STILL <dir>` / `FIXED <dir>` / `SKIP <dir>` and writes `fixed.txt` into `report_dir`.
+pub fn verify(o: &Opts, root: &Path, report_dir: &Path) -> i32 {
+    let mut dirs: Vec<PathBuf> = match std::fs::read_dir(root) {
+        Ok(rd) => rd.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.join("case.rs").exists() && p.join("repro.cfg").exists()).collect(),
+        Err(e) => {
+            eprintln!("cannot read {}: {e}", root.display());
+            return 1;
+        }
+    };
+    dirs.sort();
+    let work = o.out.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::create_dir_all(report_dir).unwrap();
+    let (mut still, mut fixed) = (Vec::new(), Vec::new());
+    let jobs = o.jobs;
+    let results = par_map(&dirs, jobs, |d| {
+        let meta: std::collections::HashMap<String, String> = std::fs::read_to_string(d.join("repro.cfg"))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| l.split_once('=').map(|(k, v)| (k.to_string(), v.to_string())))
+            .collect();
+        let get = |k: &str| meta.get(k).cloned().unwrap_or_default();
+        let base = Config::new(&get("base_name"), &get("base_flags"));
+        let bad = Config::new(&get("bad_name"), &get("bad_flags"));
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let src = d.join("case.rs");
+        let r: Vec<Outcome> = [&base, &bad]
+            .iter()
+            .enumerate()
+            .map(|(i, c)| build_and_run(&o.rustc, &src, &work.join(format!("v{}_{n}_{i}", std::process::id())), c, &o.limits))
+            .collect();
+        (r[0].key() != r[1].key(), r[0].describe(), r[1].describe(), get("bad_name"))
+    });
+    for (d, (diverges, b, x, badname)) in dirs.iter().zip(results) {
+        let name = d.file_name().unwrap().to_string_lossy().to_string();
+        if diverges {
+            eprintln!("STILL {name} [{badname}] baseline: {b}; bad: {x}");
+            still.push(name);
+        } else {
+            eprintln!("FIXED {name} [{badname}]");
+            fixed.push(name);
+        }
+    }
+    let _ = std::fs::write(report_dir.join("fixed.txt"), fixed.join("\n"));
+    let _ = std::fs::write(report_dir.join("still.txt"), still.join("\n"));
+    eprintln!("verify: {} still reproduce, {} fixed/not reproducing", still.len(), fixed.len());
+    let _ = std::fs::remove_dir_all(&work);
+    0
 }
 
 pub fn strategies_by_name(names: &str) -> Result<Vec<&'static Strategy>, String> {

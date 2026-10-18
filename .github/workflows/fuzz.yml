@@ -1,46 +1,72 @@
-name: miscompilation-fuzz
+name: fuzz
 
+# Long-running fuzzing. One job per (toolchain, strategy) so the pool of concurrent
+# runners is used; findings are zipped and stored in the `Nightly` release (see verify.yml).
 on:
   schedule:
-    - cron: "17 */6 * * *"
+    - cron: "0 0 * * *"
+    - cron: "0 12 * * *"
   workflow_dispatch:
     inputs:
       duration_minutes:
-        description: "How long to keep starting new batches"
-        default: "45"
-      target_lines:
-        description: "Lines per generated batch file"
-        default: "20000"
+        description: "How long each job keeps starting new batches"
+        default: "100"
+      scale:
+        description: "Batch size in percent of the per-strategy default (5k-150k lines)"
+        default: "100"
+      strategies:
+        description: "Comma separated strategies"
+        default: "arith,loops,control,enums,borrows,memory,traits,asyncs,collections"
+      toolchains:
+        description: "Comma separated toolchains"
+        default: "nightly,stable"
       seed:
         description: "Fuzzer seed (empty = time based)"
         default: ""
-      strategies:
-        description: "Comma separated strategies or `all`"
-        default: "all"
-  pull_request:
-  push:
-    branches: [main]
+
+permissions:
+  contents: write
 
 env:
   CARGO_TERM_COLOR: always
+  RELEASE: Nightly
 
 jobs:
-  # Fast check on every push/PR: the fuzzer builds and every strategy emits code that type-checks.
-  test:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.m.outputs.matrix }}
+    steps:
+      - id: m
+        env:
+          STRATEGIES: ${{ inputs.strategies || 'arith,loops,control,enums,borrows,memory,traits,asyncs,collections' }}
+          TOOLCHAINS: ${{ inputs.toolchains || 'nightly,stable' }}
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os
+          inc = [{"toolchain": t.strip(), "strategy": s.strip()}
+                 for t in os.environ["TOOLCHAINS"].split(",") for s in os.environ["STRATEGIES"].split(",")]
+          print("matrix=" + json.dumps({"include": inc}))
+          PY
+
+  # Create the storage release once, before the parallel jobs race to upload into it.
+  prepare:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - run: rustup toolchain install stable --profile minimal && rustup default stable
-      - run: cargo test --release
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$RELEASE" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create "$RELEASE" --repo "$GITHUB_REPOSITORY" --prerelease --title "$RELEASE" \
+              --notes "Zipped reproducers found by the fuzzer (<toolchain>__<strategy>__<config>__<hash>.zip). verify.yml re-runs them daily."
 
   fuzz:
-    # Long fuzzing only on schedule / manual runs; PRs get a short smoke run.
+    needs: [plan, prepare]
     runs-on: ubuntu-latest
-    timeout-minutes: 150
+    timeout-minutes: 170
     strategy:
       fail-fast: false
-      matrix:
-        toolchain: [nightly, stable]
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v4
 
@@ -50,19 +76,16 @@ jobs:
           rustup toolchain install ${{ matrix.toolchain }} --profile minimal
           rustc +${{ matrix.toolchain }} -vV
 
-      - name: Build fuzzer
-        run: cargo +stable build --release
+      - run: cargo +stable build --release
 
-      - name: Canary (known miscompilation #163311 - proves the detector can fire)
+      - name: Canaries
         continue-on-error: true
         run: ./target/release/rs-compiler-fuzzer canary --rustc "rustc +${{ matrix.toolchain }}" --configs O0,O3,O3-lto-fat --out fuzz-out
 
       - name: Fuzz
-        id: fuzz
         env:
-          DURATION_MIN: ${{ github.event_name == 'pull_request' && '4' || github.event_name == 'push' && '4' || inputs.duration_minutes || '45' }}
-          TARGET_LINES: ${{ (github.event_name == 'pull_request' || github.event_name == 'push') && '3000' || inputs.target_lines || '20000' }}
-          STRATEGIES: ${{ inputs.strategies || 'all' }}
+          DURATION_MIN: ${{ inputs.duration_minutes || '100' }}
+          SCALE: ${{ inputs.scale || '100' }}
           SEED: ${{ inputs.seed }}
         run: |
           seed_arg=()
@@ -70,29 +93,61 @@ jobs:
           ./target/release/rs-compiler-fuzzer fuzz \
             --rustc "rustc +${{ matrix.toolchain }}" \
             --duration $((DURATION_MIN * 60)) \
-            --target-lines "$TARGET_LINES" \
-            --strategies "$STRATEGIES" \
+            --scale "$SCALE" \
+            --strategies "${{ matrix.strategy }}" \
             --compile-timeout 600 \
+            --max-findings 25 \
             --out fuzz-out \
             "${seed_arg[@]}"
+
+      - name: Store new findings in the release
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TOOLCHAIN: ${{ matrix.toolchain }}
+        run: |
+          shopt -s nullglob
+          mkdir -p upload stage
+          for d in fuzz-out/findings/*/; do
+            strategy=$(grep '^strategy=' "$d/repro.cfg" | cut -d= -f2)
+            bad=$(grep '^bad_name=' "$d/repro.cfg" | cut -d= -f2)
+            # same crash / same reproducer => same asset name, so reruns replace instead of piling up
+            if [ -f "$d/signature.txt" ]; then h=$(sha256sum "$d/signature.txt" | cut -c1-10); else h=$(sha256sum "$d/case.rs" | cut -c1-10); fi
+            stem="${TOOLCHAIN}__${strategy}__${bad}__${h}"
+            rm -rf "stage/$stem"; cp -r "$d" "stage/$stem"
+            (cd stage && zip -qr "../upload/${stem}.zip" "$stem")
+          done
+          if compgen -G "upload/*.zip" > /dev/null; then
+            gh release upload "$RELEASE" upload/*.zip --clobber --repo "$GITHUB_REPOSITORY"
+          fi
+
+      - name: Print findings into the log
+        if: always()
+        run: |
+          shopt -s nullglob
+          for d in fuzz-out/findings/*/ fuzz-out/known/*/; do
+            echo "::group::$d"
+            head -c 5000 "$d/report.md"
+            echo; echo "----- case.rs (first 120 lines) -----"
+            grep -v '^\s*$' "$d/case.rs" | awk '/^mod case_/{f=1} f' | head -120
+            echo "::endgroup::"
+          done
 
       - name: Summarise findings
         if: always()
         run: |
           shopt -s nullglob
           for r in fuzz-out/findings/*/report.md; do
-            echo "<details><summary>$r</summary>" >> "$GITHUB_STEP_SUMMARY"
-            echo >> "$GITHUB_STEP_SUMMARY"
-            cat "$r" >> "$GITHUB_STEP_SUMMARY"
-            echo "</details>" >> "$GITHUB_STEP_SUMMARY"
+            { echo "<details><summary>$r</summary>"; echo; cat "$r"; echo "</details>"; } >> "$GITHUB_STEP_SUMMARY"
           done
 
-      - name: Upload findings
+      - uses: actions/upload-artifact@v4
         if: always()
-        uses: actions/upload-artifact@v4
         with:
-          name: findings-${{ matrix.toolchain }}
+          name: findings-${{ matrix.toolchain }}-${{ matrix.strategy }}
           path: |
             fuzz-out/findings
+            fuzz-out/known
             fuzz-out/generator-bugs
           if-no-files-found: ignore
+          retention-days: 14
