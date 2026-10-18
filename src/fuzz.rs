@@ -247,7 +247,17 @@ impl Fuzzer<'_> {
     fn write_finding(&mut self, kind: &str, strategy: &str, cases: &[Case], batch_seed: u64, base: (&Config, &Outcome), bad: (&Config, &Outcome)) -> PathBuf {
         let known: BTreeSet<&str> = cases.iter().filter_map(|c| known_bug(&c.body)).collect();
         let sig_known = crash_signature(bad.1).and_then(|s| known_signature(&s)).is_some();
-        let is_known = sig_known || (!cases.is_empty() && cases.iter().all(|c| known_bug(&c.body).is_some()));
+        // Known when every case whose output line differs carries a `known-bug` marker (cases kept
+        // only because the bug needs neighbours in the file do not have to).
+        let differing: BTreeSet<usize> = match (base.1, bad.1) {
+            (Outcome::Ran { stdout: x, .. }, Outcome::Ran { stdout: y, .. }) => {
+                let (lx, ly) = (parse_lines(x), parse_lines(y));
+                lx.keys().chain(ly.keys()).copied().filter(|k| lx.get(k) != ly.get(k)).collect()
+            }
+            _ => cases.iter().map(|c| c.id).collect(),
+        };
+        let marked = |id: usize| cases.iter().any(|c| c.id == id && known_bug(&c.body).is_some());
+        let is_known = sig_known || (!differing.is_empty() && differing.iter().all(|&id| marked(id)));
         let (bucket, n) = if is_known { self.known += 1; ("known", self.known) } else { self.findings += 1; ("findings", self.findings) };
         let dir = self.o.out.join(bucket).join(format!("{}_{}_{}_{}", now_secs(), strategy, bad.0.name, n));
         std::fs::create_dir_all(&dir).unwrap();
