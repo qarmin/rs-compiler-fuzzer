@@ -81,13 +81,19 @@ generator. Before reporting upstream, verify the reproducer is UB-free (Miri) an
   Batches are 5k-150k lines depending on how expensive a strategy is to compile, tuned so fat LTO (the slowest config) takes roughly 1-2.5 minutes (`--scale` changes that).
   Each job runs the canaries, fuzzes, prints reports into the log, uploads artifacts, and zips every
   **new** finding into the **`Nightly` release** (`<toolchain>__<strategy>__<config>__<hash>.zip`; the hash is of the crash signature for compiler crashes, otherwise of the reproducer, so reruns replace instead of piling up).
-  Findings that match a known upstream bug (`// known-bug:` marker in the generator) go to `known/` and
-  do not fail the job.
+  Findings that match a known bug - a `// known-bug:` marker in the generator, or a crash signature listed
+  in `known-bugs.txt` - go to `known/` and do not fail the job. Compile timeouts are logged as inconclusive
+  (`--timeouts-are-findings` makes them findings). The baseline is the first configuration that compiled and
+  ran, so a crash in `O0` is reported as such while the other configs are still compared with each other.
 - `verify.yml` (daily, or manual): downloads the zips from the `Nightly` release, re-runs each
   reproducer on the current toolchain (`rs-compiler-fuzzer verify`) and reports which still reproduce
   and which got fixed. With the `prune` input it deletes the fixed ones from the release.
 
 Local equivalent of the verify step: `rs-compiler-fuzzer verify --dir unzipped-findings/ --out verify-out`.
+
+## Reports
+
+`reports/` holds minimised findings worth reporting upstream (currently: an LLVM `-O0` crash on i128 arithmetic).
 
 ## Reference material
 

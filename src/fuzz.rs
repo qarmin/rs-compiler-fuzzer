@@ -139,6 +139,16 @@ fn known_bug(body: &str) -> Option<&str> {
     Some(l.split("// known-bug:").nth(1)?.trim())
 }
 
+const KNOWN_BUGS: &str = include_str!("../known-bugs.txt");
+
+/// Is this crash signature listed in known-bugs.txt?
+fn known_signature(sig: &str) -> Option<&'static str> {
+    KNOWN_BUGS
+        .lines()
+        .map(|l| l.split("    #").next().unwrap_or(l).trim())
+        .find(|l| !l.is_empty() && !l.starts_with('#') && sig.contains(l))
+}
+
 fn append_config(dir: &Path, cfg: &str) {
     use std::io::Write;
     if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(dir.join("report.md")) {
@@ -236,7 +246,8 @@ impl Fuzzer<'_> {
 
     fn write_finding(&mut self, kind: &str, strategy: &str, cases: &[Case], batch_seed: u64, base: (&Config, &Outcome), bad: (&Config, &Outcome)) -> PathBuf {
         let known: BTreeSet<&str> = cases.iter().filter_map(|c| known_bug(&c.body)).collect();
-        let is_known = !cases.is_empty() && cases.iter().all(|c| known_bug(&c.body).is_some());
+        let sig_known = crash_signature(bad.1).and_then(|s| known_signature(&s)).is_some();
+        let is_known = sig_known || (!cases.is_empty() && cases.iter().all(|c| known_bug(&c.body).is_some()));
         let (bucket, n) = if is_known { self.known += 1; ("known", self.known) } else { self.findings += 1; ("findings", self.findings) };
         let dir = self.o.out.join(bucket).join(format!("{}_{}_{}_{}", now_secs(), strategy, bad.0.name, n));
         std::fs::create_dir_all(&dir).unwrap();
@@ -246,7 +257,7 @@ impl Fuzzer<'_> {
         let mut r = String::new();
         let _ = writeln!(r, "# {kind}: `{}` vs `{}` ({strategy})\n", base.0.name, bad.0.name);
         if is_known {
-            let _ = writeln!(r, "**Matches a known upstream bug:** {} - not counted as a new finding.\n", known.iter().copied().collect::<Vec<_>>().join(", "));
+            let _ = writeln!(r, "**Matches a known bug** ({}) - not counted as a new finding.\n", if known.is_empty() { "known-bugs.txt".to_string() } else { known.iter().copied().collect::<Vec<_>>().join(", ") });
         }
         let _ = writeln!(r, "- cases kept after minimisation: {}", cases.iter().map(|c| format!("`case_{}` ({}, seed {})", c.id, c.strategy, c.seed)).collect::<Vec<_>>().join(", "));
         let _ = writeln!(r, "- batch seed: {batch_seed}, fuzzer seed: {}", self.o.seed);
