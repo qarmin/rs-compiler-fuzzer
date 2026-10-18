@@ -27,7 +27,7 @@ OPTIONS:
   --seed N              base seed (default: time based, printed at start)
   --duration SECS       stop starting new batches after this many seconds
   --rounds N            number of rounds (each round = one batch per strategy)
-  --target-lines N      lines per batch file for every strategy (default: per strategy, 8k-150k)
+  --target-lines N      lines per batch file for every strategy (default: per strategy, 5k-150k)
   --scale PERCENT       multiply the batch size, e.g. 50 or 300 (default 100)
   --strategies a,b|all  strategies to use (default all)
   --out DIR             output directory for findings (default fuzz-out)
