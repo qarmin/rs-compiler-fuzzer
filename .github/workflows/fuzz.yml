@@ -58,7 +58,7 @@ jobs:
         run: |
           gh release view "$RELEASE" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
             gh release create "$RELEASE" --repo "$GITHUB_REPOSITORY" --prerelease --title "$RELEASE" \
-              --notes "Zipped reproducers found by the fuzzer (<toolchain>__<strategy>_<config>_<n>__<hash>.zip). verify.yml re-runs them daily."
+              --notes "Zipped reproducers found by the fuzzer (<toolchain>__<strategy>__<config>__<hash>.zip). verify.yml re-runs them daily."
 
   fuzz:
     needs: [plan, prepare]
@@ -109,9 +109,11 @@ jobs:
           shopt -s nullglob
           mkdir -p upload stage
           for d in fuzz-out/findings/*/; do
-            name=$(basename "$d")
-            h=$(sha256sum "$d/case.rs" | cut -c1-10)
-            stem="${TOOLCHAIN}__${name#*_}__${h}"
+            strategy=$(grep '^strategy=' "$d/repro.cfg" | cut -d= -f2)
+            bad=$(grep '^bad_name=' "$d/repro.cfg" | cut -d= -f2)
+            # same crash / same reproducer => same asset name, so reruns replace instead of piling up
+            if [ -f "$d/signature.txt" ]; then h=$(sha256sum "$d/signature.txt" | cut -c1-10); else h=$(sha256sum "$d/case.rs" | cut -c1-10); fi
+            stem="${TOOLCHAIN}__${strategy}__${bad}__${h}"
             rm -rf "stage/$stem"; cp -r "$d" "stage/$stem"
             (cd stage && zip -qr "../upload/${stem}.zip" "$stem")
           done

@@ -76,6 +76,7 @@ struct Fuzzer<'a> {
     work: PathBuf,
     findings: usize,
     known: usize,
+    seen_crashes: BTreeSet<(String, String)>,
 }
 
 pub fn generate_batch(s: &Strategy, batch_seed: u64, target_lines: usize) -> Vec<Case> {
@@ -138,6 +139,18 @@ fn append_config(dir: &Path, cfg: &str) {
     if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(dir.join("report.md")) {
         let _ = writeln!(f, "\n- also diverges from the baseline under: `{cfg}`");
     }
+}
+
+/// Stable fingerprint of a compiler crash, so the same crash found again (other batch, other
+/// run) is recognised: the first line naming an LLVM error / ICE / signal, digits normalised.
+fn crash_signature(o: &Outcome) -> Option<String> {
+    let Outcome::CompileFail(e) = o else { return None };
+    let line = e
+        .lines()
+        .find(|l| l.contains("LLVM ERROR") || l.contains("internal compiler error") || l.contains("interrupted by SIG") || l.contains("panicked at") || l.contains("Assertion"))
+        .or_else(|| e.lines().find(|l| l.starts_with("error")))?;
+    let norm: String = line.chars().map(|c| if c.is_ascii_digit() { '#' } else { c }).collect();
+    Some(norm.chars().take(160).collect())
 }
 
 fn now_secs() -> u64 {
@@ -261,6 +274,9 @@ impl Fuzzer<'_> {
             self.version.lines().find(|l| l.starts_with("release:")).unwrap_or("release: ?").trim_start_matches("release: ")
         );
         std::fs::write(dir.join("repro.cfg"), meta).unwrap();
+        if let Some(sig) = crash_signature(bad.1) {
+            std::fs::write(dir.join("signature.txt"), sig).unwrap();
+        }
         eprintln!("  {} {kind} `{}` vs `{}` -> {}", if is_known { "~~ (known)" } else { "!!" }, base.0.name, bad.0.name, dir.display());
         dir
     }
@@ -300,7 +316,10 @@ impl Fuzzer<'_> {
         let lines = a.source.lines().count();
         let outs = par_map(&self.o.configs, self.o.jobs, |c| self.eval(&a, c));
         let keys: Vec<String> = outs.iter().map(Outcome::key).collect();
-        let diverging: Vec<usize> = (1..outs.len()).filter(|&i| keys[i] != keys[0]).collect();
+        // Baseline = first configuration that compiled and ran. If e.g. O0 crashes the compiler, the
+        // others are still compared with each other and O0 is reported as a compile failure.
+        let b = outs.iter().position(|o| matches!(o, Outcome::Ran { .. })).unwrap_or(0);
+        let diverging: Vec<usize> = (0..outs.len()).filter(|&i| i != b && keys[i] != keys[b]).collect();
         eprintln!(
             "[{}] seed {batch_seed}: {} cases ({} dropped as invalid), {lines} lines, check {:.1}s, total {:.1}s, divergent configs: {}",
             s.name,
@@ -325,8 +344,14 @@ impl Fuzzer<'_> {
             if self.findings >= self.o.max_findings {
                 return;
             }
-            let (base, bad) = (&self.o.configs[0], &self.o.configs[i]);
-            if let (Outcome::Ran { stdout: x, .. }, Outcome::Ran { stdout: y, .. }) = (&outs[0], &outs[i]) {
+            let (base, bad) = (&self.o.configs[b], &self.o.configs[i]);
+            if let Some(sig) = crash_signature(&outs[i]) {
+                if !self.seen_crashes.insert((bad.name.clone(), sig.clone())) {
+                    eprintln!("  (same crash as before under `{}`: {sig})", bad.name);
+                    continue;
+                }
+            }
+            if let (Outcome::Ran { stdout: x, .. }, Outcome::Ran { stdout: y, .. }) = (&outs[b], &outs[i]) {
                 let (lx, ly) = (parse_lines(x), parse_lines(y));
                 let ids: BTreeSet<usize> = lx.keys().chain(ly.keys()).copied().filter(|k| lx.get(k) != ly.get(k)).collect();
                 if let Some((_, dir)) = handled.iter().find(|(h, _)| !ids.is_empty() && ids.is_subset(h)) {
@@ -334,14 +359,14 @@ impl Fuzzer<'_> {
                     continue;
                 }
             }
-            let min = self.minimize(&cases, base, bad, &outs[0], &outs[i]);
+            let min = self.minimize(&cases, base, bad, &outs[b], &outs[i]);
             let ids: BTreeSet<usize> = min.iter().map(|c| c.id).collect();
             if let Some((_, dir)) = handled.iter().find(|(h, _)| *h == ids) {
                 append_config(dir, &bad.name);
                 continue;
             }
             // re-evaluate the minimised set to record what each side really did
-            let (bo, xo) = self.diverges(&min, base, bad).unwrap_or_else(|| (outs[0].clone(), outs[i].clone()));
+            let (bo, xo) = self.diverges(&min, base, bad).unwrap_or_else(|| (outs[b].clone(), outs[i].clone()));
             let kind = match (&bo, &xo) {
                 (Outcome::Ran { .. }, Outcome::Ran { .. }) => "MISCOMPILE candidate",
                 (_, Outcome::CompileFail(_)) | (_, Outcome::CompileTimeout) => "compile failure/hang",
@@ -367,7 +392,7 @@ pub fn run(o: &Opts) -> i32 {
     eprintln!("configs: {}", o.configs.iter().map(|c| c.name.as_str()).collect::<Vec<_>>().join(", "));
     let work = o.out.join("work");
     std::fs::create_dir_all(&work).unwrap();
-    let mut f = Fuzzer { o, version, work, findings: 0, known: 0 };
+    let mut f = Fuzzer { o, version, work, findings: 0, known: 0, seen_crashes: BTreeSet::new() };
     let start = Instant::now();
     let mut round = 0u64;
     loop {

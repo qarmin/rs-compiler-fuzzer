@@ -80,7 +80,7 @@ generator. Before reporting upstream, verify the reproducer is UB-free (Miri) an
   `toolchains`, `seed`): one job per *(toolchain, strategy)* - by default nightly and stable x 9 strategies.
   Batches are 25k-150k lines depending on how expensive a strategy is to compile (`--scale` changes that).
   Each job runs the canaries, fuzzes, prints reports into the log, uploads artifacts, and zips every
-  **new** finding into the **`Nightly` release** (`<toolchain>__<strategy>_<config>_<n>__<hash>.zip`).
+  **new** finding into the **`Nightly` release** (`<toolchain>__<strategy>__<config>__<hash>.zip`; the hash is of the crash signature for compiler crashes, otherwise of the reproducer, so reruns replace instead of piling up).
   Findings that match a known upstream bug (`// known-bug:` marker in the generator) go to `known/` and
   do not fail the job.
 - `verify.yml` (daily, or manual): downloads the zips from the `Nightly` release, re-runs each
