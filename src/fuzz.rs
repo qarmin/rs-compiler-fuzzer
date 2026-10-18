@@ -15,7 +15,10 @@ pub struct Opts {
     pub seed: u64,
     pub duration: Option<Duration>,
     pub rounds: Option<u64>,
-    pub target_lines: usize,
+    /// Fixed batch size for every strategy; `None` = per-strategy default.
+    pub target_lines: Option<usize>,
+    /// Percentage applied to the batch size (100 = as is).
+    pub scale: usize,
     pub strategies: Vec<&'static Strategy>,
     pub out: PathBuf,
     pub jobs: usize,
@@ -249,6 +252,15 @@ impl Fuzzer<'_> {
         }
         let _ = writeln!(r, "\nBefore reporting upstream: check the case is free of UB (e.g. run it under Miri) and shrink it by hand; the `*-checks` configs and `PANIC` lines can also indicate a generator bug rather than a compiler bug.");
         std::fs::write(dir.join("report.md"), r).unwrap();
+        let meta = format!(
+            "strategy={strategy}\nbase_name={}\nbase_flags={}\nbad_name={}\nbad_flags={}\nbatch_seed={batch_seed}\ntoolchain={}\n",
+            base.0.name,
+            base.0.flags.join(" "),
+            bad.0.name,
+            bad.0.flags.join(" "),
+            self.version.lines().find(|l| l.starts_with("release:")).unwrap_or("release: ?").trim_start_matches("release: ")
+        );
+        std::fs::write(dir.join("repro.cfg"), meta).unwrap();
         eprintln!("  {} {kind} `{}` vs `{}` -> {}", if is_known { "~~ (known)" } else { "!!" }, base.0.name, bad.0.name, dir.display());
         dir
     }
@@ -367,7 +379,8 @@ pub fn run(o: &Opts) -> i32 {
                 break;
             }
             let batch_seed = Rng::mix(o.seed, round * 1000 + si as u64);
-            let cases = generate_batch(s, batch_seed, o.target_lines);
+            let lines = o.target_lines.unwrap_or(s.lines) * o.scale / 100;
+            let cases = generate_batch(s, batch_seed, lines.max(200));
             f.process_batch(s, batch_seed, cases);
         }
         round += 1;
@@ -421,6 +434,57 @@ pub fn canary(o: &Opts) -> i32 {
         eprintln!("canary: NO known bug reproduced - all fixed on this toolchain, or the detector is broken");
         1
     }
+}
+
+/// Re-run stored findings (dirs with `case.rs` + `repro.cfg`) on the current toolchain.
+/// Prints `STILL <dir>` / `FIXED <dir>` / `SKIP <dir>` and writes `fixed.txt` into `report_dir`.
+pub fn verify(o: &Opts, root: &Path, report_dir: &Path) -> i32 {
+    let mut dirs: Vec<PathBuf> = match std::fs::read_dir(root) {
+        Ok(rd) => rd.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.join("case.rs").exists() && p.join("repro.cfg").exists()).collect(),
+        Err(e) => {
+            eprintln!("cannot read {}: {e}", root.display());
+            return 1;
+        }
+    };
+    dirs.sort();
+    let work = o.out.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::create_dir_all(report_dir).unwrap();
+    let (mut still, mut fixed) = (Vec::new(), Vec::new());
+    let jobs = o.jobs;
+    let results = par_map(&dirs, jobs, |d| {
+        let meta: std::collections::HashMap<String, String> = std::fs::read_to_string(d.join("repro.cfg"))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| l.split_once('=').map(|(k, v)| (k.to_string(), v.to_string())))
+            .collect();
+        let get = |k: &str| meta.get(k).cloned().unwrap_or_default();
+        let base = Config::new(&get("base_name"), &get("base_flags"));
+        let bad = Config::new(&get("bad_name"), &get("bad_flags"));
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let src = d.join("case.rs");
+        let r: Vec<Outcome> = [&base, &bad]
+            .iter()
+            .enumerate()
+            .map(|(i, c)| build_and_run(&o.rustc, &src, &work.join(format!("v{}_{n}_{i}", std::process::id())), c, &o.limits))
+            .collect();
+        (r[0].key() != r[1].key(), r[0].describe(), r[1].describe(), get("bad_name"))
+    });
+    for (d, (diverges, b, x, badname)) in dirs.iter().zip(results) {
+        let name = d.file_name().unwrap().to_string_lossy().to_string();
+        if diverges {
+            eprintln!("STILL {name} [{badname}] baseline: {b}; bad: {x}");
+            still.push(name);
+        } else {
+            eprintln!("FIXED {name} [{badname}]");
+            fixed.push(name);
+        }
+    }
+    let _ = std::fs::write(report_dir.join("fixed.txt"), fixed.join("\n"));
+    let _ = std::fs::write(report_dir.join("still.txt"), still.join("\n"));
+    eprintln!("verify: {} still reproduce, {} fixed/not reproducing", still.len(), fixed.len());
+    let _ = std::fs::remove_dir_all(&work);
+    0
 }
 
 pub fn strategies_by_name(names: &str) -> Result<Vec<&'static Strategy>, String> {
