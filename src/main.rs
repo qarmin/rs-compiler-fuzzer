@@ -27,7 +27,7 @@ OPTIONS:
   --seed N              base seed (default: time based, printed at start)
   --duration SECS       stop starting new batches after this many seconds
   --rounds N            number of rounds (each round = one batch per strategy)
-  --target-lines N      lines per batch file for every strategy (default: per strategy, 25k-150k)
+  --target-lines N      lines per batch file for every strategy (default: per strategy, 8k-150k)
   --scale PERCENT       multiply the batch size, e.g. 50 or 300 (default 100)
   --strategies a,b|all  strategies to use (default all)
   --out DIR             output directory for findings (default fuzz-out)
@@ -40,6 +40,8 @@ OPTIONS:
   --max-findings N      stop after N findings (default 10)
   --minimize-budget N   max extra compilations spent shrinking one finding (default 40)
   --fail-on-known       exit 2 also for findings that match a known upstream bug
+  --batch-seed N        reproduce one batch: the `seed N` printed in the logs (with --strategies X --target-lines L --rounds 1)
+  --timeouts-are-findings  report compile timeouts as findings (default: log only)
 gen only:
   --strategy NAME       strategy to generate (required)
   --case-seed N         generate the single case with this seed
@@ -73,6 +75,8 @@ fn main() {
     let mut max_findings = 10usize;
     let mut minimize_budget = 40usize;
     let mut fail_on_known = false;
+    let mut timeouts_are_findings = false;
+    let mut batch_seed: Option<u64> = None;
     let mut strategy: Option<String> = None;
     let mut case_seed: Option<u64> = None;
     let mut gen_out: Option<PathBuf> = None;
@@ -107,6 +111,8 @@ fn main() {
             "--max-findings" => max_findings = num(val()) as usize,
             "--minimize-budget" => minimize_budget = num(val()) as usize,
             "--fail-on-known" => fail_on_known = true,
+            "--timeouts-are-findings" => timeouts_are_findings = true,
+            "--batch-seed" => batch_seed = Some(num(val())),
             "--strategy" => strategy = Some(val()),
             "--case-seed" => case_seed = Some(num(val())),
             "-h" | "--help" => {
@@ -183,6 +189,8 @@ fn main() {
                 max_findings,
                 minimize_budget,
                 fail_on_known,
+                timeouts_are_findings,
+                batch_seed,
             };
             let code = match cmd.as_str() {
                 "fuzz" => fuzz::run(&opts),

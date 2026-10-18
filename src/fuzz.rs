@@ -29,6 +29,11 @@ pub struct Opts {
     pub minimize_budget: usize,
     /// Count findings that match a known upstream bug (`// known-bug:` marker) towards the exit code.
     pub fail_on_known: bool,
+    /// Report compile timeouts as findings (default: only log them - big batches under LTO can
+    /// legitimately be slow, and a timeout cannot be attributed to a case).
+    pub timeouts_are_findings: bool,
+    /// Use exactly this batch seed (the `seed N` printed in the logs) instead of deriving one.
+    pub batch_seed: Option<u64>,
 }
 
 /// Configurations that must agree for any UB-free program. The first one is the baseline.
@@ -319,7 +324,16 @@ impl Fuzzer<'_> {
         // Baseline = first configuration that compiled and ran. If e.g. O0 crashes the compiler, the
         // others are still compared with each other and O0 is reported as a compile failure.
         let b = outs.iter().position(|o| matches!(o, Outcome::Ran { .. })).unwrap_or(0);
-        let diverging: Vec<usize> = (0..outs.len()).filter(|&i| i != b && keys[i] != keys[b]).collect();
+        let diverging: Vec<usize> = (0..outs.len())
+            .filter(|&i| i != b && keys[i] != keys[b])
+            .filter(|&i| {
+                let skip = matches!(outs[i], Outcome::CompileTimeout) && !self.o.timeouts_are_findings;
+                if skip {
+                    eprintln!("  (compile of `{}` timed out - inconclusive, not reported; use --timeouts-are-findings)", self.o.configs[i].name);
+                }
+                !skip
+            })
+            .collect();
         eprintln!(
             "[{}] seed {batch_seed}: {} cases ({} dropped as invalid), {lines} lines, check {:.1}s, total {:.1}s, divergent configs: {}",
             s.name,
@@ -332,7 +346,8 @@ impl Fuzzer<'_> {
         let _ = total_cases;
 
         if diverging.is_empty() {
-            if matches!(outs[0], Outcome::CompileFail(_) | Outcome::CompileTimeout | Outcome::RunTimeout) {
+            let all_same = keys.iter().all(|k| *k == keys[0]);
+            if all_same && (matches!(outs[0], Outcome::CompileFail(_) | Outcome::RunTimeout) || (self.o.timeouts_are_findings && matches!(outs[0], Outcome::CompileTimeout))) {
                 let _ = self.write_finding("uniform failure", s.name, &cases, batch_seed, (&self.o.configs[0], &outs[0]), (&self.o.configs[1], &outs[1]));
             }
             return;
@@ -403,7 +418,7 @@ pub fn run(o: &Opts) -> i32 {
             if o.duration.is_some_and(|d| start.elapsed() >= d) || f.findings >= o.max_findings {
                 break;
             }
-            let batch_seed = Rng::mix(o.seed, round * 1000 + si as u64);
+            let batch_seed = o.batch_seed.unwrap_or_else(|| Rng::mix(o.seed, round * 1000 + si as u64));
             let lines = o.target_lines.unwrap_or(s.lines) * o.scale / 100;
             let cases = generate_batch(s, batch_seed, lines.max(200));
             f.process_batch(s, batch_seed, cases);

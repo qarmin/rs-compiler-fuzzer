@@ -78,7 +78,7 @@ generator. Before reporting upstream, verify the reproducer is UB-free (Miri) an
 - `ci.yml` (push/PR): `cargo test` (determinism + every strategy type-checks) and a short smoke run on nightly.
 - `fuzz.yml` (00:00 and 12:00 UTC, or manual dispatch with `duration_minutes`, `scale`, `strategies`,
   `toolchains`, `seed`): one job per *(toolchain, strategy)* - by default nightly and stable x 9 strategies.
-  Batches are 25k-150k lines depending on how expensive a strategy is to compile (`--scale` changes that).
+  Batches are 8k-150k lines depending on how expensive a strategy is to compile, tuned so fat LTO (the slowest config) takes roughly 1-2.5 minutes (`--scale` changes that).
   Each job runs the canaries, fuzzes, prints reports into the log, uploads artifacts, and zips every
   **new** finding into the **`Nightly` release** (`<toolchain>__<strategy>__<config>__<hash>.zip`; the hash is of the crash signature for compiler crashes, otherwise of the reproducer, so reruns replace instead of piling up).
   Findings that match a known upstream bug (`// known-bug:` marker in the generator) go to `known/` and

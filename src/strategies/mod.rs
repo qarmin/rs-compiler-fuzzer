@@ -27,21 +27,21 @@ pub type GenFn = fn(&mut Rng) -> String;
 pub struct Strategy {
     pub name: &'static str,
     pub about: &'static str,
-    /// Default batch size in lines: tuned so one O3 compile of the batch takes roughly 15-60 s.
+    /// Default batch size in lines: tuned so that the slowest configuration (fat LTO) compiles the batch in roughly 60-150 s.
     pub lines: usize,
     pub generate: GenFn,
 }
 
 pub const ALL: &[Strategy] = &[
     Strategy { name: "arith", lines: 40000, about: "typed integer expression trees, inlining variants, loops folding them", generate: arith::generate },
-    Strategy { name: "loops", lines: 25000, about: "iterator chains, slicing loops, nested counters (cf. zxt5's rustc reports)", generate: loops::generate },
+    Strategy { name: "loops", lines: 10000, about: "iterator chains, slicing loops, nested counters (cf. zxt5's rustc reports)", generate: loops::generate },
     Strategy { name: "control", lines: 150000, about: "random structured control flow: labeled blocks, break/continue, bool state machines", generate: control::generate },
-    Strategy { name: "enums", lines: 40000, about: "pattern matching: enum tuples, guards, ranges, bindings, slice patterns (match-tree MIR opts)", generate: enums::generate },
+    Strategy { name: "enums", lines: 30000, about: "pattern matching: enum tuples, guards, ranges, bindings, slice patterns (match-tree MIR opts)", generate: enums::generate },
     Strategy { name: "asyncs", lines: 30000, about: "async fns/blocks on a mini executor: state across await, drop of suspended futures, join", generate: asyncs::generate },
-    Strategy { name: "collections", lines: 30000, about: "VecDeque/BTreeMap/BinaryHeap/String operation sequences", generate: collections::generate },
-    Strategy { name: "borrows", lines: 40000, about: "lifetimes, reborrow chains, split borrows, closures, cursors, interior mutability", generate: borrows::generate },
-    Strategy { name: "memory", lines: 40000, about: "unions, repr(packed), MaybeUninit, raw pointers, niches, provenance round-trips", generate: memory::generate },
-    Strategy { name: "traits", lines: 30000, about: "dyn/generic dispatch, default-vs-override methods, const eval vs runtime, drop order", generate: traits::generate },
+    Strategy { name: "collections", lines: 8000, about: "VecDeque/BTreeMap/BinaryHeap/String operation sequences", generate: collections::generate },
+    Strategy { name: "borrows", lines: 30000, about: "lifetimes, reborrow chains, split borrows, closures, cursors, interior mutability", generate: borrows::generate },
+    Strategy { name: "memory", lines: 25000, about: "unions, repr(packed), MaybeUninit, raw pointers, niches, provenance round-trips", generate: memory::generate },
+    Strategy { name: "traits", lines: 18000, about: "dyn/generic dispatch, default-vs-override methods, const eval vs runtime, drop order", generate: traits::generate },
 ];
 
 /// Not part of `all`: deliberately diverges between `debug-assertions` on/off, so the

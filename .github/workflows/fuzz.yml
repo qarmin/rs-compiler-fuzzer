@@ -12,7 +12,7 @@ on:
         description: "How long each job keeps starting new batches"
         default: "100"
       scale:
-        description: "Batch size in percent of the per-strategy default (25k-150k lines)"
+        description: "Batch size in percent of the per-strategy default (8k-150k lines)"
         default: "100"
       strategies:
         description: "Comma separated strategies"

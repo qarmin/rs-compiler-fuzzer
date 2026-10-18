@@ -3,8 +3,6 @@ name: verify-stored-findings
 # Re-runs every reproducer stored in the `Nightly` release on the current toolchains,
 # so the collection says which problems still exist and which got fixed upstream.
 on:
-  push:
-    branches: [claude/exciting-davinci-svfxni]  # TEMP: test before merge to master
   schedule:
     - cron: "30 6 * * *"
   workflow_dispatch:
