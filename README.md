@@ -30,9 +30,12 @@ generation and orchestration - is written in Rust (std only, no dependencies).
 | `arith` | typed integer expression trees over all int widths incl. 128-bit (wrapping/checked/saturating/overflowing, rotates, shifts, casts, `if`), wrapped in `inline(never/always)` fns and accumulator loops | simple programs; instcombine/GVN/SCCP bugs |
 | `loops` | iterator pipelines (`step_by`, `skip_while`, `scan`, `rev`, `cycle().take`, `try_fold`...), `buf[at..]` after a counter loop, nested `checked_*` loops, `%`/`min` chains, `Vec` op sequences, fixed-size array kernels (auto-vectorisation) | zxt5's reports (#164295, #164498, #164499, #164185...) |
 | `control` | random structured control flow: nested `loop`/`for`/labeled blocks, `break`/`continue 'label`, early `return`, bool state machines, `static mut` traces | #163311, #159618 (SimplifyCfg/EarlyOtherwiseBranch/JumpThreading) |
+| `enums` | pattern matching over enums with data: tuple scrutinees, guards, ranges, `@` bindings, or-patterns, slice patterns | #159618 (EarlyOtherwiseBranch), match-tree MIR opts |
 | `borrows` | reborrow chains through nested structs, views with explicit lifetimes + `split_at_mut`, `Option<Box<Node>>` cursors, closures capturing by ref/mut/move, `Cell`/`RefCell`, two-phase borrows, `mem::{swap,replace,take}` - **all safe code** | #163777, #132898, #160004 (ReferencePropagation/GVN) |
 | `memory` | unions with sibling writes, `repr(packed)` consts/statics, `MaybeUninit` stacks, raw-pointer walks, unaligned reads, niches (`NonZero`, `Option<Box>`), `transmute`, exposed-provenance round trips | #161898, #163782, #164297, #163825, #107975 |
 | `traits` | default-vs-override methods through `dyn`/fn pointers/generics, associated consts, const generics, `const fn` evaluated at compile time **and** runtime, drop-order scenarios (shadowing, temporaries, forget, closures), boxed expression trees with an ownership-consuming simplifier | #163856, const-eval vs codegen |
+| `asyncs` | async fns/blocks on a mini executor: locals and borrows across `.await`, drop guards (also of half-polled futures), nested calls, `join` | coroutine transform, #156008 |
+| `collections` | `VecDeque`/`BTreeMap`/`BinaryHeap`/`String` operation sequences | inlined/monomorphised std code |
 
 Every strategy documents its UB-freedom argument at the top of its file (`src/strategies/*.rs`).
 Rules: wrapping/checked arithmetic only, masked shifts, non-zero divisors, bounded loops, inputs via
@@ -72,13 +75,19 @@ generator. Before reporting upstream, verify the reproducer is UB-free (Miri) an
 
 ## CI
 
-`.github/workflows/fuzz.yml`:
+- `ci.yml` (push/PR): `cargo test` (determinism + every strategy type-checks) and a short smoke run on nightly.
+- `fuzz.yml` (00:00 and 12:00 UTC, or manual dispatch with `duration_minutes`, `scale`, `strategies`,
+  `toolchains`, `seed`): one job per *(toolchain, strategy)* - by default nightly and stable x 9 strategies.
+  Batches are 25k-150k lines depending on how expensive a strategy is to compile (`--scale` changes that).
+  Each job runs the canaries, fuzzes, prints reports into the log, uploads artifacts, and zips every
+  **new** finding into the **`Nightly` release** (`<toolchain>__<strategy>_<config>_<n>__<hash>.zip`).
+  Findings that match a known upstream bug (`// known-bug:` marker in the generator) go to `known/` and
+  do not fail the job.
+- `verify.yml` (daily, or manual): downloads the zips from the `Nightly` release, re-runs each
+  reproducer on the current toolchain (`rs-compiler-fuzzer verify`) and reports which still reproduce
+  and which got fixed. With the `prune` input it deletes the fixed ones from the release.
 
-- `test` job (push/PR): `cargo test` - checks determinism and that every strategy produces code that
-  type-checks.
-- `fuzz` job (matrix: nightly + stable): every 6 h (and on manual dispatch with duration, batch size,
-  seed, strategies as inputs) it builds the fuzzer, runs the canaries, fuzzes, publishes reports in the job
-  summary and uploads `findings`/`generator-bugs` as artifacts. The job fails when something was found.
+Local equivalent of the verify step: `rs-compiler-fuzzer verify --dir unzipped-findings/ --out verify-out`.
 
 ## Reference material
 

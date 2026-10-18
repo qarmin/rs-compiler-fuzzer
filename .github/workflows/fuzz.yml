@@ -16,7 +16,7 @@ on:
         default: "100"
       strategies:
         description: "Comma separated strategies"
-        default: "arith,loops,control,borrows,memory,traits"
+        default: "arith,loops,control,enums,borrows,memory,traits,asyncs,collections"
       toolchains:
         description: "Comma separated toolchains"
         default: "nightly,stable"
@@ -39,7 +39,7 @@ jobs:
     steps:
       - id: m
         env:
-          STRATEGIES: ${{ inputs.strategies || 'arith,loops,control,borrows,memory,traits' }}
+          STRATEGIES: ${{ inputs.strategies || 'arith,loops,control,enums,borrows,memory,traits,asyncs,collections' }}
           TOOLCHAINS: ${{ inputs.toolchains || 'nightly,stable' }}
         run: |
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
