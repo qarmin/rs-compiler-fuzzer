@@ -42,15 +42,16 @@ jobs:
         run: |
           mkdir -p assets cases
           gh release download "$RELEASE" --repo "$GITHUB_REPOSITORY" --pattern "${{ matrix.toolchain }}__*.zip" --dir assets || echo "nothing stored yet"
+          shopt -s nullglob
           for z in assets/*.zip; do unzip -q -o "$z" -d cases; done
-          ls cases | wc -l
+          echo "stored reproducers: $(ls cases | wc -l)"
 
       - name: Verify
         run: |
           ./target/release/rs-compiler-fuzzer verify --rustc "rustc +${{ matrix.toolchain }}" --dir cases --out verify-out 2>&1 | tee verify.log
           {
             echo "### ${{ matrix.toolchain }}: stored reproducers"
-            echo '```'; tail -n +1 verify.log | grep -E '^(STILL|FIXED|verify:)'; echo '```'
+            echo '```'; grep -E '^(STILL|FIXED|verify:)' verify.log || echo '(nothing stored for this toolchain yet)'; echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Prune fixed reproducers
