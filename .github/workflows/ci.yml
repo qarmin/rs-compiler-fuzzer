@@ -31,6 +31,13 @@ jobs:
         run: ./target/release/rs-compiler-fuzzer canary --rustc "rustc +nightly" --configs O0,O3,O3-lto-fat --out fuzz-out
       - name: Fuzz (small batches)
         run: ./target/release/rs-compiler-fuzzer fuzz --rustc "rustc +nightly" --rounds 1 --scale 10 --out fuzz-out
+      - name: Print findings into the log
+        if: always()
+        run: |
+          shopt -s nullglob
+          for d in fuzz-out/findings/*/; do
+            echo "::group::$d"; head -c 5000 "$d/report.md"; echo; awk '/^mod case_/{f=1} f' "$d/case.rs" | head -120; echo "::endgroup::"
+          done
       - uses: actions/upload-artifact@v4
         if: always()
         with:

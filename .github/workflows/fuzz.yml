@@ -119,6 +119,18 @@ jobs:
             gh release upload "$RELEASE" upload/*.zip --clobber --repo "$GITHUB_REPOSITORY"
           fi
 
+      - name: Print findings into the log
+        if: always()
+        run: |
+          shopt -s nullglob
+          for d in fuzz-out/findings/*/ fuzz-out/known/*/; do
+            echo "::group::$d"
+            head -c 5000 "$d/report.md"
+            echo; echo "----- case.rs (first 120 lines) -----"
+            grep -v '^\s*$' "$d/case.rs" | awk '/^mod case_/{f=1} f' | head -120
+            echo "::endgroup::"
+          done
+
       - name: Summarise findings
         if: always()
         run: |
