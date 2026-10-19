@@ -134,4 +134,3 @@ by hand. The `*-checks` configs and `PANIC` lines can also point at a generator 
 
 Open `I-miscompile` issues are the model for what to generate:
 <https://github.com/rust-lang/rust/issues?q=state%3Aopen%20label%3A%22I-miscompile%22>.
-`TODO/` holds the earlier Python prototype the Rust implementation was derived from.

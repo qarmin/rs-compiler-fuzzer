@@ -21,6 +21,8 @@ pub struct TriageOpts {
     pub search: bool,
     pub work: PathBuf,
     pub no_reduce: bool,
+    /// time for the regression-range search (0 = off)
+    pub bisect: Duration,
 }
 
 pub type Cfg = BTreeMap<String, String>;
@@ -58,7 +60,7 @@ pub fn channels() -> Vec<(String, String)> {
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
-enum Repro {
+pub enum Repro {
     Yes,
     No,
     NotApplicable,
@@ -74,7 +76,7 @@ impl Repro {
     }
 }
 
-fn reproduces(rustc: &[String], src: &Path, base: &Config, bad: &Config, sig: &Option<String>, lim: &Limits, work: &Path) -> (Repro, Outcome, Outcome) {
+pub fn reproduces(rustc: &[String], src: &Path, base: &Config, bad: &Config, sig: &Option<String>, lim: &Limits, work: &Path) -> (Repro, Outcome, Outcome) {
     let id = std::process::id();
     let a = build_and_run(rustc, src, &work.join(format!("tri_a_{id}")), base, lim);
     let b = build_and_run(rustc, src, &work.join(format!("tri_b_{id}")), bad, lim);
@@ -321,6 +323,14 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     // 5. upstream search
     let search = if o.search { upstream_search(&reduced, &bad, &sig) } else { Search { note: "NOT PERFORMED (disabled)".into(), ..Default::default() } };
 
+    // 5b. regression range
+    let bis = if !o.bisect.is_zero() && still && m.verdict != "ub" {
+        let yes = |ch: &str| matrix2.iter().any(|m| m.0 == ch && m.2 == Repro::Yes);
+        Some(crate::bisect::bisect(&reduced_path, &base, &bad, &sig, &o.work, o.bisect, yes("stable"), yes("nightly")))
+    } else {
+        None
+    };
+
     // 6. verdict
     let mut blockers: Vec<String> = Vec::new();
     let mut warns: Vec<String> = Vec::new();
@@ -368,6 +378,9 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     for (ch, ver, r) in &matrix2 {
         st.insert(format!("repro.{ch}"), format!("{} ({})", r.word(), ver));
     }
+    if let Some(b) = &bis {
+        st.insert("regression".into(), if b.summary.is_empty() { "unknown".into() } else { b.summary.clone() });
+    }
     st.insert("last_verified".into(), date.clone());
     st.entry("state".into()).or_insert_with(|| "open".into());
     write_cfg(&dir.join("status.cfg"), &st);
@@ -398,6 +411,16 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     if !reduce_log.0.is_empty() {
         let _ = writeln!(md, "### Reduction log\n");
         for l in &reduce_log.0 {
+            let _ = writeln!(md, "- {l}");
+        }
+        let _ = writeln!(md);
+    }
+    if let Some(b) = &bis {
+        let _ = writeln!(md, "### Regression range\n");
+        if b.lines.is_empty() {
+            let _ = writeln!(md, "- not determined");
+        }
+        for l in &b.lines {
             let _ = writeln!(md, "- {l}");
         }
         let _ = writeln!(md);
@@ -437,6 +460,9 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     }
     if !miri_agrees.is_empty() {
         let _ = writeln!(is, "{miri_agrees}.\n");
+    }
+    if let Some(b) = bis.as_ref().filter(|b| !b.summary.is_empty()) {
+        let _ = writeln!(is, "### Regression\n\n{}\n", b.lines.iter().filter(|l| !l.starts_with("note:")).map(|l| format!("- {l}")).collect::<Vec<_>>().join("\n"));
     }
     let _ = writeln!(is, "### Versions\n");
     for (ch, ver, r) in &matrix2 {

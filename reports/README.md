@@ -7,3 +7,5 @@
 | `rustc-oz-arith-divergence.rs` | i32 expression chain gives a different result at `-C opt-level=z` than at `-O0/s/1/2/3` (stable 1.99.1 and nightly 2026-10-17). Found by `arith`, auto-reduced to 43 lines (`triage`: own passes + treereduce-rust), sensitive to unrelated code (inlining/layout dependent). **Verified UB-free with Miri** (Miri's output equals the `-O0` result). Worth hand-reducing and reporting. | not reported |
 
 `tools/reduce.py in.rs out.rs "<flags A>" "<flags B>" <toolchain>` is the greedy line/`let` reducer used to shrink such reproducers (the fuzzer itself only shrinks at case granularity). Check candidates with `cargo +nightly miri run` before reporting.
+
+Regression range of `rustc-oz-arith-divergence.rs` (from `triage --bisect`): first affected stable release **1.99.0** (1.98.0 is fine); first affected nightly **nightly-2026-08-06** (nightly-2026-08-05 is fine) - `cargo bisect-rustc --start 2026-08-05 --end 2026-08-06` pins down the PR.
