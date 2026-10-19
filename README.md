@@ -107,7 +107,7 @@ by hand. The `*-checks` configs and `PANIC` lines can also point at a generator 
 
 - `ci.yml` (PR, push to master): `cargo test` and a short smoke run on nightly (`--profile fast`).
 - `fuzz.yml`:
-  - **push to master**: nightly only, `fast` profile, half-size batches, ~12 minutes - quick feedback;
+  - **push to master**: nightly only, `fast` profile, half-size batches, 1 hour;
   - **00:00 UTC daily**: nightly **and** stable, `full` profile, 2 hours per job (jobs are limited to ~2h50);
   - **manual dispatch**: duration, profile, scale, strategy groups, toolchains, seed are inputs.
   One job per (toolchain, strategy group): 7 groups x 2 toolchains = 14 jobs. Each job runs the canaries,

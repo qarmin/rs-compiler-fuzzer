@@ -4,13 +4,15 @@ name: miri
 # a Miri false positive or a real soundness bug in std/rustc; output differences between Miri and the natively
 # compiled program point at Miri or rustc bugs. Findings are stored in the single package (mode=miri entries).
 on:
+  push:
+    branches: [master]
   schedule:
     - cron: "0 2 * * *"
   workflow_dispatch:
     inputs:
       duration_minutes:
-        description: "Minutes each job keeps starting new batches"
-        default: "60"
+        description: "Minutes each job keeps starting new batches (default 120 on the daily schedule, 60 otherwise)"
+        default: ""
       strategies:
         description: "Strategy groups: groups separated by ';', strategies inside a group by ','"
         default: ""
@@ -76,7 +78,7 @@ jobs:
 
       - name: Run generated programs under Miri
         env:
-          DURATION_MIN: ${{ inputs.duration_minutes || '60' }}
+          DURATION_MIN: ${{ inputs.duration_minutes || (github.event_name == 'schedule' && '120') || '60' }}
           SCALE: ${{ inputs.scale || '100' }}
           SEED: ${{ inputs.seed }}
         run: |

@@ -1,7 +1,7 @@
 name: fuzz
 
 # Differential fuzzing of rustc. One job per (toolchain, strategy group).
-#  - push to master : quick check, nightly only, `fast` profile (no fat/thin LTO, no single-CGU builds), ~12 min
+#  - push to master : quick check, nightly only, `fast` profile (no fat/thin LTO, no single-CGU builds), 1 h
 #  - 00:00 UTC daily: nightly + stable, `full` profile, 2 h of fuzzing per job (GitHub limits a job to ~2h50)
 #  - manual dispatch: everything is configurable
 # New findings are triaged (reproduced on stable/beta/nightly, reduced, Miri-checked, searched on GitHub) and merged into the
@@ -14,7 +14,7 @@ on:
   workflow_dispatch:
     inputs:
       duration_minutes:
-        description: "Minutes each job keeps starting new batches (default 120; 12 on push)"
+        description: "Minutes each job keeps starting new batches (default 120; 60 on push)"
         default: ""
       profile:
         description: "fast = skip the slowest configs, full = everything (default full; fast on push)"
@@ -72,7 +72,7 @@ jobs:
           inc = [{"toolchain": t.strip(), "strategies": g.strip(), "name": g.strip().replace(",", "+")}
                  for t in toolchains.split(",") for g in groups.split(";")]
           print("matrix=" + json.dumps({"include": inc}))
-          print("duration=" + (e["IN_DURATION"] or ("12" if quick else "120")))
+          print("duration=" + (e["IN_DURATION"] or ("60" if quick else "120")))
           print("profile=" + (e["IN_PROFILE"] or ("fast" if quick else "full")))
           print("scale=" + (e["IN_SCALE"] or ("50" if quick else "100")))
           PY
