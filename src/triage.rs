@@ -275,7 +275,7 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     let mut did_reduce = false;
     if let (Some(pc), false) = (&primary, o.no_reduce) {
         if matrix.iter().any(|m| m.2 == Repro::Yes) {
-            let it = Interest { rustc: vec!["rustc".into(), format!("+{pc}")], a: base.clone(), b: bad.clone(), crash_sig: sig.clone(), limits: Limits { compile: Duration::from_secs(120), run: Duration::from_secs(10) }, work: o.work.clone() };
+            let it = Interest { rustc: vec!["rustc".into(), format!("+{pc}")], a: base.clone(), b: bad.clone(), crash_sig: sig.clone(), limits: Limits { compile: Duration::from_secs(120), run: Duration::from_secs(10) }, work: o.work.clone(), cache: Default::default() };
             if it.check(&case) {
                 reduced = reduce_all(&it, &case, o.budget, &mut reduce_log);
                 did_reduce = true;
