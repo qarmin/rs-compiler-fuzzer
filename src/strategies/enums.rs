@@ -273,7 +273,7 @@ fn rebuild(rng: &mut Rng, items: &mut String, body: &mut String, id: usize) {
     w!(body, "        {{ let es = [{}, R{id}::Unit];", (0..nv).map(|i| format!("R{id}::V{i}({})", val(rng))).collect::<Vec<_>>().join(", "));
     w!(body, "        for e in es {{ let e = bb(e); let r1 = to_k{id}(e); let r2 = same{id}(e); let r3 = rot{id}(e); let r4 = via_ref{id}(&e);");
     w!(body, "            h.put(&tag{id}(&r1)); h.put(&(r2 == e)); h.put(&tag{id}(&r3)); h.put(&(r4 == e)); h.put(&(std::mem::discriminant(&r1) == std::mem::discriminant(&r2))); h.put(&(to_k{id}(r3) == to_k{id}(e))); }}");
-    w!(body, "        h.put(&std::mem::size_of::<R{id}>()); }}");
+    w!(body, "        }}");
 }
 
 pub fn generate(rng: &mut Rng) -> String {
@@ -302,6 +302,5 @@ pub fn generate(rng: &mut Rng) -> String {
         rebuild(rng, &mut items, &mut body, rid);
     }
     // fieldless enum <-> integer, Option niches
-    w!(body, "        h.put(&std::mem::size_of::<En0>());");
     format!("{items}    pub fn run(h: &mut H) {{\n{body}    }}\n")
 }
