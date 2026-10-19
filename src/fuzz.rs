@@ -101,6 +101,12 @@ pub fn default_configs(nightly: bool) -> Vec<Config> {
         v.push(Config::new("O2-validate-mir", "-C opt-level=2 -Z validate-mir"));
         v.push(Config::new("O2-inline-mir", "-C opt-level=2 -Z inline-mir=yes -Z inline-mir-threshold=300 -Z inline-mir-hint-threshold=300"));
         v.push(Config::new("O1-randlayout", "-C opt-level=1 -Z randomize-layout"));
+        // MIR passes that are off by default / only at high mir-opt-levels are a rich source of miscompilations
+        // (DestinationPropagation, DataflowConstProp, JumpThreading, EarlyOtherwiseBranch, GVN...). With
+        // opt-level=0 LLVM does not optimise, so a difference there is the MIR passes' doing.
+        let passes = "+DestinationPropagation,+DataflowConstProp,+EarlyOtherwiseBranch,+JumpThreading,+GVN,+ReferencePropagation,+MatchBranchSimplification,+ScalarReplacementOfAggregates,+CopyProp,+Inline";
+        v.push(Config::new("O0-mir-all", &format!("-C opt-level=0 -Z mir-opt-level=3 -Z mir-enable-passes={passes}")));
+        v.push(Config::new("O1-mir-all", &format!("-C opt-level=1 -Z mir-opt-level=3 -Z mir-enable-passes={passes}")));
     }
     v
 }

@@ -18,7 +18,7 @@ Program generation and orchestration are both written in Rust (std only, no depe
    opt-levels 0/1/2/3/s/z, `overflow-checks`+`debug-assertions` on, `target-cpu=native` and
    `x86-64-v2/v3/v4` (only if the CPU can run them), 256 codegen units, FastISel on/off, one codegen unit,
    thin/fat LTO and, on nightly, `-Z mir-opt-level=0/3`, `-Z validate-mir`, `-Z inline-mir`,
-   `-Z randomize-layout`. The baseline is the first configuration that compiled and ran. A compile
+   `-Z randomize-layout` and `O0/O1-mir-all` (explicitly enabling DestinationPropagation, DataflowConstProp, EarlyOtherwiseBranch, JumpThreading, GVN, ReferencePropagation, MatchBranchSimplification, SROA, CopyProp, Inline). The baseline is the first configuration that compiled and ran. A compile
    failure/ICE/crash in only some configurations is a finding too; compile *timeouts* are only logged.
 4. **Minimise.** Because stdout is one line per case, differing lines name the culprit cases directly.
    A ddmin-style loop (bounded by `--minimize-secs`) then shrinks the batch to the cases needed to reproduce.
@@ -58,6 +58,7 @@ the issue reference(s). Add to those when you triage something.
 | `memory` | unions, `repr(packed)`, `MaybeUninit`, raw pointers, unaligned access, niches, provenance round-trips, ZST containers | #161898, #163782, #164297, #107975 |
 | `traits` | `dyn`/generic dispatch, default-vs-override methods, const generics, const eval vs runtime, drop order, expression trees | #163856 |
 | `asyncs` | async fns on a mini executor: state across `.await`, dropping suspended futures, join | #156008 |
+| `generics` | generic fns over a numeric trait monomorphised at all 12 integer types, called directly / via fn pointers / closures, generic structs | MIR inlining and GVN across instantiations |
 | `collections` | `VecDeque`/`BTreeMap`/`BinaryHeap`/`String`, sorting on many lengths/shapes, `DefaultHasher` | std code inlined per opt level |
 | `floats` | IEEE arithmetic, saturating float<->int casts, fma, rounding, formatting/parsing (only operations with fully specified results) | float casts, compiler-builtins |
 | `unwind` | panics (11 kinds), landing pads, drop guards, partially built arrays/vecs, nested `catch_unwind` | #144371 |

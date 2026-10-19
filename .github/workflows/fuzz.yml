@@ -66,7 +66,7 @@ jobs:
           import json, os
           e = os.environ
           quick = e["EVENT"] == "push"
-          groups = e["IN_GROUPS"] or "arith,select;loops;control,recursion;enums,traits;borrows,asyncs;memory,simd,abi;collections,floats,unwind"
+          groups = e["IN_GROUPS"] or "arith,select;loops;control,recursion;enums,traits;borrows,asyncs;memory,simd,abi;collections,floats,unwind,generics"
           toolchains = e["IN_TOOLCHAINS"] or ("nightly" if quick else "nightly,stable")
           inc = [{"toolchain": t.strip(), "strategies": g.strip(), "name": g.strip().replace(",", "+")}
                  for t in toolchains.split(",") for g in groups.split(";")]

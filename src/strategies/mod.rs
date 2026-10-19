@@ -20,6 +20,7 @@ mod collections;
 mod control;
 mod enums;
 mod floats;
+mod generics;
 mod loops;
 mod memory;
 mod recursion;
@@ -51,6 +52,7 @@ pub const ALL: &[Strategy] = &[
     Strategy { name: "unwind", lines: 14000, about: "panics, landing pads, drop guards, partially built arrays/vecs, catch_unwind", generate: unwind::generate },
     Strategy { name: "abi", lines: 50000, about: "extern C/sysv64/win64 calls: many arg/ret kinds, fn pointers, values live across cross-ABI calls (#144371, #163911)", generate: abi::generate },
     Strategy { name: "simd", lines: 40000, about: "x86-64 SSE2/SSE4/AVX2 intrinsic chains, BMI2 pdep/pext (runtime-detected)", generate: simd::generate },
+    Strategy { name: "generics", lines: 40000, about: "generic fns over a numeric trait monomorphised at all 12 integer types, via fn pointers/closures", generate: generics::generate },
     Strategy { name: "borrows", lines: 30000, about: "lifetimes, reborrow chains, split borrows, closures, cursors, interior mutability", generate: borrows::generate },
     Strategy { name: "memory", lines: 25000, about: "unions, repr(packed), MaybeUninit, raw pointers, niches, provenance round-trips", generate: memory::generate },
     Strategy { name: "traits", lines: 18000, about: "dyn/generic dispatch, default-vs-override methods, const eval vs runtime, drop order", generate: traits::generate },
