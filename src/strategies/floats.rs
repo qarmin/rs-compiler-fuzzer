@@ -109,7 +109,9 @@ pub fn generate(rng: &mut Rng) -> String {
         w!(body, "        let mut acc: {ty} = bb({}); for i in 0..bb({}u32) {{ let x = i as {ty}; acc = {step}; }} h.put(&{cv}(acc));", flit(rng, ty), rng.range(2, 40));
         // arrays: sum / sort by total_cmp / extremes
         w!(body, "        let mut arr: Vec<{ty}> = (0..bb({}u32)).map(|i| (i as {ty}) * {} - {}).collect();", rng.range(0, 30), flit(rng, ty), flit(rng, ty));
-        w!(body, "        h.put(&{cv}(arr.iter().copied().sum::<{ty}>())); arr.sort_by(|a, b| a.total_cmp(b)); h.put(&arr.iter().map(|x| {cv}(*x) as u64).fold(0u64, |a, b| a.rotate_left(5) ^ b));");
+        // NaN sign/payload is unspecified (hardware gives -NaN for 0*inf, Miri a different one): order NaNs as 1.0
+        let sg = if ty == "f64" { "sg64" } else { "sg32" };
+        w!(body, "        h.put(&{cv}(arr.iter().copied().sum::<{ty}>())); arr.sort_by(|a, b| {sg}(*a).total_cmp(&{sg}(*b))); h.put(&arr.iter().map(|x| {cv}(*x) as u64).fold(0u64, |a, b| a.rotate_left(5) ^ b));");
         // int -> float conversions of edge values
         let it = *rng.pick(&all_ints());
         w!(body, "        h.put(&{cv}(bb({}) as {ty})); h.put(&{cv}(({}) as {ty} / bb({})));", lit(rng, it), lit(rng, it), flit(rng, ty).replace("NAN", "EPSILON"));

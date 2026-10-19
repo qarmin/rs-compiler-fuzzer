@@ -7,6 +7,8 @@ mod batch;
 mod fuzz;
 mod rng;
 mod reduce;
+mod bisect;
+mod miri;
 mod pack;
 mod runner;
 mod triage;
@@ -24,8 +26,9 @@ USAGE:
   rs-compiler-fuzzer gen    [options]   only print a generated batch (or one case) to stdout / --out FILE
   rs-compiler-fuzzer canary [options]   check the detector against a known miscompilation
   rs-compiler-fuzzer verify --dir DIR   re-run stored findings (case.rs + repro.cfg); writes fixed.txt/still.txt to --out
+  rs-compiler-fuzzer miri               run generated programs under Miri (UB reports = generator/Miri/std bugs; Miri-vs-native differences); same options as fuzz
   rs-compiler-fuzzer triage --dir DIR   reproduce on all channels, reduce, Miri-check, search GitHub, write STATUS.md/ISSUE.md/verdict
-                            (--dirs ROOT: every finding below ROOT; --budget SECS reduction time per finding; --no-search; --no-reduce; --limit N)
+                            (--bisect SECS: find the first stable release / nightly that has the bug; --dirs ROOT: every finding below ROOT; --budget SECS reduction time per finding; --no-search; --no-reduce; --limit N)
   rs-compiler-fuzzer pack --pkg DIR     merge finding directories (--add DIR, repeatable) into an unpacked package, rebuild INDEX.md
                             (--toolchain NAME records where they were found; --contains KEYS_FILE checks that keys are present)
   rs-compiler-fuzzer interesting --cfg FILE --file F   oracle for external reducers (exit 0 = still interesting)
@@ -92,6 +95,7 @@ fn main() {
     let mut no_search = false;
     let mut no_reduce = false;
     let mut limit = 8usize;
+    let mut bisect_secs = 0u64;
     let mut dirs_root: Option<PathBuf> = None;
     let mut cfg_file: Option<PathBuf> = None;
     let mut file_arg: Option<PathBuf> = None;
@@ -140,6 +144,7 @@ fn main() {
             "--budget" => budget = num(val()),
             "--no-search" => no_search = true,
             "--no-reduce" => no_reduce = true,
+            "--bisect" => bisect_secs = num(val()),
             "--limit" => limit = num(val()) as usize,
             "--dirs" => dirs_root = Some(PathBuf::from(val())),
             "--cfg" => cfg_file = Some(PathBuf::from(val())),
@@ -196,7 +201,7 @@ fn main() {
             if targets.is_empty() {
                 die("triage needs --dir DIR or --dirs ROOT");
             }
-            let o = triage::TriageOpts { budget: Duration::from_secs(budget), search: !no_search, work: out.join("work"), no_reduce };
+            let o = triage::TriageOpts { budget: Duration::from_secs(budget), search: !no_search, work: out.join("work"), no_reduce, bisect: Duration::from_secs(bisect_secs) };
             let mut worst = 0;
             for (i, d) in targets.iter().take(limit).enumerate() {
                 eprintln!("[{}/{}] triage {}", i + 1, targets.len().min(limit), d.display());
@@ -230,7 +235,7 @@ fn main() {
                 None => print!("{src}"),
             }
         }
-        "fuzz" | "canary" | "verify" => {
+        "fuzz" | "canary" | "verify" | "miri" => {
             let version = fuzz::rustc_version(&rustc_argv);
             let mut configs = fuzz::default_configs(fuzz::is_nightly(&version));
             configs.extend(extra);
@@ -277,6 +282,7 @@ fn main() {
             let code = match cmd.as_str() {
                 "fuzz" => fuzz::run(&opts),
                 "canary" => fuzz::canary(&opts),
+                "miri" => miri::run(&opts),
                 _ => {
                     let dir = dir_arg.unwrap_or_else(|| die("verify needs --dir"));
                     let report = opts.out.clone();

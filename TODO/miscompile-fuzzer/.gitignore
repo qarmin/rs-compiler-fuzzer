@@ -1,6 +1,0 @@
-corpus/
-findings/
-corpus_static/
-findings_static/
-__pycache__/
-*.pyc

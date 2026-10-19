@@ -1,0 +1,115 @@
+name: miri
+
+# Runs generated programs under Miri. They are meant to be UB-free, so a report is either a generator bug,
+# a Miri false positive or a real soundness bug in std/rustc; output differences between Miri and the natively
+# compiled program point at Miri or rustc bugs. Findings are stored in the single package (mode=miri entries).
+on:
+  schedule:
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+    inputs:
+      duration_minutes:
+        description: "Minutes each job keeps starting new batches"
+        default: "60"
+      strategies:
+        description: "Strategy groups: groups separated by ';', strategies inside a group by ','"
+        default: ""
+      scale:
+        description: "Batch size in percent (Miri batches are capped to 2500 lines at 100)"
+        default: "100"
+      seed:
+        description: "Seed (empty = time based)"
+        default: ""
+
+permissions:
+  contents: write
+
+concurrency:
+  group: miri-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RELEASE: Nightly
+
+jobs:
+  plan:
+    runs-on: ubuntu-26.04
+    outputs:
+      matrix: ${{ steps.m.outputs.matrix }}
+    steps:
+      - id: m
+        env:
+          IN_GROUPS: ${{ inputs.strategies }}
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os
+          groups = os.environ["IN_GROUPS"] or "arith,select,loops;control,recursion,floats;enums,traits,generics;borrows,asyncs,unwind;memory,abi,collections"  # simd is left out: Miri reports no AVX/SSE4 CPU features, so the feature-gated kernels are skipped and differ from native
+          print("matrix=" + json.dumps({"include": [{"strategies": g.strip(), "name": g.strip().replace(",", "+")} for g in groups.split(";")]}))
+          PY
+
+  prepare:
+    runs-on: ubuntu-26.04
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$RELEASE" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create "$RELEASE" --repo "$GITHUB_REPOSITORY" --prerelease --title "$RELEASE" --notes "Storage for rs-compiler-fuzzer (findings.zip)."
+
+  miri:
+    name: miri (${{ matrix.name }})
+    needs: [plan, prepare]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 170
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Toolchains
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup toolchain install nightly --profile minimal --component miri,rust-src
+          cargo +nightly miri setup
+      - run: cargo +stable build --release
+
+      - name: Run generated programs under Miri
+        env:
+          DURATION_MIN: ${{ inputs.duration_minutes || '60' }}
+          SCALE: ${{ inputs.scale || '100' }}
+          SEED: ${{ inputs.seed }}
+        run: |
+          seed_arg=(); [ -n "$SEED" ] && seed_arg=(--seed "$SEED")
+          ./target/release/rs-compiler-fuzzer miri --rustc "rustc +nightly" \
+            --duration $((DURATION_MIN * 60)) --scale "$SCALE" --strategies "${{ matrix.strategies }}" \
+            --out fuzz-out "${seed_arg[@]}" || echo "miri findings: exit $?"
+
+      - name: Print findings
+        if: always()
+        run: |
+          shopt -s nullglob
+          for d in fuzz-out/miri/*/; do
+            echo "::group::$d"; head -c 6000 "$d/report.md"; echo; echo "----- case.rs (head) -----"; awk '/^mod case_/{f=1} f' "$d/case.rs" | head -80; echo "::endgroup::"
+            { echo "<details><summary>$(basename "$d")</summary>"; echo; head -c 4000 "$d/report.md"; echo "</details>"; } >> "$GITHUB_STEP_SUMMARY"
+          done
+
+      - name: Store findings in the single package
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TOOLCHAIN: nightly
+        run: |
+          [ -d fuzz-out/miri ] && ls fuzz-out/miri | grep -q . || { echo "nothing to store"; exit 0; }
+          export BIN=$PWD/target/release/rs-compiler-fuzzer KEYS_FILE=$PWD/stored-keys.txt ADD_DIRS="fuzz-out/miri"
+          tools/release_sync.sh tools/store_mutator.sh
+
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: miri-${{ matrix.name }}
+          path: |
+            fuzz-out/miri
+            stored-keys.txt
+          if-no-files-found: ignore
+          retention-days: 14

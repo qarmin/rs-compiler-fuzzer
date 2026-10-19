@@ -146,14 +146,14 @@ jobs:
       - name: Triage new findings (reproduce on every channel, reduce, Miri, search GitHub)
         if: always()
         continue-on-error: true
-        timeout-minutes: 40
+        timeout-minutes: 75
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           shopt -s nullglob
           bin=./target/release/rs-compiler-fuzzer
-          [ -d fuzz-out/findings ] && $bin triage --dirs fuzz-out/findings --limit 6 --budget 420 --out triage-out
-          [ -d fuzz-out/triaged ] && $bin triage --dirs fuzz-out/triaged --limit 4 --budget 300 --out triage-out
+          [ -d fuzz-out/findings ] && $bin triage --dirs fuzz-out/findings --limit 6 --budget 420 --bisect 600 --out triage-out
+          [ -d fuzz-out/triaged ] && $bin triage --dirs fuzz-out/triaged --limit 4 --budget 300 --bisect 480 --out triage-out
           true
 
       - name: Store findings in the single package (release asset findings.zip)

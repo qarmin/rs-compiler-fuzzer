@@ -153,7 +153,7 @@ pub fn generate_batch(s: &Strategy, batch_seed: u64, target_lines: usize) -> Vec
 }
 
 /// Case ids whose line span is mentioned in rustc diagnostics (`--> file:LINE:COL`).
-fn blamed_cases(stderr: &str, a: &Assembled, work: Option<&Path>) -> BTreeSet<usize> {
+pub fn blamed_cases(stderr: &str, a: &Assembled, work: Option<&Path>) -> BTreeSet<usize> {
     let mut out = BTreeSet::new();
     for l in stderr.lines() {
         let t = l.trim_start();
@@ -666,7 +666,11 @@ pub fn canary(o: &Opts) -> i32 {
 /// Prints `STILL <dir>` / `FIXED <dir>` / `SKIP <dir>` and writes `fixed.txt` into `report_dir`.
 pub fn verify(o: &Opts, root: &Path, report_dir: &Path, label: &str) -> i32 {
     let mut dirs: Vec<PathBuf> = match std::fs::read_dir(root) {
-        Ok(rd) => rd.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.join("case.rs").exists() && p.join("repro.cfg").exists()).collect(),
+        Ok(rd) => rd.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.join("case.rs").exists() && p.join("repro.cfg").exists() && !std::fs::read_to_string(p.join("repro.cfg")).unwrap_or_default().contains("mode=miri")).collect(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!("verify: nothing stored yet ({} does not exist)", root.display());
+            return 0;
+        }
         Err(e) => {
             eprintln!("cannot read {}: {e}", root.display());
             return 1;
