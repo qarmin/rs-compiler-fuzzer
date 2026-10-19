@@ -257,12 +257,37 @@ fn array_kernel(rng: &mut Rng, items: &mut String, body: &mut String, id: usize)
     w!(body, "        let mut c = [bb({}); {n}]; kernel_{id}(&a, &b, &mut c); h.put(&c); }}", lit(rng, ty));
 }
 
+/// Accumulator loop with a `match k % M`, `is_power_of_two`, `rem_euclid` and `matches!` ranges,
+/// the shape of rust-lang/rust#164298 (i128 accumulator crashing LLVM with AVX2 / x86-64-v3).
+fn score_loop(rng: &mut Rng, items: &mut String, body: &mut String, id: usize) {
+    let acc = *rng.pick(&["i128", "u128", "i64", "u64", "isize", "i32"]);
+    let m = rng.range(3, 9);
+    let (r1, r2) = (rng.below(m), rng.below(m));
+    let a = rng.below(30);
+    let b = a + rng.below(20);
+    let init = if acc.starts_with('i') { "-1" } else { "1" };
+    let c = rng.below(60);
+    w!(items, "    #[inline(never)]\n    fn sc{id}(count: u16, seed: u8, q: i8) -> {acc} {{");
+    w!(items, "        let mut score: {acc} = {init};");
+    w!(items, "        for k in 0..(count as usize).min({}) {{", rng.range(8, 24));
+    w!(items, "            match k % {m} {{");
+    w!(items, "                {r1} => {{ if (k as u16).is_power_of_two() {{ match (q.rem_euclid({}), matches!(count, {a}..={b} | {c})) {{ (0, true) => {{}} _ => score = score.wrapping_add(k as {acc}).wrapping_add((q as i8 as {acc})) }} }} }}", rng.range(2, 5));
+    w!(items, "                {r2} if r_ok{id}(seed, k) => score = score.wrapping_mul(3).wrapping_sub(seed as {acc}),");
+    w!(items, "                _ => score = score.wrapping_add(seed as {acc} + {}),", rng.below(2000));
+    w!(items, "            }}");
+    w!(items, "        }}");
+    w!(items, "        score\n    }}");
+    w!(items, "    fn r_ok{id}(seed: u8, k: usize) -> bool {{ (seed as usize + k) % 3 != 1 }}");
+    w!(body, "        for count in [0u16, 1, 5, 9, 17, 19, 21, 26, 27, 100] {{ for (seed, q) in [(0u8, 0i8), (7, -3), (255, 127), (128, -128)] {{ h.put(&sc{id}(bb(count), bb(seed), bb(q))); }} }}");
+}
+
 pub fn generate(rng: &mut Rng) -> String {
     let mut items = String::new();
     let mut body = String::new();
     let parts = rng.range(2, 5);
     for id in 0..parts {
-        match rng.below(10) {
+        match rng.below(12) {
+            10 | 11 => score_loop(rng, &mut items, &mut body, id),
             0..=3 => iter_chain(rng, &mut body),
             4 | 5 => at_loop(rng, &mut items, &mut body, id),
             6 | 7 => nested_checked(rng, &mut items, &mut body, id),

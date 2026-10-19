@@ -33,10 +33,12 @@ OPTIONS:
   --out DIR             output directory for findings (default fuzz-out)
   --jobs N              configurations compiled in parallel (default: cores/2)
   --rustc \"CMD\"         rustc command, e.g. \"rustc +nightly\" (default: rustc)
+  --profile fast|full   fast = skip the slowest configs (fat/thin LTO, one codegen unit); default full
   --configs a,b,c       use only these named configurations (first = baseline)
   --config NAME=FLAGS   add a custom configuration (repeatable)
   --compile-timeout S   per-compilation timeout (default 900)
   --run-timeout S       per-execution timeout (default 60)
+  --minimize-secs N     wall-clock budget for shrinking one finding (default 1500)
   --max-findings N      stop after N findings (default 10)
   --minimize-budget N   max extra compilations spent shrinking one finding (default 40)
   --fail-on-known       exit 2 also for findings that match a known upstream bug
@@ -77,6 +79,8 @@ fn main() {
     let mut fail_on_known = false;
     let mut timeouts_are_findings = false;
     let mut batch_seed: Option<u64> = None;
+    let mut profile = "full".to_string();
+    let mut minimize_secs = 1500u64;
     let mut strategy: Option<String> = None;
     let mut case_seed: Option<u64> = None;
     let mut gen_out: Option<PathBuf> = None;
@@ -113,6 +117,8 @@ fn main() {
             "--fail-on-known" => fail_on_known = true,
             "--timeouts-are-findings" => timeouts_are_findings = true,
             "--batch-seed" => batch_seed = Some(num(val())),
+            "--profile" => profile = val(),
+            "--minimize-secs" => minimize_secs = num(val()),
             "--strategy" => strategy = Some(val()),
             "--case-seed" => case_seed = Some(num(val())),
             "-h" | "--help" => {
@@ -137,7 +143,7 @@ fn main() {
             }
             println!("default configurations (nightly adds -Z ones):");
             for c in fuzz::default_configs(true) {
-                println!("  {:<16} {}", c.name, c.flags.join(" "));
+                println!("  {:<16} {}{}", c.name, c.flags.join(" "), if c.slow { "   [slow: not in --profile fast]" } else { "" });
             }
         }
         "gen" => {
@@ -158,6 +164,11 @@ fn main() {
             let version = fuzz::rustc_version(&rustc_argv);
             let mut configs = fuzz::default_configs(fuzz::is_nightly(&version));
             configs.extend(extra);
+            match profile.as_str() {
+                "fast" => configs.retain(|c| !c.slow),
+                "full" => {}
+                other => die(&format!("unknown profile `{other}` (fast|full)")),
+            }
             if let Some(names) = only {
                 let mut picked = Vec::new();
                 for n in &names {
@@ -191,6 +202,7 @@ fn main() {
                 fail_on_known,
                 timeouts_are_findings,
                 batch_seed,
+                minimize_secs,
             };
             let code = match cmd.as_str() {
                 "fuzz" => fuzz::run(&opts),

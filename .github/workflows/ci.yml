@@ -11,18 +11,18 @@ env:
 jobs:
   # Fuzzer builds, generation is deterministic, every strategy emits code that type-checks.
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - run: rustup toolchain install stable --profile minimal && rustup default stable
       - run: cargo test --release
 
   # Short end-to-end run of every strategy on nightly (small batches).
   smoke:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - run: |
           rustup toolchain install stable --profile minimal
           rustup toolchain install nightly --profile minimal
@@ -30,7 +30,7 @@ jobs:
       - name: Canaries (known miscompilations must still be detected)
         run: ./target/release/rs-compiler-fuzzer canary --rustc "rustc +nightly" --configs O0,O3,O3-lto-fat --out fuzz-out
       - name: Fuzz (small batches)
-        run: ./target/release/rs-compiler-fuzzer fuzz --rustc "rustc +nightly" --rounds 1 --scale 10 --out fuzz-out
+        run: ./target/release/rs-compiler-fuzzer fuzz --rustc "rustc +nightly" --rounds 1 --scale 10 --profile fast --out fuzz-out
       - name: Print findings into the log
         if: always()
         run: |
@@ -38,7 +38,7 @@ jobs:
           for d in fuzz-out/findings/*/; do
             echo "::group::$d"; head -c 5000 "$d/report.md"; echo; awk '/^mod case_/{f=1} f' "$d/case.rs" | head -120; echo "::endgroup::"
           done
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         if: always()
         with:
           name: smoke-findings

@@ -105,11 +105,41 @@ fn provenance(rng: &mut Rng, body: &mut String) {
     w!(body, "        let addr = bb(pb).expose_provenance(); let q = std::ptr::with_exposed_provenance_mut::<u8>(addr); unsafe {{ *q.add({}) = bb({}u8); }} h.put(&b); h.put(&unsafe {{ *pa.add(bb({}usize)) }}); }}", rng.below(4), rng.below(256), rng.below(4));
 }
 
+/// Zero-sized types: Vec/iterators/slices/pointers of `()` and `[T; 0]`, `PhantomData`,
+/// `Option<Infallible>`-like niches. Classic source of length/pointer arithmetic bugs.
+fn zst(rng: &mut Rng, items: &mut String, body: &mut String, id: usize) {
+    w!(items, "    #[derive(Clone, Copy, PartialEq, Debug)] struct Z{id};");
+    w!(items, "    struct W{id}<T>(std::marker::PhantomData<T>, u32);");
+    let n = rng.range(0, 40);
+    let pick = rng.below(3);
+    let t: String = ["()".to_string(), format!("Z{id}"), "[u64; 0]".to_string()][pick].clone();
+    let unit: String = ["()".to_string(), format!("Z{id}"), "[0u64; 0]".to_string()][pick].clone();
+    w!(body, "        {{ let mut v: Vec<{t}> = vec![{unit}; bb({n}usize)]; h.put(&v.len()); h.put(&std::mem::size_of::<{t}>()); h.put(&std::mem::size_of::<W{id}<{t}>>());");
+    for _ in 0..rng.range(3, 8) {
+        let op = match rng.below(10) {
+            0 => format!("v.push({unit});"),
+            1 => "h.put(&v.pop().is_some());".to_string(),
+            2 => format!("v.insert(v.len() / 2, {unit});"),
+            3 => "if !v.is_empty() { let i = bb(1usize) % v.len(); v.remove(i); }".to_string(),
+            4 => format!("v.truncate(bb({}usize));", rng.below(30)),
+            5 => format!("h.put(&v.iter().rev().skip({}).count()); h.put(&v.iter().step_by(3).count());", rng.below(10)),
+            6 => "h.put(&v.windows(2).count()); h.put(&v.chunks(3).count());".to_string(),
+            7 => "{ let w: Vec<_> = v.drain(..v.len() / 2).collect(); h.put(&w.len()); }".to_string(),
+            8 => "{ let p = v.as_ptr(); h.put(&(unsafe { p.add(bb(3usize)) } == p)); h.put(&v.as_ptr_range().start.eq(&v.as_ptr_range().end)); }".to_string(),
+            _ => "h.put(&v.iter().zip(v.iter().skip(1)).count()); h.put(&v.split_at(v.len() / 2).0.len());".to_string(),
+        };
+        w!(body, "        {op}");
+    }
+    w!(body, "        let b: Box<[{t}]> = v.clone().into_boxed_slice(); h.put(&b.len()); let r = std::rc::Rc::new({unit}); h.put(&std::rc::Rc::strong_count(&r));");
+    w!(body, "        let arr = [{unit}; 1000]; h.put(&arr.iter().count()); h.put(&std::mem::size_of_val(&arr)); }}");
+}
+
 pub fn generate(rng: &mut Rng) -> String {
     let mut items = String::new();
     let mut body = String::new();
     for id in 0..rng.range(2, 5) {
-        match rng.below(7) {
+        match rng.below(8) {
+            7 => zst(rng, &mut items, &mut body, id),
             0 | 1 => union_siblings(rng, &mut items, &mut body, id),
             2 => packed(rng, &mut items, &mut body, id),
             3 => uninit_stack(rng, &mut items, &mut body, id),

@@ -21,14 +21,14 @@ env:
 
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
         toolchain: [nightly, stable]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - run: |
           rustup toolchain install stable --profile minimal
           rustup toolchain install ${{ matrix.toolchain }} --profile minimal

@@ -1,4 +1,6 @@
 # Substrings of compiler-crash signatures (first LLVM ERROR / ICE / signal line, digits as '#')
 # that are already known. Findings matching one are filed under known/ and do not fail CI.
-# Format: <substring>    (lines starting with # are comments)
-Unable to copy EFLAGS physical register    # LLVM O0 crash on i128 arithmetic, found by this fuzzer: reports/llvm-eflags-o0-crash.rs
+# Format: <substring of the signature> # <comment>   (lines starting with # are comments).
+# A comment containing owner/repo#N references files the finding under known/ with links to those
+# issues; without references it goes to triaged/ (understood here, but not reported upstream yet).
+Unable to copy EFLAGS physical register # UNREPORTED LLVM -O0 crash on i128 arithmetic found by this fuzzer, see reports/llvm-eflags-o0-crash.rs

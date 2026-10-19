@@ -11,11 +11,18 @@ use std::time::{Duration, Instant};
 pub struct Config {
     pub name: String,
     pub flags: Vec<String>,
+    /// Takes much longer to compile than the rest (fat LTO, one codegen unit...); left out by `--profile fast`.
+    pub slow: bool,
 }
 
 impl Config {
     pub fn new(name: &str, flags: &str) -> Config {
-        Config { name: name.to_string(), flags: flags.split_whitespace().map(String::from).collect() }
+        Config { name: name.to_string(), flags: flags.split_whitespace().map(String::from).collect(), slow: false }
+    }
+
+    pub fn slow(mut self) -> Config {
+        self.slow = true;
+        self
     }
 }
 

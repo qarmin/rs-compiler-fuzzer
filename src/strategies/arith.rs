@@ -36,7 +36,12 @@ fn cond(rng: &mut Rng, cx: &Ctx, depth: u32) -> String {
     let a = expr(rng, cx, ty, depth.saturating_sub(1));
     let b = expr(rng, cx, ty, depth.saturating_sub(1));
     let op = *rng.pick(&["<", "<=", ">", ">=", "==", "!="]);
-    let c = format!("{a} {op} {b}");
+    let c = match rng.below(8) {
+        0 => format!("matches!({a}, {})", super::range_pat(rng, ty)),
+        1 => format!("({}..={}).contains(&{a})", lit(rng, ty), lit(rng, ty)),
+        2 => format!("matches!({a}, {} | {} | {})", super::plit(rng, ty), super::plit(rng, ty), super::range_pat(rng, ty)),
+        _ => format!("{a} {op} {b}"),
+    };
     match rng.below(6) {
         0 => format!("!({c})"),
         1 => {
@@ -58,7 +63,7 @@ fn expr(rng: &mut Rng, cx: &Ctx, ty: &'static str, depth: u32) -> String {
     let d = depth - 1;
     let sub = |rng: &mut Rng| expr(rng, cx, ty, d);
     let b = bits(ty);
-    match rng.below(24) {
+    match rng.below(34) {
         0 => format!("{}.wrapping_add({})", sub(rng), sub(rng)),
         1 => format!("{}.wrapping_sub({})", sub(rng), sub(rng)),
         2 => format!("{}.wrapping_mul({})", sub(rng), sub(rng)),
@@ -111,13 +116,49 @@ fn expr(rng: &mut Rng, cx: &Ctx, ty: &'static str, depth: u32) -> String {
             format!("({} as {ty})", expr(rng, cx, other, d))
         }
         22 => format!("(if {} {{ {} }} else {{ {} }})", cond(rng, cx, d), sub(rng), sub(rng)),
-        _ => {
+        23 => {
             if b >= 16 && !signed(ty) {
                 format!("(({} | 1).ilog2() as {ty})", sub(rng))
             } else {
                 format!("{}.wrapping_add({})", sub(rng), sub(rng))
             }
         }
+        24 => format!("({}.abs_diff({}) as {ty})", sub(rng), sub(rng)),
+        25 => {
+            if signed(ty) {
+                match rng.below(4) {
+                    0 => format!("{}.signum()", sub(rng)),
+                    1 => format!("({}.unsigned_abs() as {ty})", sub(rng)),
+                    2 => format!("{}.wrapping_abs()", sub(rng)),
+                    _ => format!("{}.wrapping_rem_euclid({} | 1)", sub(rng), sub(rng)),
+                }
+            } else {
+                match rng.below(5) {
+                    0 => format!("({}.isqrt() as {ty})", sub(rng)),
+                    1 => format!("{}.midpoint({})", sub(rng), sub(rng)),
+                    2 => format!("({}.is_power_of_two() as {ty})", sub(rng)),
+                    3 => format!("{}.checked_next_power_of_two().unwrap_or({})", sub(rng), sub(rng)),
+                    _ => format!("(({} | 1).ilog10() as {ty})", sub(rng)),
+                }
+            }
+        }
+        26 => format!("{}.wrapping_rem_euclid({} | 1)", sub(rng), sub(rng)),
+        27 => format!("{}.wrapping_div_euclid({} | 1)", sub(rng), sub(rng)),
+        28 => match rng.below(3) {
+            0 => format!("({}.leading_ones() as {ty})", sub(rng)),
+            1 => format!("({}.trailing_ones() as {ty})", sub(rng)),
+            _ => format!("({}.count_zeros() as {ty})", sub(rng)),
+        },
+        29 => format!("{}.checked_shl({} as u32).unwrap_or({})", sub(rng), expr(rng, cx, "u8", d), sub(rng)),
+        30 => format!("{}.checked_pow({}).unwrap_or({})", sub(rng), rng.below(5), sub(rng)),
+        31 => match rng.below(4) {
+            0 => format!("{}.saturating_mul({})", sub(rng), sub(rng)),
+            1 => format!("{}.overflowing_shl({} as u32).0", sub(rng), expr(rng, cx, "u8", d)),
+            2 => format!("{}.overflowing_neg().0", sub(rng)),
+            _ => format!("{}.overflowing_pow({}).0", sub(rng), rng.below(6)),
+        },
+        32 => format!("{}.checked_neg().unwrap_or({})", sub(rng), sub(rng)),
+        _ => format!("{}.saturating_pow({})", sub(rng), rng.below(5)),
     }
 }
 
