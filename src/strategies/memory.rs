@@ -134,11 +134,31 @@ fn zst(rng: &mut Rng, items: &mut String, body: &mut String, id: usize) {
     w!(body, "        let arr = [{unit}; 1000]; h.put(&arr.iter().count()); h.put(&std::mem::size_of_val(&arr)); }}");
 }
 
+/// Array/struct equality at many sizes (lowered via `raw_eq`/memcmp, cf. rust-lang/rust#164068) and
+/// `ManuallyDrop` in struct fields moved between functions (SROA, cf. #164176).
+fn eq_and_manual(rng: &mut Rng, items: &mut String, body: &mut String, id: usize) {
+    let tys = ["u8", "u16", "u32", "u64", "i32", "u128"];
+    w!(body, "        {{");
+    for _ in 0..rng.range(3, 7) {
+        let ty = *rng.pick(&tys);
+        let n = *rng.pick(&[1usize, 2, 3, 4, 7, 8, 9, 15, 16, 17, 31, 32, 33, 64, 100]);
+        w!(body, "        {{ let a: [{ty}; {n}] = std::array::from_fn(|i| (i as {ty}).wrapping_mul({}).wrapping_add({}));", super::lit(rng, ty), super::lit(rng, ty));
+        w!(body, "        let mut b = a; let k = bb({}usize) % {n}; h.put(&(a == b)); b[k] = b[k].wrapping_add(bb(1)); h.put(&(a == b)); h.put(&(a != b)); h.put(&(a < b)); h.put(&a.cmp(&b).is_lt());", rng.below(1000));
+        w!(body, "        h.put(&(&a[..] == &b[..])); h.put(&a.iter().eq(b.iter())); let t = (a, k); let u = (b, k); h.put(&(t == u)); }}");
+    }
+    w!(items, "    struct MD{id} {{ v: std::mem::ManuallyDrop<Vec<u32>>, tag: u32, b: std::mem::ManuallyDrop<Box<u64>> }}");
+    w!(items, "    #[inline(never)]\n    fn md_make{id}(n: u32) -> MD{id} {{ MD{id} {{ v: std::mem::ManuallyDrop::new((0..n).collect()), tag: n ^ {}, b: std::mem::ManuallyDrop::new(Box::new(n as u64 * {})) }} }}", rng.below(100), rng.below(50) + 1);
+    w!(items, "    #[inline(never)]\n    fn md_use{id}(mut m: MD{id}, extra: bool) -> u64 {{ let s = m.v.iter().map(|&x| x as u64).sum::<u64>() + **m.b + m.tag as u64; if extra {{ m.v.push(7); }} let r = s + m.v.len() as u64; unsafe {{ std::mem::ManuallyDrop::drop(&mut m.v); std::mem::ManuallyDrop::drop(&mut m.b); }} r }}");
+    w!(body, "        for n in [0u32, 1, 5, bb(9)] {{ let m = md_make{id}(bb(n)); h.put(&md_use{id}(m, bb(n % 2 == 0))); }}");
+    w!(body, "        }}");
+}
+
 pub fn generate(rng: &mut Rng) -> String {
     let mut items = String::new();
     let mut body = String::new();
     for id in 0..rng.range(2, 5) {
-        match rng.below(8) {
+        match rng.below(9) {
+            8 => eq_and_manual(rng, &mut items, &mut body, id),
             7 => zst(rng, &mut items, &mut body, id),
             0 | 1 => union_siblings(rng, &mut items, &mut body, id),
             2 => packed(rng, &mut items, &mut body, id),
