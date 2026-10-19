@@ -5,7 +5,8 @@
 //! copysign, mul_add, comparisons, `total_cmp`, casts). Deliberately NOT used because the result
 //! may legitimately differ between constant folding, vectorisation and libm: `min`/`max` with
 //! signed zeros, `powi`, transcendental functions. NaN payloads/signs are canonicalised before
-//! hashing, so only "is NaN" matters.
+//! hashing (so only "is NaN" matters) and before being used as the sign source of `copysign`
+//! (via a select that maps NaN to 1.0).
 
 use super::{all_ints, lit};
 use crate::rng::Rng;
@@ -54,7 +55,8 @@ fn fexpr(rng: &mut Rng, vars: &[V], ty: &str, depth: u32) -> String {
         10 => format!("{a}.trunc()"),
         11 => format!("{a}.round()"),
         12 => format!("{a}.round_ties_even()"),
-        13 => format!("{a}.copysign({b})"),
+        // the sign bit of a NaN is unspecified (hardware vs constant folding differ): copy signs from canonical values only
+        13 => format!("{a}.copysign({}({b}))", if ty == "f64" { "sg64" } else { "sg32" }),
         14 => format!("{a}.mul_add({b}, {})", fexpr(rng, vars, ty, d)),
         15 => format!("{a}.signum()"),
         16 => format!("(if {a} < {b} {{ {a} }} else {{ {b} }})"),
@@ -76,8 +78,13 @@ fn fexpr(rng: &mut Rng, vars: &[V], ty: &str, depth: u32) -> String {
 
 pub fn generate(rng: &mut Rng) -> String {
     let mut items = String::new();
-    w!(items, "    fn c64(x: f64) -> u64 {{ if x.is_nan() {{ 0x7ff8_0000_0000_0000 }} else {{ x.to_bits() }} }}");
-    w!(items, "    fn c32(x: f32) -> u32 {{ if x.is_nan() {{ 0x7fc0_0000 }} else {{ x.to_bits() }} }}");
+    // NaN -> the integer 1 (not a NaN bit pattern): LLVM folds `select(isnan(x), <qNaN constant>, x)` to `x`
+    // (it treats all NaNs as interchangeable) and the payload/sign then leaks through `to_bits`; see
+    // reports/llvm-select-nan-canonicalisation.rs
+    w!(items, "    fn c64(x: f64) -> u64 {{ if x.is_nan() {{ 1 }} else {{ x.to_bits() }} }}");
+    w!(items, "    fn c32(x: f32) -> u32 {{ if x.is_nan() {{ 1 }} else {{ x.to_bits() }} }}");
+    w!(items, "    fn sg64(x: f64) -> f64 {{ if x.is_nan() {{ 1.0 }} else {{ x }} }}");
+    w!(items, "    fn sg32(x: f32) -> f32 {{ if x.is_nan() {{ 1.0 }} else {{ x }} }}");
     w!(items, "    fn sh(s: &str) -> u64 {{ s.bytes().fold(7u64, |a, b| a.wrapping_mul(131).wrapping_add(b as u64)) }}");
     let mut body = String::new();
     for k in 0..rng.range(2, 5) {
