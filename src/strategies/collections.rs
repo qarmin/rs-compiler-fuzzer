@@ -76,14 +76,48 @@ fn strings(rng: &mut Rng, body: &mut String) {
     w!(body, "        h.put(&s.len()); }}");
 }
 
+/// Sorting/searching on arrays of many lengths and shapes (the std sort implementations switch
+/// algorithms at size thresholds and are heavy generic/unsafe code), plus `DefaultHasher`.
+fn sorting(rng: &mut Rng, items: &mut String, body: &mut String, id: usize) {
+    let ty = *rng.pick(&["u8", "u16", "u32", "u64", "i32", "i64", "u128", "usize"]);
+    w!(items, "    #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)] struct Rec{id} {{ k: {ty}, tag: u8 }}");
+    w!(items, "    fn gen{id}(n: usize, shape: u32, seed: u64) -> Vec<{ty}> {{ let mut s = seed | 1; (0..n).map(|i| {{ s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407); match shape % 6 {{ 0 => (s >> 33) as {ty}, 1 => i as {ty}, 2 => (n - i) as {ty}, 3 => 7 as {ty}, 4 => ((s >> 40) % 4) as {ty}, _ => (i % 17) as {ty} }} }}).collect() }}");
+    w!(body, "        for (n, shape) in [(0usize, 0u32), (1, 1), (2, 2), (5, 0), (10, 4), (20, 1), (21, 2), (32, 5), (33, 0), (64, 3), (100, 4), (257, 0), (500, 5)] {{");
+    w!(body, "            let base = gen{id}(bb(n), bb(shape), bb({}u64));", rng.next_u64());
+    for _ in 0..rng.range(2, 5) {
+        let op = match rng.below(12) {
+            0 => "let mut v = base.clone(); v.sort(); h.put(&v);".to_string(),
+            1 => "let mut v = base.clone(); v.sort_unstable(); h.put(&v);".to_string(),
+            2 => "let mut v = base.clone(); v.sort_by(|a, b| b.cmp(a)); h.put(&v);".to_string(),
+            3 => format!("let mut v = base.clone(); v.sort_by_key(|x| x.wrapping_mul({}) >> 1); h.put(&v);", rng.below(100) | 1),
+            4 => format!("let mut v = base.clone(); v.sort_unstable_by_key(|x| std::cmp::Reverse(x.wrapping_add({}))); h.put(&v);", rng.below(100)),
+            5 => "let mut v = base.clone(); if !v.is_empty() { let k = bb(3usize) % v.len(); let (_, m, _) = v.select_nth_unstable(k); h.put(m); }".to_string(),
+            6 => format!("let mut v = base.clone(); v.sort(); h.put(&v.binary_search(&bb({} as {ty})).unwrap_or_else(|e| e)); h.put(&v.partition_point(|x| *x < {} as {ty}));", rng.below(300), rng.below(300)),
+            7 => "let mut v = base.clone(); v.sort(); v.dedup(); h.put(&v.len()); h.put(&v.is_sorted());".to_string(),
+            8 => format!("let mut r: Vec<Rec{id}> = base.iter().enumerate().map(|(i, &k)| Rec{id} {{ k, tag: (i % 5) as u8 }}).collect(); r.sort(); h.put(&r.iter().map(|x| x.tag as u64).fold(0u64, |a, b| a.rotate_left(3) ^ b)); r.sort_by(|a, b| a.tag.cmp(&b.tag).then(b.k.cmp(&a.k))); h.put(&r.first().map(|x| x.tag));"),
+            9 => "let mut v = base.clone(); v.sort(); let mut w = v.clone(); w.reverse(); w.sort_unstable(); h.put(&(v == w)); h.put(&v.iter().rev().step_by(3).count());".to_string(),
+            10 => "{ use std::hash::{Hash, Hasher}; let mut s = std::collections::hash_map::DefaultHasher::new(); base.hash(&mut s); (n, shape).hash(&mut s); \"k\".hash(&mut s); h.put(&s.finish()); }".to_string(),
+            _ => "let mut v: Vec<String> = base.iter().take(40).map(|x| format!(\"{:x}\", x)).collect(); v.sort(); h.put(&v.join(\",\").len()); h.put(&v.first().map(|s| s.len()));".to_string(),
+        };
+        w!(body, "            {{ {op} }}");
+    }
+    w!(body, "        }}");
+}
+
 pub fn generate(rng: &mut Rng) -> String {
+    let mut items = String::new();
     let mut body = String::new();
+    let mut sid = 0;
     for _ in 0..rng.range(3, 7) {
-        match rng.below(4) {
-            0 | 1 => deque(rng, &mut body),
-            2 => btree(rng, &mut body),
-            _ => strings(rng, &mut body),
+        match rng.below(6) {
+            0 => deque(rng, &mut body),
+            1 => btree(rng, &mut body),
+            2 => strings(rng, &mut body),
+            _ => {
+                sorting(rng, &mut items, &mut body, sid);
+                sid += 1;
+            }
         }
     }
-    format!("    pub fn run(h: &mut H) {{\n{body}    }}\n")
+    format!("{items}    pub fn run(h: &mut H) {{\n{body}    }}\n")
 }

@@ -105,11 +105,61 @@ fn provenance(rng: &mut Rng, body: &mut String) {
     w!(body, "        let addr = bb(pb).expose_provenance(); let q = std::ptr::with_exposed_provenance_mut::<u8>(addr); unsafe {{ *q.add({}) = bb({}u8); }} h.put(&b); h.put(&unsafe {{ *pa.add(bb({}usize)) }}); }}", rng.below(4), rng.below(256), rng.below(4));
 }
 
+/// Zero-sized types: Vec/iterators/slices/pointers of `()` and `[T; 0]`, `PhantomData`,
+/// `Option<Infallible>`-like niches. Classic source of length/pointer arithmetic bugs.
+fn zst(rng: &mut Rng, items: &mut String, body: &mut String, id: usize) {
+    w!(items, "    #[derive(Clone, Copy, PartialEq, Debug)] struct Z{id};");
+    w!(items, "    struct W{id}<T>(std::marker::PhantomData<T>, u32);");
+    let n = rng.range(0, 40);
+    let pick = rng.below(3);
+    let t: String = ["()".to_string(), format!("Z{id}"), "[u64; 0]".to_string()][pick].clone();
+    let unit: String = ["()".to_string(), format!("Z{id}"), "[0u64; 0]".to_string()][pick].clone();
+    w!(body, "        {{ let mut v: Vec<{t}> = vec![{unit}; bb({n}usize)]; h.put(&v.len()); h.put(&std::mem::size_of::<{t}>()); h.put(&std::mem::size_of::<W{id}<{t}>>());");
+    for _ in 0..rng.range(3, 8) {
+        let op = match rng.below(10) {
+            0 => format!("v.push({unit});"),
+            1 => "h.put(&v.pop().is_some());".to_string(),
+            2 => format!("v.insert(v.len() / 2, {unit});"),
+            3 => "if !v.is_empty() { let i = bb(1usize) % v.len(); v.remove(i); }".to_string(),
+            4 => format!("v.truncate(bb({}usize));", rng.below(30)),
+            5 => format!("h.put(&v.iter().rev().skip({}).count()); h.put(&v.iter().step_by(3).count());", rng.below(10)),
+            6 => "h.put(&v.windows(2).count()); h.put(&v.chunks(3).count());".to_string(),
+            7 => "{ let w: Vec<_> = v.drain(..v.len() / 2).collect(); h.put(&w.len()); }".to_string(),
+            8 => "{ let p = v.as_ptr(); h.put(&(unsafe { p.add(bb(3usize)) } == p)); h.put(&v.as_ptr_range().start.eq(&v.as_ptr_range().end)); }".to_string(),
+            _ => "h.put(&v.iter().zip(v.iter().skip(1)).count()); h.put(&v.split_at(v.len() / 2).0.len());".to_string(),
+        };
+        w!(body, "        {op}");
+    }
+    w!(body, "        let b: Box<[{t}]> = v.clone().into_boxed_slice(); h.put(&b.len()); let r = std::rc::Rc::new({unit}); h.put(&std::rc::Rc::strong_count(&r));");
+    w!(body, "        let arr = [{unit}; 1000]; h.put(&arr.iter().count()); h.put(&std::mem::size_of_val(&arr)); }}");
+}
+
+/// Array/struct equality at many sizes (lowered via `raw_eq`/memcmp, cf. rust-lang/rust#164068) and
+/// `ManuallyDrop` in struct fields moved between functions (SROA, cf. #164176).
+fn eq_and_manual(rng: &mut Rng, items: &mut String, body: &mut String, id: usize) {
+    let tys = ["u8", "u16", "u32", "u64", "i32", "u128"];
+    w!(body, "        {{");
+    for _ in 0..rng.range(3, 7) {
+        let ty = *rng.pick(&tys);
+        let n = *rng.pick(&[1usize, 2, 3, 4, 7, 8, 9, 15, 16, 17, 31, 32, 33, 64, 100]);
+        w!(body, "        {{ let a: [{ty}; {n}] = std::array::from_fn(|i| (i as {ty}).wrapping_mul({}).wrapping_add({}));", super::lit(rng, ty), super::lit(rng, ty));
+        w!(body, "        let mut b = a; let k = bb({}usize) % {n}; h.put(&(a == b)); b[k] = b[k].wrapping_add(bb(1)); h.put(&(a == b)); h.put(&(a != b)); h.put(&(a < b)); h.put(&a.cmp(&b).is_lt());", rng.below(1000));
+        w!(body, "        h.put(&(&a[..] == &b[..])); h.put(&a.iter().eq(b.iter())); let t = (a, k); let u = (b, k); h.put(&(t == u)); }}");
+    }
+    w!(items, "    struct MD{id} {{ v: std::mem::ManuallyDrop<Vec<u32>>, tag: u32, b: std::mem::ManuallyDrop<Box<u64>> }}");
+    w!(items, "    #[inline(never)]\n    fn md_make{id}(n: u32) -> MD{id} {{ MD{id} {{ v: std::mem::ManuallyDrop::new((0..n).collect()), tag: n ^ {}, b: std::mem::ManuallyDrop::new(Box::new(n as u64 * {})) }} }}", rng.below(100), rng.below(50) + 1);
+    w!(items, "    #[inline(never)]\n    fn md_use{id}(mut m: MD{id}, extra: bool) -> u64 {{ let s = m.v.iter().map(|&x| x as u64).sum::<u64>() + **m.b + m.tag as u64; if extra {{ m.v.push(7); }} let r = s + m.v.len() as u64; unsafe {{ std::mem::ManuallyDrop::drop(&mut m.v); std::mem::ManuallyDrop::drop(&mut m.b); }} r }}");
+    w!(body, "        for n in [0u32, 1, 5, bb(9)] {{ let m = md_make{id}(bb(n)); h.put(&md_use{id}(m, bb(n % 2 == 0))); }}");
+    w!(body, "        }}");
+}
+
 pub fn generate(rng: &mut Rng) -> String {
     let mut items = String::new();
     let mut body = String::new();
     for id in 0..rng.range(2, 5) {
-        match rng.below(7) {
+        match rng.below(9) {
+            8 => eq_and_manual(rng, &mut items, &mut body, id),
+            7 => zst(rng, &mut items, &mut body, id),
             0 | 1 => union_siblings(rng, &mut items, &mut body, id),
             2 => packed(rng, &mut items, &mut body, id),
             3 => uninit_stack(rng, &mut items, &mut body, id),

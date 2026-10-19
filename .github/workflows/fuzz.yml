@@ -1,25 +1,35 @@
 name: fuzz
 
-# Long-running fuzzing. One job per (toolchain, strategy) so the pool of concurrent
-# runners is used; findings are zipped and stored in the `Nightly` release (see verify.yml).
+# Differential fuzzing of rustc. One job per (toolchain, strategy group).
+#  - push to master : quick check, nightly only, `fast` profile (no fat/thin LTO, no single-CGU builds), ~12 min
+#  - 00:00 UTC daily: nightly + stable, `full` profile, 2 h of fuzzing per job (GitHub limits a job to ~2h50)
+#  - manual dispatch: everything is configurable
+# New findings are triaged (reproduced on stable/beta/nightly, reduced, Miri-checked, searched on GitHub) and merged into the
+# single package `findings.zip` of the `Nightly` release (tools/release_sync.sh; verify.yml keeps it up to date).
 on:
+  push:
+    branches: [master]
   schedule:
     - cron: "0 0 * * *"
-    - cron: "0 12 * * *"
   workflow_dispatch:
     inputs:
       duration_minutes:
-        description: "How long each job keeps starting new batches"
-        default: "100"
+        description: "Minutes each job keeps starting new batches (default 120; 12 on push)"
+        default: ""
+      profile:
+        description: "fast = skip the slowest configs, full = everything (default full; fast on push)"
+        type: choice
+        options: ["", full, fast]
+        default: ""
       scale:
-        description: "Batch size in percent of the per-strategy default (5k-150k lines)"
-        default: "100"
+        description: "Batch size in percent of the per-strategy default (default 100; 50 on push)"
+        default: ""
       strategies:
-        description: "Comma separated strategies"
-        default: "arith,loops,control,enums,borrows,memory,traits,asyncs,collections"
+        description: "Strategy groups: groups separated by ';', strategies inside a group by ','"
+        default: ""
       toolchains:
-        description: "Comma separated toolchains"
-        default: "nightly,stable"
+        description: "Comma separated toolchains (default nightly,stable; nightly on push)"
+        default: ""
       seed:
         description: "Fuzzer seed (empty = time based)"
         default: ""
@@ -27,48 +37,67 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: fuzz-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'push' }}
+
 env:
   CARGO_TERM_COLOR: always
   RELEASE: Nightly
 
 jobs:
   plan:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     outputs:
       matrix: ${{ steps.m.outputs.matrix }}
+      duration: ${{ steps.m.outputs.duration }}
+      profile: ${{ steps.m.outputs.profile }}
+      scale: ${{ steps.m.outputs.scale }}
     steps:
       - id: m
         env:
-          STRATEGIES: ${{ inputs.strategies || 'arith,loops,control,enums,borrows,memory,traits,asyncs,collections' }}
-          TOOLCHAINS: ${{ inputs.toolchains || 'nightly,stable' }}
+          EVENT: ${{ github.event_name }}
+          IN_GROUPS: ${{ inputs.strategies }}
+          IN_TOOLCHAINS: ${{ inputs.toolchains }}
+          IN_PROFILE: ${{ inputs.profile }}
+          IN_DURATION: ${{ inputs.duration_minutes }}
+          IN_SCALE: ${{ inputs.scale }}
         run: |
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
           import json, os
-          inc = [{"toolchain": t.strip(), "strategy": s.strip()}
-                 for t in os.environ["TOOLCHAINS"].split(",") for s in os.environ["STRATEGIES"].split(",")]
+          e = os.environ
+          quick = e["EVENT"] == "push"
+          groups = e["IN_GROUPS"] or "arith,select;loops;control,recursion;enums,traits;borrows,asyncs;memory,simd,abi;collections,floats,unwind,generics"
+          toolchains = e["IN_TOOLCHAINS"] or ("nightly" if quick else "nightly,stable")
+          inc = [{"toolchain": t.strip(), "strategies": g.strip(), "name": g.strip().replace(",", "+")}
+                 for t in toolchains.split(",") for g in groups.split(";")]
           print("matrix=" + json.dumps({"include": inc}))
+          print("duration=" + (e["IN_DURATION"] or ("12" if quick else "120")))
+          print("profile=" + (e["IN_PROFILE"] or ("fast" if quick else "full")))
+          print("scale=" + (e["IN_SCALE"] or ("50" if quick else "100")))
           PY
 
   # Create the storage release once, before the parallel jobs race to upload into it.
   prepare:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release view "$RELEASE" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
             gh release create "$RELEASE" --repo "$GITHUB_REPOSITORY" --prerelease --title "$RELEASE" \
-              --notes "Zipped reproducers found by the fuzzer (<toolchain>__<strategy>__<config>__<hash>.zip). verify.yml re-runs them daily."
+              --notes "Storage for rs-compiler-fuzzer: findings.zip holds every finding (findings/<strategy>__<config>__<hash>/ with STATUS.md, reduced.rs, ISSUE.md ...) and INDEX.md. Updated by fuzz.yml and verify.yml."
 
   fuzz:
+    name: fuzz (${{ matrix.toolchain }}, ${{ matrix.name }})
     needs: [plan, prepare]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 170
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install toolchains (fuzzer is built with stable, the target toolchain is tested)
         run: |
@@ -78,14 +107,27 @@ jobs:
 
       - run: cargo +stable build --release
 
+      - name: Cache cargo binaries
+        uses: actions/cache@v5
+        with:
+          path: ~/.cargo/bin/treereduce-rust
+          key: treereduce-rust-${{ runner.os }}-v1
+
+      - name: Install triage tools (treereduce-rust, other channels, Miri)
+        run: |
+          for c in stable beta nightly; do rustup toolchain install $c --profile minimal; done
+          rustup component add miri rust-src --toolchain nightly || echo "miri unavailable on this nightly"
+          command -v treereduce-rust >/dev/null || cargo +stable install treereduce-rust --locked || echo "treereduce-rust unavailable, using built-in reducer only"
+
       - name: Canaries
         continue-on-error: true
         run: ./target/release/rs-compiler-fuzzer canary --rustc "rustc +${{ matrix.toolchain }}" --configs O0,O3,O3-lto-fat --out fuzz-out
 
       - name: Fuzz
         env:
-          DURATION_MIN: ${{ inputs.duration_minutes || '100' }}
-          SCALE: ${{ inputs.scale || '100' }}
+          DURATION_MIN: ${{ needs.plan.outputs.duration }}
+          PROFILE: ${{ needs.plan.outputs.profile }}
+          SCALE: ${{ needs.plan.outputs.scale }}
           SEED: ${{ inputs.seed }}
         run: |
           seed_arg=()
@@ -93,61 +135,82 @@ jobs:
           ./target/release/rs-compiler-fuzzer fuzz \
             --rustc "rustc +${{ matrix.toolchain }}" \
             --duration $((DURATION_MIN * 60)) \
+            --profile "$PROFILE" \
             --scale "$SCALE" \
-            --strategies "${{ matrix.strategy }}" \
+            --strategies "${{ matrix.strategies }}" \
             --compile-timeout 600 \
             --max-findings 25 \
             --out fuzz-out \
             "${seed_arg[@]}"
 
-      - name: Store new findings in the release
+      - name: Triage new findings (reproduce on every channel, reduce, Miri, search GitHub)
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 40
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          shopt -s nullglob
+          bin=./target/release/rs-compiler-fuzzer
+          [ -d fuzz-out/findings ] && $bin triage --dirs fuzz-out/findings --limit 6 --budget 420 --out triage-out
+          [ -d fuzz-out/triaged ] && $bin triage --dirs fuzz-out/triaged --limit 4 --budget 300 --out triage-out
+          true
+
+      - name: Store findings in the single package (release asset findings.zip)
         if: always()
         env:
           GH_TOKEN: ${{ github.token }}
           TOOLCHAIN: ${{ matrix.toolchain }}
         run: |
-          shopt -s nullglob
-          mkdir -p upload stage
-          for d in fuzz-out/findings/*/; do
-            strategy=$(grep '^strategy=' "$d/repro.cfg" | cut -d= -f2)
-            bad=$(grep '^bad_name=' "$d/repro.cfg" | cut -d= -f2)
-            # same crash / same reproducer => same asset name, so reruns replace instead of piling up
-            if [ -f "$d/signature.txt" ]; then h=$(sha256sum "$d/signature.txt" | cut -c1-10); else h=$(sha256sum "$d/case.rs" | cut -c1-10); fi
-            stem="${TOOLCHAIN}__${strategy}__${bad}__${h}"
-            rm -rf "stage/$stem"; cp -r "$d" "stage/$stem"
-            (cd stage && zip -qr "../upload/${stem}.zip" "$stem")
-          done
-          if compgen -G "upload/*.zip" > /dev/null; then
-            gh release upload "$RELEASE" upload/*.zip --clobber --repo "$GITHUB_REPOSITORY"
-          fi
+          adds=""
+          for d in fuzz-out/findings fuzz-out/triaged; do [ -d "$d" ] && adds="$adds $d"; done
+          if [ -z "$adds" ]; then echo "nothing to store"; exit 0; fi
+          export BIN=$PWD/target/release/rs-compiler-fuzzer KEYS_FILE=$PWD/stored-keys.txt ADD_DIRS="$adds"
+          # the mutator is idempotent: release_sync.sh runs it again if another job updated the package meanwhile
+          tools/release_sync.sh tools/store_mutator.sh
 
       - name: Print findings into the log
         if: always()
         run: |
           shopt -s nullglob
-          for d in fuzz-out/findings/*/ fuzz-out/known/*/; do
-            echo "::group::$d"
+          for d in fuzz-out/findings/*/ fuzz-out/triaged/*/; do
+            echo "::group::NEW/TRIAGED $d"
+            cat "$d/STATUS.md" 2>/dev/null | head -c 6000; echo
             head -c 5000 "$d/report.md"
             echo; echo "----- case.rs (first 120 lines) -----"
             grep -v '^\s*$' "$d/case.rs" | awk '/^mod case_/{f=1} f' | head -120
             echo "::endgroup::"
+          done
+          echo "---- already reported (known) ----"
+          for d in fuzz-out/known/*/; do
+            echo "$d"; sed 's/^/    /' "$d/known-issues.txt"
           done
 
       - name: Summarise findings
         if: always()
         run: |
           shopt -s nullglob
-          for r in fuzz-out/findings/*/report.md; do
-            { echo "<details><summary>$r</summary>"; echo; cat "$r"; echo "</details>"; } >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "### ${{ matrix.toolchain }} / ${{ matrix.name }}"
+            echo "- new: $(ls -d fuzz-out/findings/*/ 2>/dev/null | wc -l), triaged (unreported): $(ls -d fuzz-out/triaged/*/ 2>/dev/null | wc -l), known (already reported): $(ls -d fuzz-out/known/*/ 2>/dev/null | wc -l)"
+          } >> "$GITHUB_STEP_SUMMARY"
+          for d in fuzz-out/known/*/; do
+            echo "- known \`$(basename "$d")\`: $(tr '\n' ' ' < "$d/known-issues.txt")" >> "$GITHUB_STEP_SUMMARY"
+          done
+          for r in fuzz-out/findings/*/ fuzz-out/triaged/*/; do
+            v=$(sed -n 's/^verdict=//p' "$r/status.cfg" 2>/dev/null)
+            { echo "<details><summary>${v:-UNTRIAGED} - $r</summary>"; echo; cat "$r/STATUS.md" 2>/dev/null; echo; cat "$r/report.md"; echo "</details>"; } >> "$GITHUB_STEP_SUMMARY"
           done
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         if: always()
         with:
-          name: findings-${{ matrix.toolchain }}-${{ matrix.strategy }}
+          name: findings-${{ matrix.toolchain }}-${{ matrix.name }}
           path: |
             fuzz-out/findings
+            fuzz-out/triaged
             fuzz-out/known
             fuzz-out/generator-bugs
+            stored-keys.txt
           if-no-files-found: ignore
           retention-days: 14

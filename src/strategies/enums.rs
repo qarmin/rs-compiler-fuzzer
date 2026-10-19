@@ -237,6 +237,45 @@ fn slice_matcher(rng: &mut Rng, id: usize) -> String {
     s
 }
 
+/// Enums whose variants share one payload type, remapped/rebuilt by `match`
+/// (rust-lang/rust#164069 GVN unifying aggregates, #164112/#164135 MatchBranchSimplification and
+/// EarlyOtherwiseBranch widening the read of the scrutinee).
+fn rebuild(rng: &mut Rng, items: &mut String, body: &mut String, id: usize) {
+    let payload = *rng.pick(&["u8", "u16", "u32", "i64", "[u8; 24]", "[u8; 64]", "(u8, u16)"]);
+    let nv = rng.range(2, 4);
+    let repr = *rng.pick(&["", "#[repr(u8)] ", "#[repr(C)] ", "#[repr(u32)] ", "#[repr(C, u8)] "]);
+    let vs: Vec<String> = (0..nv).map(|i| format!("V{i}({payload})")).collect();
+    w!(items, "    {repr}#[derive(Clone, Copy, PartialEq, Debug)] enum R{id} {{ {}, Unit }}", vs.join(", "));
+    let val = |rng: &mut Rng| -> String {
+        match payload {
+            "u8" => format!("{}", rng.below(256)),
+            "u16" => format!("{}", rng.below(65536)),
+            "u32" => format!("{}", rng.next_u64() as u32),
+            "i64" => format!("{}", rng.next_u64() as i64),
+            "[u8; 24]" => format!("[{}; 24]", rng.below(256)),
+            "[u8; 64]" => format!("[{}; 64]", rng.below(256)),
+            _ => format!("({}, {})", rng.below(256), rng.below(65536)),
+        }
+    };
+    let k = rng.below(nv);
+    // remap every payload-carrying variant to variant `k`, keeping the payload
+    let arms: Vec<String> = (0..nv).map(|i| format!("R{id}::V{i}(x)")).collect();
+    w!(items, "    #[inline(never)]\n    fn to_k{id}(e: R{id}) -> R{id} {{ match e {{ {} => R{id}::V{k}(x), R{id}::Unit => R{id}::Unit }} }}", arms.join(" | "));
+    // rebuild identity
+    let rb: Vec<String> = (0..nv).map(|i| format!("R{id}::V{i}(x) => R{id}::V{i}(x)")).collect();
+    w!(items, "    #[inline(never)]\n    fn same{id}(e: R{id}) -> R{id} {{ match e {{ {}, R{id}::Unit => R{id}::Unit }} }}", rb.join(", "));
+    // rotate variants
+    let rot: Vec<String> = (0..nv).map(|i| format!("R{id}::V{i}(x) => R{id}::V{}(x)", (i + 1) % nv)).collect();
+    w!(items, "    fn rot{id}(e: R{id}) -> R{id} {{ match e {{ {}, R{id}::Unit => R{id}::V0({}) }} }}", rot.join(", "), val(rng));
+    // through a reference: copy out only when the variant has a payload
+    w!(items, "    #[inline(never)]\n    fn via_ref{id}(p: &R{id}) -> R{id} {{ match *p {{ R{id}::Unit => R{id}::Unit, _ => *p }} }}");
+    w!(items, "    fn tag{id}(e: &R{id}) -> u8 {{ match e {{ {}, R{id}::Unit => {nv} }} }}", (0..nv).map(|i| format!("R{id}::V{i}(_) => {i}")).collect::<Vec<_>>().join(", "));
+    w!(body, "        {{ let es = [{}, R{id}::Unit];", (0..nv).map(|i| format!("R{id}::V{i}({})", val(rng))).collect::<Vec<_>>().join(", "));
+    w!(body, "        for e in es {{ let e = bb(e); let r1 = to_k{id}(e); let r2 = same{id}(e); let r3 = rot{id}(e); let r4 = via_ref{id}(&e);");
+    w!(body, "            h.put(&tag{id}(&r1)); h.put(&(r2 == e)); h.put(&tag{id}(&r3)); h.put(&(r4 == e)); h.put(&(std::mem::discriminant(&r1) == std::mem::discriminant(&r2))); h.put(&(to_k{id}(r3) == to_k{id}(e))); }}");
+    w!(body, "        }}");
+}
+
 pub fn generate(rng: &mut Rng) -> String {
     let mut items = String::new();
     let mut body = String::new();
@@ -259,7 +298,9 @@ pub fn generate(rng: &mut Rng) -> String {
         items += &slice_matcher(rng, id);
         w!(body, "        for n in 0..8usize {{ let v: Vec<u8> = (0..n).map(|i| (i as u8).wrapping_mul({}).wrapping_add({})).collect(); h.put(&sm{id}(&v, bb({}))); }}", rng.below(9) | 1, rng.below(5), rng.below(255));
     }
+    for rid in 0..rng.range(1, 3) {
+        rebuild(rng, &mut items, &mut body, rid);
+    }
     // fieldless enum <-> integer, Option niches
-    w!(body, "        h.put(&std::mem::size_of::<En0>());");
     format!("{items}    pub fn run(h: &mut H) {{\n{body}    }}\n")
 }

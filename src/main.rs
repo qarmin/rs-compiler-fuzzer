@@ -6,7 +6,10 @@
 mod batch;
 mod fuzz;
 mod rng;
+mod reduce;
+mod pack;
 mod runner;
+mod triage;
 mod strategies;
 
 use runner::{Config, Limits};
@@ -21,6 +24,11 @@ USAGE:
   rs-compiler-fuzzer gen    [options]   only print a generated batch (or one case) to stdout / --out FILE
   rs-compiler-fuzzer canary [options]   check the detector against a known miscompilation
   rs-compiler-fuzzer verify --dir DIR   re-run stored findings (case.rs + repro.cfg); writes fixed.txt/still.txt to --out
+  rs-compiler-fuzzer triage --dir DIR   reproduce on all channels, reduce, Miri-check, search GitHub, write STATUS.md/ISSUE.md/verdict
+                            (--dirs ROOT: every finding below ROOT; --budget SECS reduction time per finding; --no-search; --no-reduce; --limit N)
+  rs-compiler-fuzzer pack --pkg DIR     merge finding directories (--add DIR, repeatable) into an unpacked package, rebuild INDEX.md
+                            (--toolchain NAME records where they were found; --contains KEYS_FILE checks that keys are present)
+  rs-compiler-fuzzer interesting --cfg FILE --file F   oracle for external reducers (exit 0 = still interesting)
   rs-compiler-fuzzer list               list strategies and default configurations
 
 OPTIONS:
@@ -33,10 +41,12 @@ OPTIONS:
   --out DIR             output directory for findings (default fuzz-out)
   --jobs N              configurations compiled in parallel (default: cores/2)
   --rustc \"CMD\"         rustc command, e.g. \"rustc +nightly\" (default: rustc)
+  --profile fast|full   fast = skip the slowest configs (fat/thin LTO, one codegen unit); default full
   --configs a,b,c       use only these named configurations (first = baseline)
   --config NAME=FLAGS   add a custom configuration (repeatable)
   --compile-timeout S   per-compilation timeout (default 900)
   --run-timeout S       per-execution timeout (default 60)
+  --minimize-secs N     wall-clock budget for shrinking one finding (default 1500)
   --max-findings N      stop after N findings (default 10)
   --minimize-budget N   max extra compilations spent shrinking one finding (default 40)
   --fail-on-known       exit 2 also for findings that match a known upstream bug
@@ -62,8 +72,8 @@ fn main() {
     let mut duration = None;
     let mut rounds = None;
     let mut target_lines: Option<usize> = None;
-    let mut scale = 100usize;
     let mut dir_arg: Option<PathBuf> = None;
+    let mut scale = 100usize;
     let mut strategies = "all".to_string();
     let mut out = PathBuf::from("fuzz-out");
     let mut jobs = std::thread::available_parallelism().map(|n| (n.get() / 2).max(1)).unwrap_or(1);
@@ -77,6 +87,19 @@ fn main() {
     let mut fail_on_known = false;
     let mut timeouts_are_findings = false;
     let mut batch_seed: Option<u64> = None;
+    let mut profile = "full".to_string();
+    let mut budget = 900u64;
+    let mut no_search = false;
+    let mut no_reduce = false;
+    let mut limit = 8usize;
+    let mut dirs_root: Option<PathBuf> = None;
+    let mut cfg_file: Option<PathBuf> = None;
+    let mut file_arg: Option<PathBuf> = None;
+    let mut adds: Vec<PathBuf> = Vec::new();
+    let mut pkg: Option<PathBuf> = None;
+    let mut toolchain_name = String::from("unknown");
+    let mut contains: Option<PathBuf> = None;
+    let mut minimize_secs = 1500u64;
     let mut strategy: Option<String> = None;
     let mut case_seed: Option<u64> = None;
     let mut gen_out: Option<PathBuf> = None;
@@ -113,6 +136,19 @@ fn main() {
             "--fail-on-known" => fail_on_known = true,
             "--timeouts-are-findings" => timeouts_are_findings = true,
             "--batch-seed" => batch_seed = Some(num(val())),
+            "--profile" => profile = val(),
+            "--budget" => budget = num(val()),
+            "--no-search" => no_search = true,
+            "--no-reduce" => no_reduce = true,
+            "--limit" => limit = num(val()) as usize,
+            "--dirs" => dirs_root = Some(PathBuf::from(val())),
+            "--cfg" => cfg_file = Some(PathBuf::from(val())),
+            "--file" => file_arg = Some(PathBuf::from(val())),
+            "--add" => adds.push(PathBuf::from(val())),
+            "--pkg" => pkg = Some(PathBuf::from(val())),
+            "--toolchain" => toolchain_name = val(),
+            "--contains" => contains = Some(PathBuf::from(val())),
+            "--minimize-secs" => minimize_secs = num(val()),
             "--strategy" => strategy = Some(val()),
             "--case-seed" => case_seed = Some(num(val())),
             "-h" | "--help" => {
@@ -137,8 +173,48 @@ fn main() {
             }
             println!("default configurations (nightly adds -Z ones):");
             for c in fuzz::default_configs(true) {
-                println!("  {:<16} {}", c.name, c.flags.join(" "));
+                println!("  {:<16} {}{}", c.name, c.flags.join(" "), if c.slow { "   [slow: not in --profile fast]" } else { "" });
             }
+        }
+        "interesting" => {
+            let cfg = cfg_file.unwrap_or_else(|| die("interesting needs --cfg"));
+            let file = file_arg.unwrap_or_else(|| die("interesting needs --file"));
+            let it = reduce::Interest::from_cfg(&std::fs::read_to_string(&cfg).unwrap_or_else(|e| die(&format!("{}: {e}", cfg.display()))));
+            let src = std::fs::read_to_string(&file).unwrap_or_else(|e| die(&format!("{}: {e}", file.display())));
+            std::process::exit(if it.check(&src) { 0 } else { 1 });
+        }
+        "triage" => {
+            let mut targets: Vec<PathBuf> = Vec::new();
+            if let Some(d) = &dir_arg {
+                targets.push(d.clone());
+            }
+            if let Some(root) = &dirs_root {
+                let mut v: Vec<PathBuf> = std::fs::read_dir(root).map(|rd| rd.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.join("case.rs").exists() && p.join("repro.cfg").exists()).collect()).unwrap_or_default();
+                v.sort();
+                targets.extend(v);
+            }
+            if targets.is_empty() {
+                die("triage needs --dir DIR or --dirs ROOT");
+            }
+            let o = triage::TriageOpts { budget: Duration::from_secs(budget), search: !no_search, work: out.join("work"), no_reduce };
+            let mut worst = 0;
+            for (i, d) in targets.iter().take(limit).enumerate() {
+                eprintln!("[{}/{}] triage {}", i + 1, targets.len().min(limit), d.display());
+                match triage::triage(&o, d) {
+                    Ok(s) => eprintln!("    {s}"),
+                    Err(e) => {
+                        eprintln!("    triage failed: {e}");
+                        worst = 1;
+                    }
+                }
+            }
+            let _ = std::fs::remove_dir_all(out.join("work"));
+            std::process::exit(worst);
+        }
+        "pack" => {
+            let pkg = pkg.unwrap_or_else(|| die("pack needs --pkg DIR"));
+            let code = pack::run(&pkg, &adds, &toolchain_name, contains.as_deref());
+            std::process::exit(code);
         }
         "gen" => {
             let name = strategy.unwrap_or_else(|| die("gen needs --strategy"));
@@ -158,6 +234,11 @@ fn main() {
             let version = fuzz::rustc_version(&rustc_argv);
             let mut configs = fuzz::default_configs(fuzz::is_nightly(&version));
             configs.extend(extra);
+            match profile.as_str() {
+                "fast" => configs.retain(|c| !c.slow),
+                "full" => {}
+                other => die(&format!("unknown profile `{other}` (fast|full)")),
+            }
             if let Some(names) = only {
                 let mut picked = Vec::new();
                 for n in &names {
@@ -191,6 +272,7 @@ fn main() {
                 fail_on_known,
                 timeouts_are_findings,
                 batch_seed,
+                minimize_secs,
             };
             let code = match cmd.as_str() {
                 "fuzz" => fuzz::run(&opts),
@@ -198,7 +280,7 @@ fn main() {
                 _ => {
                     let dir = dir_arg.unwrap_or_else(|| die("verify needs --dir"));
                     let report = opts.out.clone();
-                    fuzz::verify(&opts, &dir, &report)
+                    fuzz::verify(&opts, &dir, &report, if toolchain_name == "unknown" { "" } else { &toolchain_name })
                 }
             };
             std::process::exit(code);

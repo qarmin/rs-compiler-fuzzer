@@ -12,15 +12,22 @@
 
 use crate::rng::Rng;
 
+mod abi;
 mod arith;
 mod asyncs;
 mod borrows;
 mod collections;
 mod control;
 mod enums;
+mod floats;
+mod generics;
 mod loops;
 mod memory;
+mod recursion;
+mod select;
+mod simd;
 mod traits;
+mod unwind;
 
 pub type GenFn = fn(&mut Rng) -> String;
 
@@ -39,6 +46,13 @@ pub const ALL: &[Strategy] = &[
     Strategy { name: "enums", lines: 30000, about: "pattern matching: enum tuples, guards, ranges, bindings, slice patterns (match-tree MIR opts)", generate: enums::generate },
     Strategy { name: "asyncs", lines: 30000, about: "async fns/blocks on a mini executor: state across await, drop of suspended futures, join", generate: asyncs::generate },
     Strategy { name: "collections", lines: 5000, about: "VecDeque/BTreeMap/BinaryHeap/String operation sequences", generate: collections::generate },
+    Strategy { name: "select", lines: 40000, about: "structs built by if/else over clamped ints and floats (InstCombine select->min/max, #163728)", generate: select::generate },
+    Strategy { name: "recursion", lines: 18000, about: "recursion combining results with max/min after the call, accumulator and mutual recursion (TailCallElim, #164469)", generate: recursion::generate },
+    Strategy { name: "floats", lines: 6000, about: "IEEE arithmetic, saturating float<->int casts, fma, rounding, formatting/parsing", generate: floats::generate },
+    Strategy { name: "unwind", lines: 14000, about: "panics, landing pads, drop guards, partially built arrays/vecs, catch_unwind", generate: unwind::generate },
+    Strategy { name: "abi", lines: 50000, about: "extern C/sysv64/win64 calls: many arg/ret kinds, fn pointers, values live across cross-ABI calls (#144371, #163911)", generate: abi::generate },
+    Strategy { name: "simd", lines: 40000, about: "x86-64 SSE2/SSE4/AVX2 intrinsic chains, BMI2 pdep/pext (runtime-detected)", generate: simd::generate },
+    Strategy { name: "generics", lines: 40000, about: "generic fns over a numeric trait monomorphised at all 12 integer types, via fn pointers/closures", generate: generics::generate },
     Strategy { name: "borrows", lines: 30000, about: "lifetimes, reborrow chains, split borrows, closures, cursors, interior mutability", generate: borrows::generate },
     Strategy { name: "memory", lines: 25000, about: "unions, repr(packed), MaybeUninit, raw pointers, niches, provenance round-trips", generate: memory::generate },
     Strategy { name: "traits", lines: 18000, about: "dyn/generic dispatch, default-vs-override methods, const eval vs runtime, drop order", generate: traits::generate },
@@ -49,6 +63,10 @@ pub const ALL: &[Strategy] = &[
 pub const SELFTEST: Strategy = Strategy { name: "selftest", lines: 2000, about: "(hidden) injected debug-assertions divergence", generate: selftest };
 
 fn selftest(rng: &mut Rng) -> String {
+    if rng.chance(3) {
+        // fails only at monomorphisation time, i.e. after the cheap type-check pass
+        return "    fn bad<const N: usize>() -> usize { const { assert!(N > 5, \"bad immediate\"); } N }\n    pub fn run(h: &mut H) { h.put(&bad::<3>()); }\n".to_string();
+    }
     let mut s = String::from("    pub fn run(h: &mut H) {\n");
     s += &format!("        h.put(&bb({}u32));\n", rng.below(1000));
     if rng.chance(8) {
@@ -117,5 +135,59 @@ pub fn lit(rng: &mut Rng, ty: &str) -> String {
         }
     } else {
         format!("{masked}{ty}")
+    }
+}
+
+/// Numeric bounds of an integer type as i128 (u128/i128 are clamped to the i128 range, which is
+/// plenty for patterns).
+fn bounds(ty: &str) -> (i128, i128) {
+    let b = bits(ty);
+    if signed(ty) {
+        if b >= 128 { (-i128::MAX, i128::MAX) } else { (-(1i128 << (b - 1)), (1i128 << (b - 1)) - 1) }
+    } else if b >= 128 {
+        (0, i128::MAX)
+    } else {
+        (0, (1i128 << b) - 1)
+    }
+}
+
+fn pat_num(ty: &str, v: i128) -> String {
+    if v < 0 { format!("-{}{ty}", -v) } else { format!("{v}{ty}") }
+}
+
+/// A valid pattern literal (no parentheses around negatives, unlike `lit`).
+pub fn plit(rng: &mut Rng, ty: &str) -> String {
+    let (lo, hi) = bounds(ty);
+    let v = match rng.below(5) {
+        0 => lo,
+        1 => hi,
+        2 => 0.clamp(lo, hi),
+        3 => (rng.below(40) as i128 - 20).clamp(lo, hi),
+        _ => lo + ((rng.next_u64() as i128).unsigned_abs() as i128) % (hi - lo).max(1),
+    };
+    pat_num(ty, v)
+}
+
+/// A valid inclusive/half-open range pattern with `lo <= hi`.
+pub fn range_pat(rng: &mut Rng, ty: &str) -> String {
+    let (min, max) = bounds(ty);
+    let lo = {
+        let spread = (max - min).max(1);
+        match rng.below(4) {
+            0 => min,
+            1 => (rng.below(40) as i128 - 20).clamp(min, max),
+            _ => min + ((rng.next_u64() as i128).unsigned_abs() as i128) % spread,
+        }
+    };
+    let width = match rng.below(3) {
+        0 => rng.below(8) as i128,
+        1 => rng.below(1 << 16) as i128,
+        _ => ((rng.next_u64() >> 1) as i128) << rng.below(30),
+    };
+    let hi = lo.saturating_add(width).min(max);
+    match rng.below(5) {
+        0 => format!("{}..", pat_num(ty, lo)),
+        1 => format!("{}..={}", pat_num(ty, min), pat_num(ty, hi)), // `..=hi` does not parse as a macro `pat`
+        _ => format!("{}..={}", pat_num(ty, lo), pat_num(ty, hi)),
     }
 }

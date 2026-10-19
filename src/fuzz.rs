@@ -3,7 +3,7 @@
 
 use crate::batch::{assemble, Assembled, Case};
 use crate::rng::Rng;
-use crate::runner::{build_and_run, check_only, par_map, rustc_cmd, Config, Limits, Outcome};
+use crate::runner::{crash_signature, build_and_run, check_only, par_map, rustc_cmd, Config, Limits, Outcome};
 use crate::strategies::{Strategy, ALL};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -34,9 +34,37 @@ pub struct Opts {
     pub timeouts_are_findings: bool,
     /// Use exactly this batch seed (the `seed N` printed in the logs) instead of deriving one.
     pub batch_seed: Option<u64>,
+    /// Wall-clock budget for shrinking one finding.
+    pub minimize_secs: u64,
+}
+
+/// Highest x86-64 microarchitecture level the machine can run, so that `-C target-cpu=x86-64-vN`
+/// binaries do not die with SIGILL (which would look like a miscompilation).
+fn cpu_level() -> u8 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let v2 = is_x86_feature_detected!("sse4.2") && is_x86_feature_detected!("popcnt") && is_x86_feature_detected!("ssse3");
+        let v3 = v2
+            && is_x86_feature_detected!("avx2")
+            && is_x86_feature_detected!("bmi1")
+            && is_x86_feature_detected!("bmi2")
+            && is_x86_feature_detected!("fma")
+            && is_x86_feature_detected!("lzcnt")
+            && is_x86_feature_detected!("f16c");
+        let v4 = v3
+            && is_x86_feature_detected!("avx512f")
+            && is_x86_feature_detected!("avx512bw")
+            && is_x86_feature_detected!("avx512cd")
+            && is_x86_feature_detected!("avx512dq")
+            && is_x86_feature_detected!("avx512vl");
+        return if v4 { 4 } else if v3 { 3 } else if v2 { 2 } else { 1 };
+    }
+    #[allow(unreachable_code)]
+    1
 }
 
 /// Configurations that must agree for any UB-free program. The first one is the baseline.
+/// `slow` ones are skipped by `--profile fast`.
 pub fn default_configs(nightly: bool) -> Vec<Config> {
     let mut v = vec![
         Config::new("O0", "-C opt-level=0"),
@@ -45,17 +73,40 @@ pub fn default_configs(nightly: bool) -> Vec<Config> {
         Config::new("O3", "-C opt-level=3"),
         Config::new("Os", "-C opt-level=s"),
         Config::new("Oz", "-C opt-level=z"),
-        Config::new("O3-cgu1", "-C opt-level=3 -C codegen-units=1"),
-        Config::new("O3-lto-fat", "-C opt-level=3 -C lto=fat -C codegen-units=1"),
-        Config::new("O2-native", "-C opt-level=2 -C target-cpu=native"),
         Config::new("O1-checks", "-C opt-level=1 -C overflow-checks=on -C debug-assertions=on"),
         Config::new("O3-checks", "-C opt-level=3 -C overflow-checks=on -C debug-assertions=on"),
+        Config::new("O2-native", "-C opt-level=2 -C target-cpu=native"),
+        Config::new("O3-cgu256", "-C opt-level=3 -C codegen-units=256"),
+        Config::new("O3-fastisel", "-C opt-level=3 -C llvm-args=-fast-isel"),
+        Config::new("O0-sdag", "-C opt-level=0 -C llvm-args=-fast-isel=false"),
     ];
+    let level = cpu_level();
+    if level >= 2 {
+        v.push(Config::new("O3-v2", "-C opt-level=3 -C target-cpu=x86-64-v2"));
+    }
+    if level >= 3 {
+        v.push(Config::new("O3-v3", "-C opt-level=3 -C target-cpu=x86-64-v3"));
+    }
+    if level >= 4 {
+        v.push(Config::new("O3-v4", "-C opt-level=3 -C target-cpu=x86-64-v4"));
+    }
+    v.push(Config::new("O2-cgu1", "-C opt-level=2 -C codegen-units=1").slow());
+    v.push(Config::new("O3-cgu1", "-C opt-level=3 -C codegen-units=1").slow());
+    v.push(Config::new("O3-lto-thin", "-C opt-level=3 -C lto=thin").slow());
+    v.push(Config::new("O3-lto-fat", "-C opt-level=3 -C lto=fat -C codegen-units=1").slow());
     if nightly {
         v.push(Config::new("O3-mir0", "-C opt-level=3 -Z mir-opt-level=0"));
         v.push(Config::new("O3-mir3", "-C opt-level=3 -Z mir-opt-level=3"));
         v.push(Config::new("O0-mir3", "-C opt-level=0 -Z mir-opt-level=3"));
         v.push(Config::new("O2-validate-mir", "-C opt-level=2 -Z validate-mir"));
+        v.push(Config::new("O2-inline-mir", "-C opt-level=2 -Z inline-mir=yes -Z inline-mir-threshold=300 -Z inline-mir-hint-threshold=300"));
+        v.push(Config::new("O1-randlayout", "-C opt-level=1 -Z randomize-layout"));
+        // MIR passes that are off by default / only at high mir-opt-levels are a rich source of miscompilations
+        // (DestinationPropagation, DataflowConstProp, JumpThreading, EarlyOtherwiseBranch, GVN...). With
+        // opt-level=0 LLVM does not optimise, so a difference there is the MIR passes' doing.
+        let passes = "+DestinationPropagation,+DataflowConstProp,+EarlyOtherwiseBranch,+JumpThreading,+GVN,+ReferencePropagation,+MatchBranchSimplification,+ScalarReplacementOfAggregates,+CopyProp,+Inline";
+        v.push(Config::new("O0-mir-all", &format!("-C opt-level=0 -Z mir-opt-level=3 -Z mir-enable-passes={passes}")));
+        v.push(Config::new("O1-mir-all", &format!("-C opt-level=1 -Z mir-opt-level=3 -Z mir-enable-passes={passes}")));
     }
     v
 }
@@ -81,6 +132,9 @@ struct Fuzzer<'a> {
     work: PathBuf,
     findings: usize,
     known: usize,
+    triaged: usize,
+    /// No new work (batches, shrinking) is started after this instant.
+    hard_deadline: Option<Instant>,
     seen_crashes: BTreeSet<(String, String)>,
 }
 
@@ -99,7 +153,7 @@ pub fn generate_batch(s: &Strategy, batch_seed: u64, target_lines: usize) -> Vec
 }
 
 /// Case ids whose line span is mentioned in rustc diagnostics (`--> file:LINE:COL`).
-fn blamed_cases(stderr: &str, a: &Assembled) -> BTreeSet<usize> {
+fn blamed_cases(stderr: &str, a: &Assembled, work: Option<&Path>) -> BTreeSet<usize> {
     let mut out = BTreeSet::new();
     for l in stderr.lines() {
         let t = l.trim_start();
@@ -107,6 +161,10 @@ fn blamed_cases(stderr: &str, a: &Assembled) -> BTreeSet<usize> {
             Some(r) => r,
             None => continue,
         };
+        // only our own file: library/macro-expansion spans carry other paths (and unrelated line numbers)
+        if rest.contains("/rustc/") || rest.contains(".rustup") || work.is_some_and(|w| !rest.contains(&*w.to_string_lossy())) {
+            continue;
+        }
         let mut parts = rest.rsplitn(3, ':');
         let _col = parts.next();
         let line: usize = match parts.next().and_then(|x| x.parse().ok()) {
@@ -133,20 +191,63 @@ fn parse_lines(stdout: &str) -> BTreeMap<usize, String> {
 }
 
 /// Strategies tag snippets that are known to trigger an open upstream bug with
-/// `// known-bug: <reference>`; findings made only of such cases are filed under `known/`.
-fn known_bug(body: &str) -> Option<&str> {
-    let l = body.lines().find(|l| l.contains("// known-bug:"))?;
-    Some(l.split("// known-bug:").nth(1)?.trim())
+/// `// known-bug: <owner/repo#N ...>`; findings made only of such cases are filed under `known/`.
+fn known_bug(body: &str) -> Option<String> {
+    let all: Vec<&str> = body.lines().filter_map(|l| l.split("// known-bug:").nth(1)).map(str::trim).collect();
+    if all.is_empty() { None } else { Some(all.join(" ")) }
 }
 
 const KNOWN_BUGS: &str = include_str!("../known-bugs.txt");
 
-/// Is this crash signature listed in known-bugs.txt?
-fn known_signature(sig: &str) -> Option<&'static str> {
-    KNOWN_BUGS
-        .lines()
-        .map(|l| l.split("    #").next().unwrap_or(l).trim())
-        .find(|l| !l.is_empty() && !l.starts_with('#') && sig.contains(l))
+/// Comment of the known-bugs.txt entry whose pattern occurs in this crash signature.
+/// File format: `<substring of the signature>  # <comment with owner/repo#N references>`.
+fn known_signature(sig: &str) -> Option<String> {
+    KNOWN_BUGS.lines().filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#')).find_map(|l| {
+        let (pat, comment) = l.split_once(" # ").unwrap_or((l, ""));
+        (sig.contains(pat.trim())).then(|| comment.trim().to_string())
+    })
+}
+
+/// `owner/repo#123` references in a text, as (repo, number).
+fn issue_refs(text: &str) -> Vec<(String, u64)> {
+    let b = text.as_bytes();
+    let mut out = Vec::new();
+    for (i, &c) in b.iter().enumerate() {
+        if c != b'#' {
+            continue;
+        }
+        let digits: String = text[i + 1..].chars().take_while(|c| c.is_ascii_digit()).collect();
+        let start = text[..i].rfind(|c: char| !(c.is_ascii_alphanumeric() || "-_./".contains(c))).map_or(0, |p| p + 1);
+        let repo = &text[start..i];
+        if !digits.is_empty() && repo.contains('/') {
+            out.push((repo.to_string(), digits.parse().unwrap_or(0)));
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn issue_url((repo, n): &(String, u64)) -> String {
+    format!("https://github.com/{repo}/issues/{n}")
+}
+
+/// Short, filesystem-friendly tag for directory names: `rust-164297`, `llvm-228829`.
+fn issue_tag((repo, n): &(String, u64)) -> String {
+    let short = match repo.as_str() {
+        "rust-lang/rust" => "rust".to_string(),
+        "llvm/llvm-project" => "llvm".to_string(),
+        other => other.replace('/', "-"),
+    };
+    format!("{short}-{n}")
+}
+
+enum Class {
+    New,
+    /// Matches already filed upstream issues.
+    Known(Vec<(String, u64)>),
+    /// Understood locally but not filed anywhere yet (see `reports/`).
+    Triaged(String),
 }
 
 fn append_config(dir: &Path, cfg: &str) {
@@ -154,18 +255,6 @@ fn append_config(dir: &Path, cfg: &str) {
     if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(dir.join("report.md")) {
         let _ = writeln!(f, "\n- also diverges from the baseline under: `{cfg}`");
     }
-}
-
-/// Stable fingerprint of a compiler crash, so the same crash found again (other batch, other
-/// run) is recognised: the first line naming an LLVM error / ICE / signal, digits normalised.
-fn crash_signature(o: &Outcome) -> Option<String> {
-    let Outcome::CompileFail(e) = o else { return None };
-    let line = e
-        .lines()
-        .find(|l| l.contains("LLVM ERROR") || l.contains("internal compiler error") || l.contains("interrupted by SIG") || l.contains("panicked at") || l.contains("Assertion"))
-        .or_else(|| e.lines().find(|l| l.starts_with("error")))?;
-    let norm: String = line.chars().map(|c| if c.is_ascii_digit() { '#' } else { c }).collect();
-    Some(norm.chars().take(160).collect())
 }
 
 fn now_secs() -> u64 {
@@ -200,7 +289,7 @@ impl Fuzzer<'_> {
         }
     }
 
-    fn minimize(&self, all: &[Case], base: &Config, bad: &Config, base_out: &Outcome, bad_out: &Outcome) -> Vec<Case> {
+    fn minimize(&self, all: &[Case], base: &Config, bad: &Config, base_out: &Outcome, bad_out: &Outcome, deadline: Instant) -> Vec<Case> {
         // Shortcut: stdout lines identify the diverging cases directly.
         let mut cur: Vec<Case> = all.to_vec();
         if let (Outcome::Ran { stdout: x, .. }, Outcome::Ran { stdout: y, .. }) = (base_out, bad_out) {
@@ -219,7 +308,7 @@ impl Fuzzer<'_> {
             let mut i = 0;
             let mut progress = false;
             while i < cur.len() && cur.len() > 1 {
-                if tests >= self.o.minimize_budget {
+                if tests >= self.o.minimize_budget || Instant::now() >= deadline {
                     return cur;
                 }
                 let end = (i + chunk).min(cur.len());
@@ -245,10 +334,9 @@ impl Fuzzer<'_> {
     }
 
     fn write_finding(&mut self, kind: &str, strategy: &str, cases: &[Case], batch_seed: u64, base: (&Config, &Outcome), bad: (&Config, &Outcome)) -> PathBuf {
-        let known: BTreeSet<&str> = cases.iter().filter_map(|c| known_bug(&c.body)).collect();
-        let sig_known = crash_signature(bad.1).and_then(|s| known_signature(&s)).is_some();
         // Known when every case whose output line differs carries a `known-bug` marker (cases kept
-        // only because the bug needs neighbours in the file do not have to).
+        // only because the bug needs neighbours in the file do not have to), or when the crash
+        // signature is listed in known-bugs.txt.
         let differing: BTreeSet<usize> = match (base.1, bad.1) {
             (Outcome::Ran { stdout: x, .. }, Outcome::Ran { stdout: y, .. }) => {
                 let (lx, ly) = (parse_lines(x), parse_lines(y));
@@ -256,20 +344,62 @@ impl Fuzzer<'_> {
             }
             _ => cases.iter().map(|c| c.id).collect(),
         };
-        let marked = |id: usize| cases.iter().any(|c| c.id == id && known_bug(&c.body).is_some());
-        let is_known = sig_known || (!differing.is_empty() && differing.iter().all(|&id| marked(id)));
-        let (bucket, n) = if is_known { self.known += 1; ("known", self.known) } else { self.findings += 1; ("findings", self.findings) };
-        let dir = self.o.out.join(bucket).join(format!("{}_{}_{}_{}", now_secs(), strategy, bad.0.name, n));
+        let marker_of = |id: usize| cases.iter().find(|c| c.id == id).and_then(|c| known_bug(&c.body));
+        let class = if let Some(comment) = crash_signature(bad.1).and_then(|s| known_signature(&s)) {
+            let refs = issue_refs(&comment);
+            if refs.is_empty() { Class::Triaged(comment) } else { Class::Known(refs) }
+        } else if !differing.is_empty() && differing.iter().all(|&id| marker_of(id).is_some()) {
+            let mut refs: Vec<(String, u64)> = differing.iter().filter_map(|&id| marker_of(id)).flat_map(|m| issue_refs(&m)).collect();
+            refs.sort();
+            refs.dedup();
+            if refs.is_empty() { Class::Triaged("marked in the generator".into()) } else { Class::Known(refs) }
+        } else {
+            Class::New
+        };
+        let (bucket, n) = match class {
+            Class::New => {
+                self.findings += 1;
+                ("findings", self.findings)
+            }
+            Class::Known(_) => {
+                self.known += 1;
+                ("known", self.known)
+            }
+            Class::Triaged(_) => {
+                self.triaged += 1;
+                ("triaged", self.triaged)
+            }
+        };
+        let suffix = match &class {
+            Class::Known(refs) => format!("__{}", refs.iter().map(issue_tag).collect::<Vec<_>>().join("+")),
+            Class::Triaged(_) => "__unreported".to_string(),
+            Class::New => String::new(),
+        };
+        let dir = self.o.out.join(bucket).join(format!("{}_{}_{}_{}{suffix}", now_secs(), strategy, bad.0.name, n));
         std::fs::create_dir_all(&dir).unwrap();
         let refs: Vec<&Case> = cases.iter().collect();
         let a = assemble(&refs);
         std::fs::write(dir.join("case.rs"), &a.source).unwrap();
         let mut r = String::new();
         let _ = writeln!(r, "# {kind}: `{}` vs `{}` ({strategy})\n", base.0.name, bad.0.name);
-        if is_known {
-            let _ = writeln!(r, "**Matches a known bug** ({}) - not counted as a new finding.\n", if known.is_empty() { "known-bugs.txt".to_string() } else { known.iter().copied().collect::<Vec<_>>().join(", ") });
+        match &class {
+            Class::Known(refs) => {
+                let _ = writeln!(r, "**Matches already reported issue(s)** - not counted as a new finding:\n");
+                for rf in refs {
+                    let _ = writeln!(r, "- {}", issue_url(rf));
+                }
+                let _ = writeln!(r);
+                std::fs::write(dir.join("known-issues.txt"), refs.iter().map(|rf| issue_url(rf) + "\n").collect::<String>()).unwrap();
+            }
+            Class::Triaged(note) => {
+                let _ = writeln!(r, "**Understood but not reported upstream yet** ({note}) - not counted as a new finding.\n");
+            }
+            Class::New => {}
         }
         let _ = writeln!(r, "- cases kept after minimisation: {}", cases.iter().map(|c| format!("`case_{}` ({}, seed {})", c.id, c.strategy, c.seed)).collect::<Vec<_>>().join(", "));
+        if cases.len() > 25 {
+            let _ = writeln!(r, "- **not minimised** ({} cases kept): the time budget ran out; rerun with `--batch-seed {batch_seed} --strategies {strategy}` and a larger `--minimize-secs`", cases.len());
+        }
         let _ = writeln!(r, "- batch seed: {batch_seed}, fuzzer seed: {}", self.o.seed);
         let _ = writeln!(r, "- regenerate one case: `rs-compiler-fuzzer gen --strategy {strategy} --case-seed <seed>` (seed listed above)\n");
         let _ = writeln!(r, "## Toolchain\n```\n{}\n```\n", self.version.trim());
@@ -303,7 +433,8 @@ impl Fuzzer<'_> {
         if let Some(sig) = crash_signature(bad.1) {
             std::fs::write(dir.join("signature.txt"), sig).unwrap();
         }
-        eprintln!("  {} {kind} `{}` vs `{}` -> {}", if is_known { "~~ (known)" } else { "!!" }, base.0.name, bad.0.name, dir.display());
+        let tag = match &class { Class::New => "!!", Class::Known(_) => "~~ (known)", Class::Triaged(_) => "~~ (unreported, triaged)" };
+        eprintln!("  {tag} {kind} `{}` vs `{}` -> {}", base.0.name, bad.0.name, dir.display());
         dir
     }
 
@@ -323,7 +454,7 @@ impl Fuzzer<'_> {
                 Ok(()) => break,
                 Err(e) => e,
             };
-            let blamed = blamed_cases(&err, &a);
+            let blamed = blamed_cases(&err, &a, Some(&self.work));
             if blamed.is_empty() {
                 eprintln!("  generator error not attributable to a case; aborting batch:\n{}", err.chars().take(1500).collect::<String>());
                 return;
@@ -337,10 +468,29 @@ impl Fuzzer<'_> {
         let t_check = t0.elapsed();
 
         // 2. compile + run under all configurations.
-        let refs: Vec<&Case> = cases.iter().collect();
-        let a = assemble(&refs);
+        // Errors that only show up in codegen (e.g. const-evaluation of a bad intrinsic immediate)
+        // fail every configuration alike: blame the case from the error spans, drop it, try again.
+        let (a, outs) = loop {
+            let refs: Vec<&Case> = cases.iter().collect();
+            let a = assemble(&refs);
+            let outs = par_map(&self.o.configs, self.o.jobs, |c| self.eval(&a, c));
+            if let Outcome::CompileFail(err) = &outs[0] {
+                if outs.iter().all(|o| o.key() == outs[0].key()) && dropped < 40 {
+                    let blamed = blamed_cases(err, &a, Some(&self.work));
+                    if !blamed.is_empty() {
+                        for c in cases.iter().filter(|c| blamed.contains(&c.id)) {
+                            self.save_generator_bug(s.name, c, err);
+                        }
+                        dropped += blamed.len();
+                        cases.retain(|c| !blamed.contains(&c.id));
+                        eprintln!("  late compile error: dropped cases {blamed:?} and recompiling");
+                        continue;
+                    }
+                }
+            }
+            break (a, outs);
+        };
         let lines = a.source.lines().count();
-        let outs = par_map(&self.o.configs, self.o.jobs, |c| self.eval(&a, c));
         let keys: Vec<String> = outs.iter().map(Outcome::key).collect();
         // Baseline = first configuration that compiled and ran. If e.g. O0 crashes the compiler, the
         // others are still compared with each other and O0 is reported as a compile failure.
@@ -395,7 +545,9 @@ impl Fuzzer<'_> {
                     continue;
                 }
             }
-            let min = self.minimize(&cases, base, bad, &outs[b], &outs[i]);
+            let far = Instant::now() + Duration::from_secs(self.o.minimize_secs);
+            let deadline = self.hard_deadline.map_or(far, |h| h.min(far));
+            let min = self.minimize(&cases, base, bad, &outs[b], &outs[i], deadline);
             let ids: BTreeSet<usize> = min.iter().map(|c| c.id).collect();
             if let Some((_, dir)) = handled.iter().find(|(h, _)| *h == ids) {
                 append_config(dir, &bad.name);
@@ -428,29 +580,42 @@ pub fn run(o: &Opts) -> i32 {
     eprintln!("configs: {}", o.configs.iter().map(|c| c.name.as_str()).collect::<Vec<_>>().join(", "));
     let work = o.out.join("work");
     std::fs::create_dir_all(&work).unwrap();
-    let mut f = Fuzzer { o, version, work, findings: 0, known: 0, seen_crashes: BTreeSet::new() };
+    let mut f = Fuzzer { o, version, work, findings: 0, known: 0, triaged: 0, hard_deadline: o.duration.map(|d| Instant::now() + d + Duration::from_secs(30 * 60)), seen_crashes: BTreeSet::new() };
     let start = Instant::now();
     let mut round = 0u64;
+    let mut max_batch = Duration::ZERO;
+    let mut stop = false;
     loop {
         if o.rounds.is_some_and(|r| round >= r) || o.duration.is_some_and(|d| start.elapsed() >= d) {
             break;
         }
         for (si, s) in o.strategies.iter().enumerate() {
-            if o.duration.is_some_and(|d| start.elapsed() >= d) || f.findings >= o.max_findings {
+            if f.findings >= o.max_findings {
+                break;
+            }
+            // Do not start a batch that would probably overrun the time budget.
+            if o.duration.is_some_and(|d| start.elapsed() + max_batch >= d) && max_batch > Duration::ZERO {
+                eprintln!("time budget reached (longest batch so far {:.0}s)", max_batch.as_secs_f32());
+                stop = true;
                 break;
             }
             let batch_seed = o.batch_seed.unwrap_or_else(|| Rng::mix(o.seed, round * 1000 + si as u64));
             let lines = o.target_lines.unwrap_or(s.lines) * o.scale / 100;
+            let t0 = Instant::now();
             let cases = generate_batch(s, batch_seed, lines.max(200));
             f.process_batch(s, batch_seed, cases);
+            max_batch = max_batch.max(t0.elapsed().min(Duration::from_secs(o.limits.compile.as_secs() * 2)));
         }
         round += 1;
+        if stop {
+            break;
+        }
         if f.findings >= o.max_findings {
             eprintln!("max findings reached");
             break;
         }
     }
-    eprintln!("done: {round} rounds in {:.0}s, {} new findings, {} matching known bugs", start.elapsed().as_secs_f32(), f.findings, f.known);
+    eprintln!("done: {round} rounds in {:.0}s, {} new findings, {} matching known issues, {} triaged-unreported", start.elapsed().as_secs_f32(), f.findings, f.known, f.triaged);
     let _ = std::fs::remove_dir_all(&f.work);
     if f.findings > 0 || (o.fail_on_known && f.known > 0) { 2 } else { 0 }
 }
@@ -499,7 +664,7 @@ pub fn canary(o: &Opts) -> i32 {
 
 /// Re-run stored findings (dirs with `case.rs` + `repro.cfg`) on the current toolchain.
 /// Prints `STILL <dir>` / `FIXED <dir>` / `SKIP <dir>` and writes `fixed.txt` into `report_dir`.
-pub fn verify(o: &Opts, root: &Path, report_dir: &Path) -> i32 {
+pub fn verify(o: &Opts, root: &Path, report_dir: &Path, label: &str) -> i32 {
     let mut dirs: Vec<PathBuf> = match std::fs::read_dir(root) {
         Ok(rd) => rd.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.join("case.rs").exists() && p.join("repro.cfg").exists()).collect(),
         Err(e) => {
@@ -523,7 +688,7 @@ pub fn verify(o: &Opts, root: &Path, report_dir: &Path) -> i32 {
         let base = Config::new(&get("base_name"), &get("base_flags"));
         let bad = Config::new(&get("bad_name"), &get("bad_flags"));
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let src = d.join("case.rs");
+        let src = if d.join("reduced.rs").exists() { d.join("reduced.rs") } else { d.join("case.rs") };
         let r: Vec<Outcome> = [&base, &bad]
             .iter()
             .enumerate()
@@ -539,6 +704,22 @@ pub fn verify(o: &Opts, root: &Path, report_dir: &Path) -> i32 {
         } else {
             eprintln!("FIXED {name} [{badname}]");
             fixed.push(name);
+        }
+        // record the result in the finding itself (state is `fixed` only when no verified channel reproduces it)
+        if !label.is_empty() {
+            let path = d.join("status.cfg");
+            let mut st = crate::triage::read_cfg(&path);
+            st.insert(format!("repro.{label}"), if diverges { "yes".into() } else { "no".into() });
+            let date = std::process::Command::new("date").args(["-u", "+%F"]).output().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
+            st.insert("last_verified".into(), date.clone());
+            let any_yes = st.iter().any(|(k, v)| k.starts_with("repro.") && v.starts_with("yes"));
+            let was = st.get("state").cloned().unwrap_or_default();
+            let now = if any_yes { "open" } else { "fixed" };
+            if was != now {
+                st.insert("state".into(), now.into());
+                st.insert("state_changed".into(), date);
+            }
+            crate::triage::write_cfg(&path, &st);
         }
     }
     let _ = std::fs::write(report_dir.join("fixed.txt"), fixed.join("\n"));
@@ -589,7 +770,7 @@ mod tests {
                 let src = dir.join(format!("{}_{seed}.rs", s.name));
                 std::fs::write(&src, &a.source).unwrap();
                 if let Err(e) = check_only(&["rustc".to_string()], &src, &dir, Duration::from_secs(300)) {
-                    let blamed = blamed_cases(&e, &a);
+                    let blamed = blamed_cases(&e, &a, None);
                     panic!("strategy {} seed {} produced invalid code (cases {:?}):\n{}", s.name, 1000 + seed, blamed, e.chars().take(3000).collect::<String>());
                 }
             }

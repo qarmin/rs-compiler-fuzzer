@@ -1,16 +1,12 @@
 name: verify-stored-findings
 
-# Re-runs every reproducer stored in the `Nightly` release on the current toolchains,
-# so the collection says which problems still exist and which got fixed upstream.
+# Re-runs every finding stored in the single package (`findings.zip` of the `Nightly` release) on the current
+# toolchains. The result is written back into the package (status.cfg: repro.<channel>, last_verified,
+# state open/fixed - nothing is deleted), using tools/release_sync.sh so concurrent jobs do not lose updates.
 on:
   schedule:
     - cron: "30 6 * * *"
   workflow_dispatch:
-    inputs:
-      prune:
-        description: "Delete assets that no longer reproduce from the release"
-        type: boolean
-        default: false
 
 permissions:
   contents: write
@@ -21,43 +17,27 @@ env:
 
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
-        toolchain: [nightly, stable]
+        toolchain: [nightly, beta, stable]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - run: |
           rustup toolchain install stable --profile minimal
           rustup toolchain install ${{ matrix.toolchain }} --profile minimal
       - run: cargo +stable build --release
 
-      - name: Download stored reproducers for this toolchain
+      - name: Verify and update the package
         env:
           GH_TOKEN: ${{ github.token }}
+          TOOLCHAIN: ${{ matrix.toolchain }}
         run: |
-          mkdir -p assets cases
-          gh release download "$RELEASE" --repo "$GITHUB_REPOSITORY" --pattern "${{ matrix.toolchain }}__*.zip" --dir assets || echo "nothing stored yet"
-          shopt -s nullglob
-          for z in assets/*.zip; do unzip -q -o "$z" -d cases; done
-          echo "stored reproducers: $(ls cases | wc -l)"
-
-      - name: Verify
-        run: |
-          ./target/release/rs-compiler-fuzzer verify --rustc "rustc +${{ matrix.toolchain }}" --dir cases --out verify-out 2>&1 | tee verify.log
+          export BIN=$PWD/target/release/rs-compiler-fuzzer
+          tools/release_sync.sh tools/verify_mutator.sh
           {
-            echo "### ${{ matrix.toolchain }}: stored reproducers"
-            echo '```'; grep -E '^(STILL|FIXED|verify:)' verify.log || echo '(nothing stored for this toolchain yet)'; echo '```'
+            echo "### ${{ matrix.toolchain }}: stored findings"
+            echo '```'; grep -E '^(STILL|FIXED|verify:)' verify.log || echo '(nothing stored yet)'; echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Prune fixed reproducers
-        if: ${{ inputs.prune }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          [ -f verify-out/fixed.txt ] || exit 0
-          while read -r stem; do
-            [ -n "$stem" ] && gh release delete-asset "$RELEASE" "${stem}.zip" --repo "$GITHUB_REPOSITORY" -y
-          done < verify-out/fixed.txt
