@@ -4,7 +4,8 @@ name: fuzz
 #  - push to master : quick check, nightly only, `fast` profile (no fat/thin LTO, no single-CGU builds), ~12 min
 #  - 00:00 UTC daily: nightly + stable, `full` profile, 2 h of fuzzing per job (GitHub limits a job to ~2h50)
 #  - manual dispatch: everything is configurable
-# New findings are zipped into the `Nightly` release (see verify.yml).
+# New findings are triaged (reproduced on stable/beta/nightly, reduced, Miri-checked, searched on GitHub) and merged into the
+# single package `findings.zip` of the `Nightly` release (tools/release_sync.sh; verify.yml keeps it up to date).
 on:
   push:
     branches: [master]
@@ -85,7 +86,7 @@ jobs:
         run: |
           gh release view "$RELEASE" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
             gh release create "$RELEASE" --repo "$GITHUB_REPOSITORY" --prerelease --title "$RELEASE" \
-              --notes "Zipped reproducers found by the fuzzer (<toolchain>__<strategy>__<config>__<hash>.zip). verify.yml re-runs them daily."
+              --notes "Storage for rs-compiler-fuzzer: findings.zip holds every finding (findings/<strategy>__<config>__<hash>/ with STATUS.md, reduced.rs, ISSUE.md ...) and INDEX.md. Updated by fuzz.yml and verify.yml."
 
   fuzz:
     name: fuzz (${{ matrix.toolchain }}, ${{ matrix.name }})
@@ -105,6 +106,18 @@ jobs:
           rustc +${{ matrix.toolchain }} -vV
 
       - run: cargo +stable build --release
+
+      - name: Cache cargo binaries
+        uses: actions/cache@v5
+        with:
+          path: ~/.cargo/bin/treereduce-rust
+          key: treereduce-rust-${{ runner.os }}-v1
+
+      - name: Install triage tools (treereduce-rust, other channels, Miri)
+        run: |
+          for c in stable beta nightly; do rustup toolchain install $c --profile minimal; done
+          rustup component add miri rust-src --toolchain nightly || echo "miri unavailable on this nightly"
+          command -v treereduce-rust >/dev/null || cargo +stable install treereduce-rust --locked || echo "treereduce-rust unavailable, using built-in reducer only"
 
       - name: Canaries
         continue-on-error: true
@@ -130,28 +143,31 @@ jobs:
             --out fuzz-out \
             "${seed_arg[@]}"
 
-      - name: Store new findings in the release
+      - name: Triage new findings (reproduce on every channel, reduce, Miri, search GitHub)
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 40
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          shopt -s nullglob
+          bin=./target/release/rs-compiler-fuzzer
+          [ -d fuzz-out/findings ] && $bin triage --dirs fuzz-out/findings --limit 6 --budget 420 --out triage-out
+          [ -d fuzz-out/triaged ] && $bin triage --dirs fuzz-out/triaged --limit 4 --budget 300 --out triage-out
+          true
+
+      - name: Store findings in the single package (release asset findings.zip)
         if: always()
         env:
           GH_TOKEN: ${{ github.token }}
           TOOLCHAIN: ${{ matrix.toolchain }}
         run: |
-          shopt -s nullglob
-          mkdir -p upload stage
-          # `findings` = new, `triaged` = understood but not reported upstream; `known` (already reported) is not stored
-          for d in fuzz-out/findings/*/ fuzz-out/triaged/*/; do
-            d=${d%/}
-            strategy=$(grep '^strategy=' "$d/repro.cfg" | cut -d= -f2)
-            bad=$(grep '^bad_name=' "$d/repro.cfg" | cut -d= -f2)
-            # same crash / same reproducer => same asset name, so reruns replace instead of piling up
-            if [ -f "$d/signature.txt" ]; then h=$(sha256sum "$d/signature.txt" | cut -c1-10); else h=$(sha256sum "$d/case.rs" | cut -c1-10); fi
-            stem="${TOOLCHAIN}__${strategy}__${bad}__${h}"
-            rm -rf "stage/$stem"; cp -r "$d" "stage/$stem"
-            (cd stage && zip -qr "../upload/${stem}.zip" "$stem")
-          done
-          if compgen -G "upload/*.zip" > /dev/null; then
-            gh release upload "$RELEASE" upload/*.zip --clobber --repo "$GITHUB_REPOSITORY"
-          fi
+          adds=""
+          for d in fuzz-out/findings fuzz-out/triaged; do [ -d "$d" ] && adds="$adds $d"; done
+          if [ -z "$adds" ]; then echo "nothing to store"; exit 0; fi
+          export BIN=$PWD/target/release/rs-compiler-fuzzer KEYS_FILE=$PWD/stored-keys.txt ADD_DIRS="$adds"
+          # the mutator is idempotent: release_sync.sh runs it again if another job updated the package meanwhile
+          tools/release_sync.sh tools/store_mutator.sh
 
       - name: Print findings into the log
         if: always()
@@ -159,6 +175,7 @@ jobs:
           shopt -s nullglob
           for d in fuzz-out/findings/*/ fuzz-out/triaged/*/; do
             echo "::group::NEW/TRIAGED $d"
+            cat "$d/STATUS.md" 2>/dev/null | head -c 6000; echo
             head -c 5000 "$d/report.md"
             echo; echo "----- case.rs (first 120 lines) -----"
             grep -v '^\s*$' "$d/case.rs" | awk '/^mod case_/{f=1} f' | head -120
@@ -180,8 +197,9 @@ jobs:
           for d in fuzz-out/known/*/; do
             echo "- known \`$(basename "$d")\`: $(tr '\n' ' ' < "$d/known-issues.txt")" >> "$GITHUB_STEP_SUMMARY"
           done
-          for r in fuzz-out/findings/*/report.md fuzz-out/triaged/*/report.md; do
-            { echo "<details><summary>$r</summary>"; echo; cat "$r"; echo "</details>"; } >> "$GITHUB_STEP_SUMMARY"
+          for r in fuzz-out/findings/*/ fuzz-out/triaged/*/; do
+            v=$(sed -n 's/^verdict=//p' "$r/status.cfg" 2>/dev/null)
+            { echo "<details><summary>${v:-UNTRIAGED} - $r</summary>"; echo; cat "$r/STATUS.md" 2>/dev/null; echo; cat "$r/report.md"; echo "</details>"; } >> "$GITHUB_STEP_SUMMARY"
           done
 
       - uses: actions/upload-artifact@v6
@@ -193,5 +211,6 @@ jobs:
             fuzz-out/triaged
             fuzz-out/known
             fuzz-out/generator-bugs
+            stored-keys.txt
           if-no-files-found: ignore
           retention-days: 14

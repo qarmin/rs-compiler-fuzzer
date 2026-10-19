@@ -120,6 +120,7 @@ impl Outcome {
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct Limits {
     pub compile: Duration,
     pub run: Duration,
@@ -205,3 +206,16 @@ pub fn par_map<T: Sync, R: Send>(items: &[T], jobs: usize, f: impl Fn(&T) -> R +
     });
     out.into_inner().unwrap().into_iter().map(|r| r.unwrap()).collect()
 }
+
+/// Stable fingerprint of a compiler crash, so the same crash found again (other batch, other
+/// run) is recognised: the first line naming an LLVM error / ICE / signal, digits normalised.
+pub fn crash_signature(o: &Outcome) -> Option<String> {
+    let Outcome::CompileFail(e) = o else { return None };
+    let line = e
+        .lines()
+        .find(|l| l.contains("LLVM ERROR") || l.contains("internal compiler error") || l.contains("interrupted by SIG") || l.contains("panicked at") || l.contains("Assertion"))
+        .or_else(|| e.lines().find(|l| l.starts_with("error")))?;
+    let norm: String = line.chars().map(|c| if c.is_ascii_digit() { '#' } else { c }).collect();
+    Some(norm.chars().take(160).collect())
+}
+

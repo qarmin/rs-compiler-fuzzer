@@ -91,6 +91,7 @@ cargo build --release
 
 # re-run stored findings (dirs with case.rs + repro.cfg) on this toolchain
 ./target/release/rs-compiler-fuzzer verify --dir unzipped-findings/ --out verify-out
+./target/release/rs-compiler-fuzzer triage --dir fuzz-out/findings/<finding> --budget 600   # status, reduction, Miri, issue search
 
 ./target/release/rs-compiler-fuzzer list      # strategies and configurations
 ```
@@ -110,13 +111,20 @@ by hand. The `*-checks` configs and `PANIC` lines can also point at a generator 
   - **00:00 UTC daily**: nightly **and** stable, `full` profile, 2 hours per job (jobs are limited to ~2h50);
   - **manual dispatch**: duration, profile, scale, strategy groups, toolchains, seed are inputs.
   One job per (toolchain, strategy group): 7 groups x 2 toolchains = 14 jobs. Each job runs the canaries,
-  fuzzes, prints reports/links into the log and the step summary, uploads artifacts, and zips every **new** or
-  **triaged** finding into the **`Nightly` release**
-  (`<toolchain>__<strategy>__<config>__<hash>.zip`; the hash is of the crash signature for compiler crashes,
-  otherwise of the reproducer, so reruns replace instead of piling up). Runners are `ubuntu-26.04`.
-- `verify.yml` (daily, or manual): downloads the zips from the `Nightly` release, re-runs each reproducer
-  on the current toolchain and reports which still reproduce and which got fixed; with the `prune` input it
-  deletes the fixed ones from the release.
+  fuzzes, then **triages** the new findings (`triage`: reproduces on stable/beta/nightly, reduces with the
+  built-in passes + [treereduce-rust](https://github.com/langston-barrett/treereduce), checks the reduced
+  program with Miri, searches rust-lang/rust issues with `gh`) and prints the result into the log, the step
+  summary and an artifact. Every finding gets a `STATUS.md` with a verdict - `READY TO REPORT` /
+  `ALMOST READY` (with the open items) / `NOT READY` (with the blockers) - and an `ISSUE.md` draft.
+  Runners are `ubuntu-26.04`.
+- **Storage = one asset**: the `Nightly` release holds a single `findings.zip` (`INDEX.md` + `findings/<strategy>__<config>__<hash>/`).
+  `tools/release_sync.sh` does read-modify-write with optimistic concurrency: it remembers which asset was
+  `findings.zip`, uploads the new archive under a temporary name, and only swaps it in if `findings.zip` is still
+  the same asset; otherwise (another job wrote meanwhile) it backs off and redoes the merge on the fresh package.
+  The merge (`pack`) is idempotent and the archive is deterministic, so unchanged findings produce no diff; at the end the
+  keys that were stored are checked in the downloaded result.
+- `verify.yml` (daily, or manual): per channel (nightly, beta, stable) re-runs every stored finding and records
+  `repro.<channel>`, `last_verified` and `state` (`open`/`fixed`) in its `status.cfg`, via the same sync. Nothing is deleted.
 
 ## Reports
 

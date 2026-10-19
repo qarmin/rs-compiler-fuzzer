@@ -3,7 +3,7 @@
 
 use crate::batch::{assemble, Assembled, Case};
 use crate::rng::Rng;
-use crate::runner::{build_and_run, check_only, par_map, rustc_cmd, Config, Limits, Outcome};
+use crate::runner::{crash_signature, build_and_run, check_only, par_map, rustc_cmd, Config, Limits, Outcome};
 use crate::strategies::{Strategy, ALL};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -255,18 +255,6 @@ fn append_config(dir: &Path, cfg: &str) {
     if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(dir.join("report.md")) {
         let _ = writeln!(f, "\n- also diverges from the baseline under: `{cfg}`");
     }
-}
-
-/// Stable fingerprint of a compiler crash, so the same crash found again (other batch, other
-/// run) is recognised: the first line naming an LLVM error / ICE / signal, digits normalised.
-fn crash_signature(o: &Outcome) -> Option<String> {
-    let Outcome::CompileFail(e) = o else { return None };
-    let line = e
-        .lines()
-        .find(|l| l.contains("LLVM ERROR") || l.contains("internal compiler error") || l.contains("interrupted by SIG") || l.contains("panicked at") || l.contains("Assertion"))
-        .or_else(|| e.lines().find(|l| l.starts_with("error")))?;
-    let norm: String = line.chars().map(|c| if c.is_ascii_digit() { '#' } else { c }).collect();
-    Some(norm.chars().take(160).collect())
 }
 
 fn now_secs() -> u64 {
@@ -676,7 +664,7 @@ pub fn canary(o: &Opts) -> i32 {
 
 /// Re-run stored findings (dirs with `case.rs` + `repro.cfg`) on the current toolchain.
 /// Prints `STILL <dir>` / `FIXED <dir>` / `SKIP <dir>` and writes `fixed.txt` into `report_dir`.
-pub fn verify(o: &Opts, root: &Path, report_dir: &Path) -> i32 {
+pub fn verify(o: &Opts, root: &Path, report_dir: &Path, label: &str) -> i32 {
     let mut dirs: Vec<PathBuf> = match std::fs::read_dir(root) {
         Ok(rd) => rd.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.join("case.rs").exists() && p.join("repro.cfg").exists()).collect(),
         Err(e) => {
@@ -700,7 +688,7 @@ pub fn verify(o: &Opts, root: &Path, report_dir: &Path) -> i32 {
         let base = Config::new(&get("base_name"), &get("base_flags"));
         let bad = Config::new(&get("bad_name"), &get("bad_flags"));
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let src = d.join("case.rs");
+        let src = if d.join("reduced.rs").exists() { d.join("reduced.rs") } else { d.join("case.rs") };
         let r: Vec<Outcome> = [&base, &bad]
             .iter()
             .enumerate()
@@ -716,6 +704,22 @@ pub fn verify(o: &Opts, root: &Path, report_dir: &Path) -> i32 {
         } else {
             eprintln!("FIXED {name} [{badname}]");
             fixed.push(name);
+        }
+        // record the result in the finding itself (state is `fixed` only when no verified channel reproduces it)
+        if !label.is_empty() {
+            let path = d.join("status.cfg");
+            let mut st = crate::triage::read_cfg(&path);
+            st.insert(format!("repro.{label}"), if diverges { "yes".into() } else { "no".into() });
+            let date = std::process::Command::new("date").args(["-u", "+%F"]).output().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
+            st.insert("last_verified".into(), date.clone());
+            let any_yes = st.iter().any(|(k, v)| k.starts_with("repro.") && v.starts_with("yes"));
+            let was = st.get("state").cloned().unwrap_or_default();
+            let now = if any_yes { "open" } else { "fixed" };
+            if was != now {
+                st.insert("state".into(), now.into());
+                st.insert("state_changed".into(), date);
+            }
+            crate::triage::write_cfg(&path, &st);
         }
     }
     let _ = std::fs::write(report_dir.join("fixed.txt"), fixed.join("\n"));
