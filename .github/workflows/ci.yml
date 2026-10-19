@@ -1,6 +1,7 @@
 name: ci
 
 on:
+  workflow_dispatch:
   pull_request:
   push:
     branches: [master]
@@ -47,3 +48,28 @@ jobs:
             fuzz-out/known
             fuzz-out/generator-bugs
           if-no-files-found: ignore
+
+  # End-to-end test of triage + reduction (shrinkray, treereduce-rust, Miri, bisect off): a known crash must shrink a lot.
+  reduce:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - run: |
+          rustup toolchain install stable --profile minimal
+          rustup toolchain install nightly --profile minimal
+      - run: cargo +stable build --release
+      - name: Install reducers
+        run: |
+          python3 -m venv "$HOME/sr" && "$HOME/sr/bin/pip" install -q shrinkray
+          echo "$HOME/sr/bin" >> "$GITHUB_PATH"
+          cargo +stable install treereduce-rust --locked || true
+      - name: Triage the checked-in LLVM EFLAGS crash
+        run: |
+          mkdir -p tri/f && cp reports/llvm-eflags-o0-crash.rs tri/f/case.rs
+          printf 'strategy=arith\nbase_name=O1\nbase_flags=-C opt-level=1\nbad_name=O0\nbad_flags=-C opt-level=0\nbatch_seed=1\ntoolchain=nightly\n' > tri/f/repro.cfg
+          printf 'rustc-LLVM ERROR: Unable to copy EFLAGS physical register!' > tri/f/signature.txt
+          ./target/release/rs-compiler-fuzzer triage --dir tri/f --budget 420 --no-search --out tri/out
+          cat tri/f/STATUS.md
+          echo "--- reduced.rs ---"; cat tri/f/reduced.rs
+          test "$(wc -l < tri/f/reduced.rs)" -le 25 || { echo "reduction produced more than 25 lines"; exit 1; }

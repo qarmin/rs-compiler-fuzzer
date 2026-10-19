@@ -625,6 +625,38 @@ pub fn format_if_interesting(it: &Interest, src: &str) -> String {
     if !res.is_empty() && it.check(&res) { res } else { src.to_string() }
 }
 
+/// Shrink Ray (https://github.com/DRMacIver/shrinkray, `pip install shrinkray`): a generic reducer with
+/// tree-sitter based passes. By far the strongest of the tools tried here on expression chains, so it
+/// gets most of the time budget. Returns the input unchanged if it is not installed.
+pub fn shrinkray(it: &Interest, src: &str, deadline: Instant) -> String {
+    let exe = std::env::var("SHRINKRAY").unwrap_or_else(|_| "shrinkray".to_string());
+    if Command::new(&exe).arg("--version").output().is_err() {
+        return src.to_string();
+    }
+    let dir = it.work.join(format!("sr{}_{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
+    let _ = std::fs::create_dir_all(&dir);
+    let (case, cfg, test) = (dir.join("case.rs"), dir.join("interest.cfg"), dir.join("test.sh"));
+    std::fs::write(&case, src).unwrap();
+    std::fs::write(&cfg, it.to_cfg()).unwrap();
+    let me = std::env::current_exe().unwrap();
+    std::fs::write(&test, format!("#!/bin/bash\nexec \"{}\" interesting --cfg \"{}\" --file \"$1\"\n", me.display(), cfg.display())).unwrap();
+    let _ = Command::new("chmod").arg("+x").arg(&test).status();
+    let remaining = deadline.saturating_duration_since(Instant::now()).as_secs().max(30);
+    let _ = Command::new("timeout")
+        .arg("-s")
+        .arg("INT")
+        .arg(remaining.to_string())
+        .arg(&exe)
+        .args(["--ui", "basic", "--input-type", "arg", "--parallelism", "4", "--volume", "quiet", "--timeout", "300", "--no-exit-on-completion"])
+        .arg(&test)
+        .arg(&case)
+        .current_dir(&dir)
+        .output();
+    let res = std::fs::read_to_string(&case).unwrap_or_else(|_| src.to_string());
+    let _ = std::fs::remove_dir_all(&dir);
+    if res.trim().is_empty() || !it.check(&res) { src.to_string() } else { res }
+}
+
 pub struct ReduceLog(pub Vec<String>);
 
 /// Full pipeline. `budget` bounds the whole thing.
@@ -647,24 +679,37 @@ pub fn reduce_all(it: &Interest, src: &str, budget: Duration, log: &mut ReduceLo
         Some(_) => log.0.push("flattening the harness changed the behaviour - kept the harness".into()),
         None => {}
     }
-    // alternate the cheap passes until nothing changes
-    for round in 1..=4 {
-        let before = cur.clone();
-        cur = simplify_lets(it, &cur, start + budget / 2);
-        cur = drop_calls(it, &cur, start + budget / 2);
-        cur = simplify_exprs(it, &cur, start + budget * 3 / 5);
-        cur = shrink_lines(it, &cur, start + budget * 3 / 5);
-        note(log, &format!("after expression passes (round {round})"), &cur);
-        if cur == before || expired(start + budget * 3 / 5) {
-            break;
+    let have_sr = {
+        let exe = std::env::var("SHRINKRAY").unwrap_or_else(|_| "shrinkray".to_string());
+        Command::new(exe).arg("--version").output().is_ok()
+    };
+    if have_sr {
+        cur = shrinkray(it, &cur, start + budget * 7 / 10);
+        note(log, "after shrinkray", &cur);
+        cur = drop_calls(it, &cur, start + budget * 4 / 5);
+        cur = simplify_exprs(it, &cur, start + budget * 9 / 10);
+        note(log, "after expression polish", &cur);
+    } else {
+        log.0.push("shrinkray not installed (pip install shrinkray) - using the built-in passes only".into());
+        // alternate the cheap passes until nothing changes
+        for round in 1..=4 {
+            let before = cur.clone();
+            cur = simplify_lets(it, &cur, start + budget / 2);
+            cur = drop_calls(it, &cur, start + budget / 2);
+            cur = simplify_exprs(it, &cur, start + budget * 3 / 5);
+            cur = shrink_lines(it, &cur, start + budget * 3 / 5);
+            note(log, &format!("after expression passes (round {round})"), &cur);
+            if cur == before || expired(start + budget * 3 / 5) {
+                break;
+            }
         }
+        cur = treereduce(it, &cur, start + budget * 4 / 5, 4, 3);
+        note(log, "after treereduce-rust", &cur);
+        let fin = deadline.min(Instant::now() + Duration::from_secs(90));
+        cur = simplify_exprs(it, &cur, fin);
+        cur = shrink_lines(it, &cur, fin);
+        note(log, "after final passes", &cur);
     }
-    cur = treereduce(it, &cur, start + budget * 4 / 5, 4, 3);
-    note(log, "after treereduce-rust", &cur);
-    let fin = deadline.min(Instant::now() + Duration::from_secs(90));
-    cur = simplify_exprs(it, &cur, fin);
-    cur = shrink_lines(it, &cur, fin);
-    note(log, "after final passes", &cur);
     cur = strip_parens(it, &cur);
     cur = format_if_interesting(it, &cur);
     note(log, "final (rustfmt)", &cur);

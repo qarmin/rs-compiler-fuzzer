@@ -112,7 +112,7 @@ by hand. The `*-checks` configs and `PANIC` lines can also point at a generator 
   - **manual dispatch**: duration, profile, scale, strategy groups, toolchains, seed are inputs.
   One job per (toolchain, strategy group): 7 groups x 2 toolchains = 14 jobs. Each job runs the canaries,
   fuzzes, then **triages** the new findings (`triage`: reproduces on stable/beta/nightly, reduces with the
-  built-in passes + [treereduce-rust](https://github.com/langston-barrett/treereduce), checks the reduced
+  [Shrink Ray](https://github.com/DRMacIver/shrinkray) (`pip install shrinkray`; by far the best on expression chains) after flattening the harness into a plain `fn main`, plus built-in expression passes and [treereduce-rust](https://github.com/langston-barrett/treereduce) when Shrink Ray is missing, checks the reduced
   program with Miri, searches rust-lang/rust issues with `gh`) and prints the result into the log, the step
   summary and an artifact. Every finding gets a `STATUS.md` with a verdict - `READY TO REPORT` /
   `ALMOST READY` (with the open items) / `NOT READY` (with the blockers) - and an `ISSUE.md` draft.
