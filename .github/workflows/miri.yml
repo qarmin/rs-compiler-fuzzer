@@ -46,7 +46,7 @@ jobs:
         run: |
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
           import json, os
-          groups = os.environ["IN_GROUPS"] or "arith,select,loops;control,recursion,floats;enums,traits,generics;borrows,asyncs,unwind;memory,simd,abi,collections"
+          groups = os.environ["IN_GROUPS"] or "arith,select,loops;control,recursion,floats;enums,traits,generics;borrows,asyncs,unwind;memory,abi,collections"  # simd is left out: Miri reports no AVX/SSE4 CPU features, so the feature-gated kernels are skipped and differ from native
           print("matrix=" + json.dumps({"include": [{"strategies": g.strip(), "name": g.strip().replace(",", "+")} for g in groups.split(";")]}))
           PY
 

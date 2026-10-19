@@ -161,7 +161,7 @@ impl State<'_> {
                         if m.get(&c.id) != n.get(&c.id) {
                             self.mismatch += 1;
                             let d = format!("miri: {:?}\nnative {}: {:?}", m.get(&c.id), native_cfg.name, n.get(&c.id));
-                            self.save("mismatch", strategy, c, &format!("{strategy} case differs between Miri and native"), &d, batch_seed);
+                            self.save("mismatch", strategy, c, &format!("{strategy} case differs between Miri and native (case seed {})", c.seed), &d, batch_seed);
                         }
                     }
                 }
