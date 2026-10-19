@@ -667,6 +667,10 @@ pub fn canary(o: &Opts) -> i32 {
 pub fn verify(o: &Opts, root: &Path, report_dir: &Path, label: &str) -> i32 {
     let mut dirs: Vec<PathBuf> = match std::fs::read_dir(root) {
         Ok(rd) => rd.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.join("case.rs").exists() && p.join("repro.cfg").exists() && !std::fs::read_to_string(p.join("repro.cfg")).unwrap_or_default().contains("mode=miri")).collect(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!("verify: nothing stored yet ({} does not exist)", root.display());
+            return 0;
+        }
         Err(e) => {
             eprintln!("cannot read {}: {e}", root.display());
             return 1;

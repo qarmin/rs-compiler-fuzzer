@@ -4,8 +4,6 @@ name: miri
 # a Miri false positive or a real soundness bug in std/rustc; output differences between Miri and the natively
 # compiled program point at Miri or rustc bugs. Findings are stored in the single package (mode=miri entries).
 on:
-  push:
-    branches: [claude/exciting-davinci-svfxni]  # TEMPORARY: lets the workflow run before it exists on master
   schedule:
     - cron: "0 2 * * *"
   workflow_dispatch:
@@ -78,7 +76,7 @@ jobs:
 
       - name: Run generated programs under Miri
         env:
-          DURATION_MIN: ${{ inputs.duration_minutes || (github.event_name == 'push' && '20') || '60' }}
+          DURATION_MIN: ${{ inputs.duration_minutes || '60' }}
           SCALE: ${{ inputs.scale || '100' }}
           SEED: ${{ inputs.seed }}
         run: |
