@@ -191,6 +191,15 @@ impl State<'_> {
     }
 }
 
+/// Lines per batch that Miri digests in a few minutes (collections is ~100x slower per line than arith).
+fn miri_cap(strategy: &str) -> usize {
+    match strategy {
+        "collections" => 300,
+        "loops" | "recursion" | "floats" => 1500,
+        _ => 2500,
+    }
+}
+
 pub fn run(o: &Opts) -> i32 {
     let work = o.out.join("work");
     std::fs::create_dir_all(&work).unwrap();
@@ -219,7 +228,7 @@ pub fn run(o: &Opts) -> i32 {
             }
             let batch_seed = o.batch_seed.unwrap_or_else(|| Rng::mix(o.seed, round * 1000 + si as u64));
             // Miri is orders of magnitude slower than native code: much smaller batches
-            let lines = (o.target_lines.unwrap_or(s.lines.min(2500)) * o.scale / 100).max(200);
+            let lines = (o.target_lines.unwrap_or(s.lines.min(miri_cap(s.name))) * o.scale / 100).max(200);
             let t0 = Instant::now();
             eprintln!("[{}] seed {batch_seed}, ~{lines} lines", s.name);
             let cases = generate_batch(s, batch_seed, lines);
