@@ -628,7 +628,7 @@ pub fn format_if_interesting(it: &Interest, src: &str) -> String {
 /// Shrink Ray (https://github.com/DRMacIver/shrinkray, `pip install shrinkray`): a generic reducer with
 /// tree-sitter based passes. By far the strongest of the tools tried here on expression chains, so it
 /// gets most of the time budget. Returns the input unchanged if it is not installed.
-pub fn shrinkray(it: &Interest, src: &str, deadline: Instant) -> String {
+pub fn shrinkray(it: &Interest, src: &str, deadline: Instant, log: &mut ReduceLog) -> String {
     let exe = std::env::var("SHRINKRAY").unwrap_or_else(|_| "shrinkray".to_string());
     if Command::new(&exe).arg("--version").output().is_err() {
         return src.to_string();
@@ -642,17 +642,25 @@ pub fn shrinkray(it: &Interest, src: &str, deadline: Instant) -> String {
     std::fs::write(&test, format!("#!/bin/bash\nexec \"{}\" interesting --cfg \"{}\" --file \"$1\"\n", me.display(), cfg.display())).unwrap();
     let _ = Command::new("chmod").arg("+x").arg(&test).status();
     let remaining = deadline.saturating_duration_since(Instant::now()).as_secs().max(30);
-    let _ = Command::new("timeout")
+    let out = Command::new("timeout")
         .arg("-s")
         .arg("INT")
         .arg(remaining.to_string())
         .arg(&exe)
-        .args(["--ui", "basic", "--input-type", "arg", "--parallelism", "4", "--volume", "quiet", "--timeout", "300", "--no-exit-on-completion"])
+        .args(["--ui", "basic", "--input-type", "arg", "--parallelism", "4", "--volume", "quiet", "--timeout", "300", "--memory-limit", "0", "--no-exit-on-completion"])
         .arg(&test)
         .arg(&case)
         .current_dir(&dir)
         .output();
     let res = std::fs::read_to_string(&case).unwrap_or_else(|_| src.to_string());
+    if res == src {
+        // nothing happened: keep the tool's last words, otherwise a broken setup is invisible
+        if let Ok(o) = &out {
+            let text = format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
+            let tail: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).rev().take(6).collect();
+            log.0.push(format!("shrinkray made no progress (exit {:?}): {}", o.status.code(), tail.into_iter().rev().collect::<Vec<_>>().join(" | ")));
+        }
+    }
     let _ = std::fs::remove_dir_all(&dir);
     if res.trim().is_empty() || !it.check(&res) { src.to_string() } else { res }
 }
@@ -684,7 +692,7 @@ pub fn reduce_all(it: &Interest, src: &str, budget: Duration, log: &mut ReduceLo
         Command::new(exe).arg("--version").output().is_ok()
     };
     if have_sr {
-        cur = shrinkray(it, &cur, start + budget * 7 / 10);
+        cur = shrinkray(it, &cur, start + budget * 7 / 10, log);
         note(log, "after shrinkray", &cur);
         cur = drop_calls(it, &cur, start + budget * 4 / 5);
         cur = simplify_exprs(it, &cur, start + budget * 9 / 10);
