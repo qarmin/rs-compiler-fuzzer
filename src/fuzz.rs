@@ -192,9 +192,9 @@ fn parse_lines(stdout: &str) -> BTreeMap<usize, String> {
 
 /// Strategies tag snippets that are known to trigger an open upstream bug with
 /// `// known-bug: <owner/repo#N ...>`; findings made only of such cases are filed under `known/`.
-fn known_bug(body: &str) -> Option<&str> {
-    let l = body.lines().find(|l| l.contains("// known-bug:"))?;
-    Some(l.split("// known-bug:").nth(1)?.trim())
+fn known_bug(body: &str) -> Option<String> {
+    let all: Vec<&str> = body.lines().filter_map(|l| l.split("// known-bug:").nth(1)).map(str::trim).collect();
+    if all.is_empty() { None } else { Some(all.join(" ")) }
 }
 
 const KNOWN_BUGS: &str = include_str!("../known-bugs.txt");
@@ -356,7 +356,7 @@ impl Fuzzer<'_> {
             }
             _ => cases.iter().map(|c| c.id).collect(),
         };
-        let marker_of = |id: usize| cases.iter().find(|c| c.id == id).and_then(|c| known_bug(&c.body)).map(str::to_string);
+        let marker_of = |id: usize| cases.iter().find(|c| c.id == id).and_then(|c| known_bug(&c.body));
         let class = if let Some(comment) = crash_signature(bad.1).and_then(|s| known_signature(&s)) {
             let refs = issue_refs(&comment);
             if refs.is_empty() { Class::Triaged(comment) } else { Class::Known(refs) }

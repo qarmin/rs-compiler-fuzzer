@@ -41,6 +41,7 @@ pub fn generate(rng: &mut Rng) -> String {
             }
         };
         let (c1, c2, c3) = (comb(rng, "e.kind()"), comb(rng, "a.kind()"), comb(rng, "b.kind()"));
+        w!(items, "    // known-bug: rust-lang/rust#164469 (LLVM TailCallElim: max/min applied after a recursive call)");
         w!(items, "    impl E{id} {{");
         w!(items, "        pub fn kind(&self) -> K{id} {{ match self {{ E{id}::Leaf(k) => *k, E{id}::Num(n) => if *n < 0 {{ K{id}::V{lo} }} else {{ K{id}::V{mid} }}, E{id}::Wrap(e) => {c1}, E{id}::Pair(a, b) => std::cmp::max({c2}, {c3}), E{id}::Opt(None) => K{id}::V0, E{id}::Opt(Some(e)) => {c1} }} }}");
         let (acc_a, acc_b) = (rng.below(7) as i32 + 1, rng.below(100) as i32);

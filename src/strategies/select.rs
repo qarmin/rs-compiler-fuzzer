@@ -38,6 +38,8 @@ pub fn generate(rng: &mut Rng) -> String {
         };
         let float = *rng.pick(&["f64", "f32"]);
         let other = *rng.pick(&["u8", "i32", "u16", "i64"]);
+        // every constructor below is the shape of #163728, which the fuzzer reproduces within minutes
+        w!(items, "    // known-bug: rust-lang/rust#163728 (InstCombine select -> min/max drops the clamp; fixed in LLVM main 2026-10-19)");
         w!(items, "    #[derive(Clone, Copy, Debug, PartialEq)] struct S{id} {{ a: {ty}, f: {float}, c: {other}, d: bool }}");
         // constructor with a branch on the first field
         let cmp = *rng.pick(&[">", ">=", "<", "<="]);
