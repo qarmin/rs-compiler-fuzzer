@@ -105,6 +105,7 @@ impl Ctx<'_> {
     /// `name (rustc -V)` of a probed toolchain, for the version table.
     fn label(&self, tc: &str) -> String {
         match self.results.get(tc) {
+            Some((used, ver, _)) if used.starts_with(|c: char| c.is_ascii_digit()) => format!("stable {used} ({ver})"),
             Some((used, ver, _)) => format!("{used} ({ver})"),
             None => tc.to_string(),
         }
@@ -145,7 +146,11 @@ pub fn bisect(src: &Path, base: &Config, bad: &Config, sig: &Option<String>, wor
                     let (g, b) = search(lo, latest, |m| cx.probe(&tc(m)));
                     // `latest` itself was seen reproducing by the caller; label it with the installed stable
                     edges.push((cx.label(&tc(g)), false));
-                    edges.push((if b == latest { format!("stable {} ({})", tc(b), rustc_version("stable")) } else { cx.label(&tc(b)) }, true));
+                    if b == latest && !cx.results.contains_key(&tc(b)) {
+                        cx.deadline = cx.deadline.max(Instant::now() + Duration::from_secs(120));
+                        cx.probe(&tc(b));
+                    }
+                    edges.push((cx.label(&tc(b)), true));
                     if b - g == 1 {
                         lines.push(format!("stable: **first affected release is {}** (last good: {})", tc(b), tc(g)));
                         summary.push(format!("stable: first bad {}", tc(b)));
