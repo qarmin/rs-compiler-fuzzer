@@ -28,7 +28,7 @@ pub struct TriageOpts {
 /// Version of the triage / minimisation logic. Bump it by hand whenever the results of `triage` get
 /// better (smarter reduction, more exact regression range, ...): every stored finding with a smaller
 /// `fuzzer_id` is then triaged again by the `retriage` job and replaced in the package.
-pub const FUZZER_ID: u32 = 2;
+pub const FUZZER_ID: u32 = 3;
 
 pub type Cfg = BTreeMap<String, String>;
 
@@ -571,7 +571,11 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
         let s = sig.clone().unwrap_or_default().replace('#', "N");
         if bad.flags.is_empty() { s } else { format!("{s} with `{}`", bad.flags.join(" ")) }
     } else {
-        format!("Miscompilation: `{}` and `{}` produce different output", base.flags.join(" "), bad.flags.join(" "))
+        if base.flags.is_empty() {
+            format!("Miscompilation with `{}`: different output than the default build", bad.flags.join(" "))
+        } else {
+            format!("Miscompilation: `{}` and `{}` produce different output", base.flags.join(" "), bad.flags.join(" "))
+        }
     };
     let _ = std::fs::write(dir.join("ISSUE_TITLE.txt"), format!("{title}\n"));
     let _ = writeln!(is, "I tried this code:\n\n```rust\n{}\n```\n", reduced.trim_end());
