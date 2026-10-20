@@ -1,7 +1,7 @@
 name: fuzz
 
 # Differential fuzzing of rustc. One job per (toolchain, strategy group).
-#  - push to master : quick check, nightly only, `fast` profile (no fat/thin LTO, no single-CGU builds), ~12 min
+#  - push to master : quick check, nightly only, `fast` profile (no fat/thin LTO, no single-CGU builds), 1 h
 #  - 00:00 UTC daily: nightly + stable, `full` profile, 2 h of fuzzing per job (GitHub limits a job to ~2h50)
 #  - manual dispatch: everything is configurable
 # New findings are triaged (reproduced on stable/beta/nightly, reduced, Miri-checked, searched on GitHub) and merged into the
@@ -14,7 +14,7 @@ on:
   workflow_dispatch:
     inputs:
       duration_minutes:
-        description: "Minutes each job keeps starting new batches (default 120; 12 on push)"
+        description: "Minutes each job keeps starting new batches (default 120; 60 on push)"
         default: ""
       profile:
         description: "fast = skip the slowest configs, full = everything (default full; fast on push)"
@@ -72,7 +72,7 @@ jobs:
           inc = [{"toolchain": t.strip(), "strategies": g.strip(), "name": g.strip().replace(",", "+")}
                  for t in toolchains.split(",") for g in groups.split(";")]
           print("matrix=" + json.dumps({"include": inc}))
-          print("duration=" + (e["IN_DURATION"] or ("12" if quick else "120")))
+          print("duration=" + (e["IN_DURATION"] or ("60" if quick else "120")))
           print("profile=" + (e["IN_PROFILE"] or ("fast" if quick else "full")))
           print("scale=" + (e["IN_SCALE"] or ("50" if quick else "100")))
           PY
@@ -117,6 +117,7 @@ jobs:
         run: |
           for c in stable beta nightly; do rustup toolchain install $c --profile minimal; done
           rustup component add miri rust-src --toolchain nightly || echo "miri unavailable on this nightly"
+          python3 -m venv "$HOME/sr" && "$HOME/sr/bin/pip" install -q shrinkray && echo "$HOME/sr/bin" >> "$GITHUB_PATH" || echo "shrinkray unavailable"
           command -v treereduce-rust >/dev/null || cargo +stable install treereduce-rust --locked || echo "treereduce-rust unavailable, using built-in reducer only"
 
       - name: Canaries
@@ -143,17 +144,25 @@ jobs:
             --out fuzz-out \
             "${seed_arg[@]}"
 
-      - name: Triage new findings (reproduce on every channel, reduce, Miri, search GitHub)
+      - name: Triage new findings (reproduce on every channel, reduce, Miri, bisect, search GitHub)
         if: always()
         continue-on-error: true
-        timeout-minutes: 75
+        timeout-minutes: 100
         env:
           GH_TOKEN: ${{ github.token }}
+          DURATION_MIN: ${{ needs.plan.outputs.duration }}
         run: |
           shopt -s nullglob
           bin=./target/release/rs-compiler-fuzzer
-          [ -d fuzz-out/findings ] && $bin triage --dirs fuzz-out/findings --limit 6 --budget 420 --bisect 600 --out triage-out
-          [ -d fuzz-out/triaged ] && $bin triage --dirs fuzz-out/triaged --limit 4 --budget 300 --bisect 480 --out triage-out
+          # what is left of the job's 170 minutes after fuzzing (cap 90): split over at most 3 findings
+          avail=$(( 165 - DURATION_MIN )); [ $avail -gt 90 ] && avail=90; [ $avail -lt 10 ] && avail=10
+          per=$(( avail * 60 / 3 ))
+          reduce=$(( per * 5 / 9 )); bisect=$(( per * 3 / 9 ))
+          echo "triage budget: ${avail} min total, per finding reduce ${reduce}s + bisect ${bisect}s"
+          timeout ${avail}m bash -c "
+            [ -d fuzz-out/findings ] && $bin triage --dirs fuzz-out/findings --limit 3 --budget $reduce --bisect $bisect --out triage-out
+            [ -d fuzz-out/triaged ] && $bin triage --dirs fuzz-out/triaged --limit 1 --budget $reduce --bisect $bisect --out triage-out
+            true"
           true
 
       - name: Store findings in the single package (release asset findings.zip)

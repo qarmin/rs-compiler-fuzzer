@@ -170,6 +170,8 @@ fn main() {
     }
     let seed = seed.unwrap_or_else(|| std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(1));
 
+    // reducers run the oracle from other working directories
+    let out = std::path::absolute(&out).unwrap_or(out);
     match cmd.as_str() {
         "list" => {
             println!("strategies:");
