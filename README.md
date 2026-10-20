@@ -127,9 +127,15 @@ by hand. The `*-checks` configs and `PANIC` lines can also point at a generator 
   the same asset; otherwise (another job wrote meanwhile) it backs off and redoes the merge on the fresh package.
   The merge (`pack`) is idempotent and the archive is deterministic, so unchanged findings produce no diff; at the end the
   keys that were stored are checked in the downloaded result.
+- **Pipeline**: the fuzz jobs (`fuzz.yml`, `miri.yml`) only find, minimise by cases and store the raw findings in the package.
+  Triage is a separate workflow, `retriage.yml`: it starts when a fuzz/miri run finishes (and daily), takes every stored
+  finding that has no triage result or an older `fuzzer_id`, and for each one: drops unneeded cases of the batch, reduces with
+  Shrink Ray, finds the shortest flags, checks Miri, determines the exact regression range, searches GitHub, writes
+  `reduced.rs`/`ISSUE.md`/`finding.json` and stores the result right away. Raw entries (no `ISSUE.md` yet) in the package
+  are therefore just waiting for their turn.
 - **`finding.json` + `fuzzer_id`**: every stored finding has a standard `finding.json` (strategy, kind, minimal flags, reduced
   program hash, regression edges, reproduction per channel, ...) and the `fuzzer_id` of the triage logic that produced it
-  (`FUZZER_ID` in `src/triage.rs`, bumped by hand when minimisation/bisect improve). `retriage.yml` (daily 05:00, 3 shards, or
+  (`FUZZER_ID` in `src/triage.rs`, bumped by hand when minimisation/bisect improve). `retriage.yml` (daily 05:00, 4 shards, or
   manual) triages every finding with an older id again - continuing from its previous reduced program - and replaces it in the
   package; the finding keeps its key, the same reduced program found twice is merged (`reduced_hash`).
 - `verify.yml` (daily, or manual): per channel (nightly, beta, stable) re-runs every stored finding and records

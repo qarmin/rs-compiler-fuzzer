@@ -665,6 +665,80 @@ pub fn shrinkray(it: &Interest, src: &str, deadline: Instant, log: &mut ReduceLo
     if res.trim().is_empty() || !it.check(&res) { src.to_string() } else { res }
 }
 
+/// A batch file (many `mod case_N`) -> only the case modules (and their `go!` calls) that are needed.
+/// Line-wise ddmin on a 400 KB batch is hopeless; modules are the natural unit.
+pub fn shrink_cases(it: &Interest, src: &str, deadline: Instant) -> String {
+    let lines: Vec<&str> = src.lines().collect();
+    // (first line, last line, id) of every top-level `mod case_N { ... }`
+    let mut mods: Vec<(usize, usize, String)> = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        if let Some(rest) = lines[i].strip_prefix("mod case_") {
+            let id: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+            let mut j = i + 1;
+            while j < lines.len() && lines[j] != "}" {
+                j += 1;
+            }
+            if !id.is_empty() && j < lines.len() {
+                mods.push((i, j, id));
+                i = j;
+            }
+        }
+        i += 1;
+    }
+    if mods.len() < 2 {
+        return src.to_string();
+    }
+    let build = |keep: &[usize]| -> String {
+        let ids: Vec<&str> = keep.iter().map(|&k| mods[k].2.as_str()).collect();
+        let mut out: Vec<&str> = Vec::new();
+        let mut skip_until = 0usize;
+        for (n, l) in lines.iter().enumerate() {
+            if n < skip_until {
+                continue;
+            }
+            if let Some(k) = mods.iter().position(|m| m.0 == n) {
+                if keep.contains(&k) {
+                    out.extend(&lines[mods[k].0..=mods[k].1]);
+                }
+                skip_until = mods[k].1 + 1;
+                continue;
+            }
+            // `    go!(ID, case_ID);`
+            if let Some(rest) = l.trim_start().strip_prefix("go!(") {
+                let id: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+                if !ids.contains(&id.as_str()) {
+                    continue;
+                }
+            }
+            out.push(l);
+        }
+        out.join("\n") + "\n"
+    };
+    let mut keep: Vec<usize> = (0..mods.len()).collect();
+    let mut n = keep.len().div_ceil(2);
+    while n >= 1 {
+        let mut i = 0;
+        while i < keep.len() && keep.len() > 1 {
+            if expired(deadline) {
+                return build(&keep);
+            }
+            let end = (i + n).min(keep.len());
+            let cand: Vec<usize> = keep[..i].iter().chain(keep[end..].iter()).copied().collect();
+            if !cand.is_empty() && it.check(&build(&cand)) {
+                keep = cand;
+            } else {
+                i += n;
+            }
+        }
+        if n == 1 {
+            break;
+        }
+        n = n.div_ceil(2);
+    }
+    build(&keep)
+}
+
 pub struct ReduceLog(pub Vec<String>);
 
 /// Full pipeline. `budget` bounds the whole thing.
@@ -676,7 +750,9 @@ pub fn reduce_all(it: &Interest, src: &str, budget: Duration, log: &mut ReduceLo
         log.0.push(format!("{what}: {} lines / {} bytes ({:.0}s)", cur.lines().count(), cur.len(), start.elapsed().as_secs_f32()));
     };
     note(log, "start", &cur);
-    cur = shrink_lines(it, &cur, start + budget / 6);
+    cur = shrink_cases(it, &cur, start + budget / 4);
+    note(log, "after dropping unneeded cases", &cur);
+    cur = shrink_lines(it, &cur, start + budget * 2 / 5);
     note(log, "after line shrinking", &cur);
     // drop the harness: a plain `fn main` is what a human would post
     match flatten(&cur) {

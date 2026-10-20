@@ -553,7 +553,7 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     // issue draft: only the reduced program, the shortest commands, the output and a version table
     let mut is = String::new();
     let common_txt = crate::runner::common_flags().join(" ");
-    let cmd = |c: &Config| format!("rustc case.rs {} {}", common_txt, c.flags.join(" ")).split_whitespace().collect::<Vec<_>>().join(" ");
+    let cmd = |c: &Config| format!("rustc reduced.rs {} {}", common_txt, c.flags.join(" ")).split_whitespace().collect::<Vec<_>>().join(" ");
     let first_yes = matrix2.iter().find(|m| m.2 == Repro::Yes).map(|m| m.0.clone());
     let vv = first_yes
         .as_ref()

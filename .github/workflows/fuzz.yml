@@ -110,19 +110,6 @@ jobs:
 
       - run: cargo +stable build --release
 
-      - name: Cache cargo binaries
-        uses: actions/cache@v5
-        with:
-          path: ~/.cargo/bin/treereduce-rust
-          key: treereduce-rust-${{ runner.os }}-v1
-
-      - name: Install triage tools (treereduce-rust, other channels, Miri)
-        run: |
-          for c in stable beta nightly; do rustup toolchain install $c --profile minimal; done
-          rustup component add miri rust-src --toolchain nightly || echo "miri unavailable on this nightly"
-          python3 -m venv "$HOME/sr" && "$HOME/sr/bin/pip" install -q shrinkray && echo "$HOME/sr/bin" >> "$GITHUB_PATH" || echo "shrinkray unavailable"
-          command -v treereduce-rust >/dev/null || cargo +stable install treereduce-rust --locked || echo "treereduce-rust unavailable, using built-in reducer only"
-
       - name: Canaries
         continue-on-error: true
         run: ./target/release/rs-compiler-fuzzer canary --rustc "rustc +${{ matrix.toolchain }}" --configs O0,O3,O3-lto-fat --out fuzz-out
@@ -147,7 +134,9 @@ jobs:
             --out fuzz-out \
             "${seed_arg[@]}"
 
-      - name: Store the raw findings first (the runner can disappear during the long triage)
+      # Triage (reproduce on every channel, Shrink Ray reduction, flags, Miri, regression range, GitHub search) is a separate
+      # job - retriage.yml, started when this workflow finishes - so that a job limit or a lost runner cannot swallow findings.
+      - name: Store the findings in the single package (release asset findings.zip)
         if: always()
         continue-on-error: true
         env:
@@ -158,41 +147,6 @@ jobs:
           for d in fuzz-out/findings fuzz-out/triaged; do [ -d "$d" ] && adds="$adds $d"; done
           if [ -z "$adds" ]; then echo "nothing to store"; exit 0; fi
           export BIN=$PWD/target/release/rs-compiler-fuzzer KEYS_FILE=$PWD/stored-keys-raw.txt ADD_DIRS="$adds"
-          tools/release_sync.sh tools/store_mutator.sh
-
-      - name: Triage new findings (reproduce on every channel, reduce, Miri, bisect, search GitHub)
-        if: always()
-        continue-on-error: true
-        timeout-minutes: 100
-        env:
-          GH_TOKEN: ${{ github.token }}
-          DURATION_MIN: ${{ needs.plan.outputs.duration }}
-        run: |
-          shopt -s nullglob
-          bin=./target/release/rs-compiler-fuzzer
-          # what is left of the job's 170 minutes after fuzzing (cap 90): split over at most 2 findings, most of it for
-          # the regression range (every probe installs a toolchain) and the reduction
-          avail=$(( 165 - DURATION_MIN )); [ $avail -gt 90 ] && avail=90; [ $avail -lt 10 ] && avail=10
-          per=$(( avail * 60 / 2 ))
-          reduce=$(( per * 4 / 10 )); bisect=$(( per * 5 / 10 ))
-          echo "triage budget: ${avail} min total, per finding reduce ${reduce}s + bisect ${bisect}s"
-          timeout ${avail}m bash -c "
-            [ -d fuzz-out/findings ] && $bin triage --dirs fuzz-out/findings --limit 2 --budget $reduce --bisect $bisect --out triage-out
-            [ -d fuzz-out/triaged ] && $bin triage --dirs fuzz-out/triaged --limit 1 --budget $reduce --bisect $bisect --out triage-out
-            true"
-          true
-
-      - name: Store findings in the single package (release asset findings.zip)
-        if: always()
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TOOLCHAIN: ${{ matrix.toolchain }}
-        run: |
-          adds=""
-          for d in fuzz-out/findings fuzz-out/triaged; do [ -d "$d" ] && adds="$adds $d"; done
-          if [ -z "$adds" ]; then echo "nothing to store"; exit 0; fi
-          export BIN=$PWD/target/release/rs-compiler-fuzzer KEYS_FILE=$PWD/stored-keys.txt ADD_DIRS="$adds"
-          # the mutator is idempotent: release_sync.sh runs it again if another job updated the package meanwhile
           tools/release_sync.sh tools/store_mutator.sh
 
       - name: Print findings into the log

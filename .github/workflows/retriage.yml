@@ -1,26 +1,40 @@
 name: retriage
 
+# This is the triage stage of the pipeline (reproduce on every channel, Shrink Ray reduction, shortest flags, Miri,
+# exact regression range, GitHub search), kept out of the fuzz jobs so that a job limit or a lost runner cannot
+# swallow findings: the fuzz jobs only store raw findings in the package, this workflow picks them up when the fuzz
+# run finishes (and once a day for everything that is outdated).
+#
 # Every stored finding carries the `fuzzer_id` of the triage logic that produced its reduced program, regression
 # range and flags (finding.json / status.cfg). When src/triage.rs bumps FUZZER_ID because the minimisation or the
 # bisect got better, this job triages the older findings again and replaces them in the single package, so old
 # entries do not stay as unminimised leftovers. Findings that already are at the current id are left alone.
 on:
+  workflow_run:
+    workflows: [fuzz, miri]
+    types: [completed]
   schedule:
     - cron: "0 5 * * *"
   workflow_dispatch:
     inputs:
       limit:
         description: "Findings per shard"
-        default: "4"
+        default: "6"
       reduce_seconds:
         description: "Reduction time per finding"
-        default: "900"
+        default: "600"
       bisect_seconds:
         description: "Regression-range time per finding"
-        default: "1200"
+        default: "900"
 
 permissions:
   contents: write
+  actions: read
+
+# one triage run at a time (a second one waits); both would otherwise pick the same findings
+concurrency:
+  group: retriage
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -30,11 +44,11 @@ jobs:
   retriage:
     name: retriage (shard ${{ matrix.shard }})
     runs-on: ubuntu-26.04
-    timeout-minutes: 175
+    timeout-minutes: 115
     strategy:
       fail-fast: false
       matrix:
-        shard: ["0/3", "1/3", "2/3"]
+        shard: ["0/4", "1/4", "2/4", "3/4"]
     steps:
       - uses: actions/checkout@v6
       - name: Toolchains and reducers
@@ -53,28 +67,26 @@ jobs:
           if gh release download "$RELEASE" --repo "$GITHUB_REPOSITORY" --pattern findings.zip --dir . 2>/dev/null; then unzip -q -o findings.zip -d pkg; fi
           ls pkg/findings 2>/dev/null | wc -l | sed 's/$/ stored findings/'
 
-      - name: Triage the stale findings again
+      - name: Triage, one finding at a time, and store each result right away
         env:
           GH_TOKEN: ${{ github.token }}
-          LIMIT: ${{ inputs.limit || '4' }}
-          REDUCE: ${{ inputs.reduce_seconds || '900' }}
-          BISECT: ${{ inputs.bisect_seconds || '1200' }}
+          LIMIT: ${{ inputs.limit || '6' }}
+          REDUCE: ${{ inputs.reduce_seconds || '600' }}
+          BISECT: ${{ inputs.bisect_seconds || '900' }}
         run: |
-          ./target/release/rs-compiler-fuzzer retriage --pkg pkg --shard "${{ matrix.shard }}" --limit "$LIMIT" \
-            --budget "$REDUCE" --bisect "$BISECT" --deadline $((160 * 60)) --out retriage-out | tee retriaged.txt
-          sed -n 's/^RETRIAGED //p' retriaged.txt > retriaged-keys.txt
-          echo "re-triaged: $(wc -l < retriaged-keys.txt)" >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Store the results (same single-package sync as the fuzz jobs)
-        if: always()
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          [ -s retriaged-keys.txt ] || { echo "nothing re-triaged"; exit 0; }
-          mkdir -p upd
-          while read -r k; do cp -r "pkg/findings/$k" "upd/$k"; done < retriaged-keys.txt
-          export BIN=$PWD/target/release/rs-compiler-fuzzer KEYS_FILE=$PWD/stored-keys.txt ADD_DIRS="upd" TOOLCHAIN=retriage
-          tools/release_sync.sh tools/store_mutator.sh
+          export BIN=$PWD/target/release/rs-compiler-fuzzer KEYS_FILE=$PWD/stored-keys.txt TOOLCHAIN=retriage
+          end=$((SECONDS + 98 * 60)); n=0
+          for i in $(seq 1 "$LIMIT"); do
+            # not enough time for another finding (reduction + regression range + reproduction matrix)
+            [ $((end - SECONDS)) -lt $((REDUCE + BISECT + 420)) ] && { echo "no time left for another finding"; break; }
+            "$BIN" retriage --pkg pkg --shard "${{ matrix.shard }}" --limit 1 --budget "$REDUCE" --bisect "$BISECT" --out retriage-out | tee one.txt
+            k=$(sed -n 's/^RETRIAGED //p' one.txt | head -n1)
+            [ -z "$k" ] && { echo "nothing (more) to re-triage in this shard"; break; }
+            rm -rf upd && mkdir -p "upd/$k" && cp -r "pkg/findings/$k/." "upd/$k/"
+            ADD_DIRS="upd" tools/release_sync.sh tools/store_mutator.sh
+            echo "$k" >> retriaged-keys.txt; n=$((n + 1))
+          done
+          echo "re-triaged in this shard: $n" >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v6
         if: always()
@@ -82,6 +94,6 @@ jobs:
           name: retriage-${{ strategy.job-index }}
           path: |
             upd
-            retriaged.txt
+            retriaged-keys.txt
           if-no-files-found: ignore
           retention-days: 14

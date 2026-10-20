@@ -90,6 +90,11 @@ pub fn write_finding_json(dir: &Path) {
     let _ = std::fs::write(dir.join("finding.json"), s);
 }
 
+/// Stable shard assignment by directory name (the stale list shrinks while shards work on it).
+pub fn name_hash(s: &str) -> u64 {
+    fnv(s)
+}
+
 fn sanitize(s: &str) -> String {
     s.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).collect()
 }
