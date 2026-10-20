@@ -22,6 +22,74 @@ fn fnv(s: &str) -> u64 {
     h
 }
 
+/// Hash of a program ignoring whitespace, to recognise the same reduced program found twice.
+pub fn text_hash(s: &str) -> String {
+    let compact: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+    format!("{:016x}", fnv(&compact))
+}
+
+fn json_str(s: &str) -> String {
+    let mut o = String::from("\"");
+    for c in s.chars() {
+        match c {
+            '"' => o.push_str("\\\""),
+            '\\' => o.push_str("\\\\"),
+            '\n' => o.push_str("\\n"),
+            '\r' => {}
+            '\t' => o.push_str("\\t"),
+            c if (c as u32) < 0x20 => o.push_str(&format!("\\u{:04x}", c as u32)),
+            c => o.push(c),
+        }
+    }
+    o.push('"');
+    o
+}
+
+/// `finding.json`: the standard machine readable description of a stored finding (derived from
+/// `repro.cfg` + `status.cfg`, rewritten whenever those change).
+pub fn write_finding_json(dir: &Path) {
+    let meta = read_cfg(&dir.join("repro.cfg"));
+    let st = read_cfg(&dir.join("status.cfg"));
+    let g = |m: &Cfg, k: &str| m.get(k).cloned().unwrap_or_default();
+    let num = |m: &Cfg, k: &str| m.get(k).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+    let list = |s: &str| format!("[{}]", s.split(',').filter(|x| !x.is_empty()).map(json_str).collect::<Vec<_>>().join(", "));
+    let flags = |s: &str| format!("[{}]", s.split_whitespace().map(json_str).collect::<Vec<_>>().join(", "));
+    let repro: Vec<String> = st.iter().filter_map(|(k, v)| k.strip_prefix("repro.").map(|ch| format!("    {}: {}", json_str(ch), json_str(v)))).collect();
+    let mut s = String::from("{\n");
+    let mut field = |k: &str, v: String| {
+        s.push_str(&format!("  {}: {},\n", json_str(k), v));
+    };
+    field("schema", "1".into());
+    field("fuzzer_id", num(&st, "fuzzer_id").to_string());
+    field("key", json_str(&g(&st, "key")));
+    field("strategy", json_str(&g(&meta, "strategy")));
+    field("kind", json_str(&g(&st, "kind")));
+    field("class", json_str(&g(&st, "class")));
+    field("state", json_str(&g(&st, "state")));
+    field("verdict", json_str(&g(&st, "verdict")));
+    field("base", format!("{{\"name\": {}, \"flags\": {}}}", json_str(&g(&meta, "base_name")), flags(&g(&st, "min_base_flags"))));
+    field("bad", format!("{{\"name\": {}, \"flags\": {}}}", json_str(&g(&meta, "bad_name")), flags(&g(&st, "min_bad_flags"))));
+    field("original_flags", format!("{{\"base\": {}, \"bad\": {}}}", flags(&g(&meta, "base_flags")), flags(&g(&meta, "bad_flags"))));
+    field("common_flags", flags(&g(&st, "min_common_flags")));
+    field("signature", json_str(std::fs::read_to_string(dir.join("signature.txt")).unwrap_or_default().trim()));
+    field("original_lines", num(&st, "original_lines").to_string());
+    field("reduced_lines", num(&st, "reduced_lines").to_string());
+    field("reduced_hash", json_str(&g(&st, "reduced_hash")));
+    field("first_seen", json_str(&g(&st, "first_seen")));
+    field("last_seen", json_str(&g(&st, "last_seen")));
+    field("triaged_at", json_str(&g(&st, "triaged_at")));
+    field("last_verified", json_str(&g(&st, "last_verified")));
+    field("times_seen", num(&st, "times_seen").to_string());
+    field("seen_on", list(&g(&st, "seen_on")));
+    field("miri", json_str(&g(&st, "miri")));
+    field("upstream_search", json_str(&g(&st, "upstream_search")));
+    field("regression", json_str(&g(&st, "regression")));
+    field("regression_edges", json_str(&g(&st, "regression_edges")));
+    s.push_str(&format!("  \"repro\": {{\n{}\n  }},\n", repro.join(",\n")));
+    s.push_str("  \"files\": {\"case\": \"case.rs\", \"reduced\": \"reduced.rs\", \"issue\": \"ISSUE.md\", \"status\": \"STATUS.md\", \"report\": \"report.md\"}\n}\n");
+    let _ = std::fs::write(dir.join("finding.json"), s);
+}
+
 fn sanitize(s: &str) -> String {
     s.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).collect()
 }
@@ -29,12 +97,16 @@ fn sanitize(s: &str) -> String {
 /// Stable identity of a finding: strategy, failing config and a hash of what makes it unique
 /// (the crash signature for crashes, the reduced/original program text for wrong code).
 pub fn key_of(dir: &Path) -> Option<String> {
+    // a stored finding keeps its key for ever (re-triage changes reduced.rs, not the identity)
+    if let Some(k) = read_cfg(&dir.join("status.cfg")).get("key").filter(|k| !k.is_empty()) {
+        return Some(k.clone());
+    }
     let meta = read_cfg(&dir.join("repro.cfg"));
     let strategy = meta.get("strategy")?;
     let bad = meta.get("bad_name")?;
     let ident = match std::fs::read_to_string(dir.join("signature.txt")) {
         Ok(s) if !s.trim().is_empty() => s.trim().to_string(),
-        _ => std::fs::read_to_string(dir.join("reduced.rs")).or_else(|_| std::fs::read_to_string(dir.join("case.rs"))).ok()?,
+        _ => std::fs::read_to_string(dir.join("case.rs")).ok()?,
     };
     Some(format!("{}__{}__{:010x}", sanitize(strategy), sanitize(bad), fnv(&ident) & 0xff_ffff_ffff))
 }
@@ -105,6 +177,19 @@ pub fn run(pkg: &Path, adds: &[PathBuf], toolchain: &str, contains: Option<&Path
         dirs.sort();
         for d in dirs {
             let Some(key) = key_of(&d) else { continue };
+            let mut key = key;
+            // the same reduced program under another key (e.g. found again by another seed) is the same finding
+            let new_hash = read_cfg(&d.join("status.cfg")).get("reduced_hash").cloned().unwrap_or_default();
+            if !new_hash.is_empty() && !root.join(&key).join("case.rs").exists() {
+                let bad = read_cfg(&d.join("repro.cfg")).get("bad_name").cloned().unwrap_or_default();
+                for e in std::fs::read_dir(&root).into_iter().flatten().flatten() {
+                    let other = read_cfg(&e.path().join("status.cfg"));
+                    if other.get("reduced_hash") == Some(&new_hash) && read_cfg(&e.path().join("repro.cfg")).get("bad_name") == Some(&bad) {
+                        key = e.file_name().to_string_lossy().to_string();
+                        break;
+                    }
+                }
+            }
             let dest = root.join(&key);
             let mut st: Cfg;
             if dest.join("case.rs").exists() {
@@ -112,8 +197,10 @@ pub fn run(pkg: &Path, adds: &[PathBuf], toolchain: &str, contains: Option<&Path
                 // a fresher triage result (reduced program, status) replaces a stale one
                 let new_st = read_cfg(&d.join("status.cfg"));
                 let have_reduced = dest.join("reduced.rs").exists();
-                if (!have_reduced && d.join("reduced.rs").exists()) || (new_st.get("triaged_at") > st.get("triaged_at") && d.join("reduced.rs").exists()) {
-                    for f in ["reduced.rs", "STATUS.md", "ISSUE.md", "report.md", "signature.txt", "known-issues.txt"] {
+                let id = |c: &Cfg| c.get("fuzzer_id").and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
+                // a result from a newer version of the triage logic replaces an older one
+                if d.join("reduced.rs").exists() && (id(&new_st) > id(&st) || (!have_reduced && id(&new_st) == id(&st))) {
+                    for f in ["reduced.rs", "STATUS.md", "ISSUE.md", "ISSUE_TITLE.txt", "report.md", "signature.txt", "known-issues.txt"] {
                         if d.join(f).exists() {
                             let _ = std::fs::copy(d.join(f), dest.join(f));
                         }
@@ -128,18 +215,23 @@ pub fn run(pkg: &Path, adds: &[PathBuf], toolchain: &str, contains: Option<&Path
                 st.insert("first_seen".into(), date.clone());
                 st.insert("times_seen".into(), "0".into());
             }
-            let n: u64 = st.get("times_seen").and_then(|v| v.parse().ok()).unwrap_or(0);
-            st.insert("times_seen".into(), (n + 1).to_string());
-            st.insert("last_seen".into(), date.clone());
+            if toolchain != "retriage" {
+                let n: u64 = st.get("times_seen").and_then(|v| v.parse().ok()).unwrap_or(0);
+                st.insert("times_seen".into(), (n + 1).to_string());
+                st.insert("last_seen".into(), date.clone());
+            }
             st.insert("class".into(), class_of(&d).into());
             st.insert("key".into(), key.clone());
-            add_word(&mut st, "seen_on", toolchain);
+            if toolchain != "retriage" {
+                add_word(&mut st, "seen_on", toolchain);
+            }
             if st.get("state").map(|s| s == "fixed").unwrap_or(false) {
                 // it is back
                 st.insert("state".into(), "open".into());
             }
             st.entry("state".into()).or_insert_with(|| "open".into());
             write_cfg(&dest.join("status.cfg"), &st);
+            write_finding_json(&dest);
             println!("PACKED {key}");
         }
     }

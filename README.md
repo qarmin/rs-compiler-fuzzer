@@ -127,6 +127,11 @@ by hand. The `*-checks` configs and `PANIC` lines can also point at a generator 
   the same asset; otherwise (another job wrote meanwhile) it backs off and redoes the merge on the fresh package.
   The merge (`pack`) is idempotent and the archive is deterministic, so unchanged findings produce no diff; at the end the
   keys that were stored are checked in the downloaded result.
+- **`finding.json` + `fuzzer_id`**: every stored finding has a standard `finding.json` (strategy, kind, minimal flags, reduced
+  program hash, regression edges, reproduction per channel, ...) and the `fuzzer_id` of the triage logic that produced it
+  (`FUZZER_ID` in `src/triage.rs`, bumped by hand when minimisation/bisect improve). `retriage.yml` (daily 05:00, 3 shards, or
+  manual) triages every finding with an older id again - continuing from its previous reduced program - and replaces it in the
+  package; the finding keeps its key, the same reduced program found twice is merged (`reduced_hash`).
 - `verify.yml` (daily, or manual): per channel (nightly, beta, stable) re-runs every stored finding and records
   `repro.<channel>`, `last_verified` and `state` (`open`/`fixed`) in its `status.cfg`, via the same sync. Nothing is deleted.
 

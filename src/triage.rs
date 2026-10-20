@@ -25,6 +25,11 @@ pub struct TriageOpts {
     pub bisect: Duration,
 }
 
+/// Version of the triage / minimisation logic. Bump it by hand whenever the results of `triage` get
+/// better (smarter reduction, more exact regression range, ...): every stored finding with a smaller
+/// `fuzzer_id` is then triaged again by the `retriage` job and replaced in the package.
+pub const FUZZER_ID: u32 = 2;
+
 pub type Cfg = BTreeMap<String, String>;
 
 pub fn read_cfg(path: &Path) -> Cfg {
@@ -294,8 +299,17 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     if let (Some(pc), false) = (&primary, o.no_reduce) {
         if matrix.iter().any(|m| m.2 == Repro::Yes) {
             let it = Interest { rustc: vec!["rustc".into(), format!("+{pc}")], a: base.clone(), b: bad.clone(), crash_sig: sig.clone(), limits: Limits { compile: Duration::from_secs(120), run: Duration::from_secs(10) }, work: o.work.clone(), cache: Default::default() };
-            if it.check(&case) {
-                reduced = reduce_all(&it, &case, o.budget, &mut reduce_log);
+            // a finding that is triaged again continues from its earlier (already small) result when that still shows the bug
+            let previous = std::fs::read_to_string(dir.join("reduced.rs")).ok().filter(|p| !p.trim().is_empty() && p.len() < case.len());
+            let start_src = match &previous {
+                Some(prev) if it.check(prev) => {
+                    reduce_log.0.push(format!("continuing from the previously reduced program ({} lines)", prev.lines().count()));
+                    prev.clone()
+                }
+                _ => case.clone(),
+            };
+            if it.check(&start_src) {
+                reduced = reduce_all(&it, &start_src, o.budget, &mut reduce_log);
                 did_reduce = true;
             } else {
                 reduce_log.0.push("original no longer interesting under the reducer's stricter limits - not reduced".into());
@@ -458,6 +472,14 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     st.insert("miri".into(), format!("{}: {}", m.verdict, m.detail));
     st.insert("upstream_search".into(), if search.performed { if search.possible.is_empty() { "no matching issue found".into() } else { format!("possible duplicates: {}", search.possible.join(" ")) } } else { "not performed".into() });
     st.insert("kind".into(), if crash { "compiler-crash".into() } else { "wrong-code".into() });
+    st.insert("fuzzer_id".into(), FUZZER_ID.to_string());
+    st.insert("min_common_flags".into(), crate::runner::common_flags().join(" "));
+    st.insert("min_base_flags".into(), base.flags.join(" "));
+    st.insert("min_bad_flags".into(), bad.flags.join(" "));
+    st.insert("reduced_hash".into(), crate::pack::text_hash(&reduced));
+    if let Some(b) = &bis {
+        st.insert("regression_edges".into(), b.edges.iter().map(|(l, y)| format!("{l} => {}", if *y { "yes" } else { "no" })).collect::<Vec<_>>().join(" ; "));
+    }
     for (ch, ver, r) in &matrix2 {
         st.insert(format!("repro.{ch}"), format!("{} ({})", r.word(), ver));
     }
@@ -467,6 +489,7 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     st.insert("last_verified".into(), date.clone());
     st.entry("state".into()).or_insert_with(|| "open".into());
     write_cfg(&dir.join("status.cfg"), &st);
+    crate::pack::write_finding_json(dir);
 
     let mut md = String::new();
     let _ = writeln!(md, "## Status: {verdict} ({date})\n");
@@ -598,4 +621,26 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     let _ = std::fs::remove_file(&case_path);
     let _ = std::fs::remove_file(&reduced_path);
     Ok(format!("{verdict}: {}", if blockers.is_empty() { warns.join("; ") } else { blockers.join("; ") }))
+}
+
+/// Stored findings (in an unpacked package) whose `fuzzer_id` is older than [`FUZZER_ID`], oldest first.
+/// Fixed findings and Miri findings are left alone.
+pub fn stale_findings(pkg: &Path) -> Vec<PathBuf> {
+    let root = pkg.join("findings");
+    let mut v: Vec<(u32, PathBuf)> = std::fs::read_dir(&root)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.join("case.rs").exists() && p.join("repro.cfg").exists())
+        .filter_map(|p| {
+            let st = read_cfg(&p.join("status.cfg"));
+            let meta = read_cfg(&p.join("repro.cfg"));
+            let id = st.get("fuzzer_id").and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
+            let skip = st.get("state").map(|s| s == "fixed").unwrap_or(false) || meta.get("mode").map(|m| m == "miri").unwrap_or(false);
+            (id < FUZZER_ID && !skip).then_some((id, p))
+        })
+        .collect();
+    v.sort();
+    v.into_iter().map(|x| x.1).collect()
 }
