@@ -115,7 +115,11 @@ by hand. The `*-checks` configs and `PANIC` lines can also point at a generator 
   [Shrink Ray](https://github.com/DRMacIver/shrinkray) (`pip install shrinkray`; by far the best on expression chains) after flattening the harness into a plain `fn main`, plus built-in expression passes and [treereduce-rust](https://github.com/langston-barrett/treereduce) when Shrink Ray is missing, checks the reduced
   program with Miri, searches rust-lang/rust issues with `gh`) and prints the result into the log, the step
   summary and an artifact. Every finding gets a `STATUS.md` with a verdict - `READY TO REPORT` /
-  `ALMOST READY` (with the open items) / `NOT READY` (with the blockers) - and an `ISSUE.md` draft.
+  `ALMOST READY` (with the open items) / `NOT READY` (with the blockers) - and an `ISSUE.md` draft (plus `ISSUE_TITLE.txt`) in the rust-lang format: the reduced program only, the shortest
+  command lines (triage drops every flag the bug does not need: `--edition`, `-C debug-assertions`..., and tries a
+  flag-less reference build), the full compiler output with demangled symbols, `rustc -vV`, and one table with the
+  newest stable/beta/nightly plus the exact points of contact of the regression (e.g. `1.98.0 | no`, `1.99.0 | yes`,
+  `nightly-2026-08-15 | no`, `nightly-2026-08-16 | yes`).
   Runners are `ubuntu-26.04`.
 - **Storage = one asset**: the `Nightly` release holds a single `findings.zip` (`INDEX.md` + `findings/<strategy>__<config>__<hash>/`).
   `tools/release_sync.sh` does read-modify-write with optimistic concurrency: it remembers which asset was
@@ -123,6 +127,11 @@ by hand. The `*-checks` configs and `PANIC` lines can also point at a generator 
   the same asset; otherwise (another job wrote meanwhile) it backs off and redoes the merge on the fresh package.
   The merge (`pack`) is idempotent and the archive is deterministic, so unchanged findings produce no diff; at the end the
   keys that were stored are checked in the downloaded result.
+- **`finding.json` + `fuzzer_id`**: every stored finding has a standard `finding.json` (strategy, kind, minimal flags, reduced
+  program hash, regression edges, reproduction per channel, ...) and the `fuzzer_id` of the triage logic that produced it
+  (`FUZZER_ID` in `src/triage.rs`, bumped by hand when minimisation/bisect improve). `retriage.yml` (daily 05:00, 3 shards, or
+  manual) triages every finding with an older id again - continuing from its previous reduced program - and replaces it in the
+  package; the finding keeps its key, the same reduced program found twice is merged (`reduced_hash`).
 - `verify.yml` (daily, or manual): per channel (nightly, beta, stable) re-runs every stored finding and records
   `repro.<channel>`, `last_verified` and `state` (`open`/`fixed`) in its `status.cfg`, via the same sync. Nothing is deleted.
 

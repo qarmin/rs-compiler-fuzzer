@@ -4,3 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+# readable symbol names in the compiler backtraces quoted in issue drafts
+rustc-demangle = "0.1"
+cpp_demangle = "0.4"

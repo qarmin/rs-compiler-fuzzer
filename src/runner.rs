@@ -31,6 +31,18 @@ impl Config {
 pub const COMMON_FLAGS: &[&str] =
     &["--edition", "2021", "--cap-lints", "allow", "-C", "debug-assertions=off", "-C", "overflow-checks=off"];
 
+static COMMON_OVERRIDE: std::sync::Mutex<Option<Vec<String>>> = std::sync::Mutex::new(None);
+
+/// Replace the pinned flags (used by `triage` after it found out which of them a finding needs);
+/// `None` restores `COMMON_FLAGS`.
+pub fn set_common_flags(flags: Option<Vec<String>>) {
+    *COMMON_OVERRIDE.lock().unwrap() = flags;
+}
+
+pub fn common_flags() -> Vec<String> {
+    COMMON_OVERRIDE.lock().unwrap().clone().unwrap_or_else(|| COMMON_FLAGS.iter().map(|s| s.to_string()).collect())
+}
+
 pub struct Exec {
     pub code: Option<i32>,
     pub signal: Option<i32>,
@@ -134,7 +146,7 @@ pub fn rustc_cmd(rustc: &[String]) -> Command {
 
 pub fn compile_args(src: &Path, bin: &Path, cfg: &Config) -> Vec<String> {
     let mut a: Vec<String> = vec![src.display().to_string(), "-o".into(), bin.display().to_string()];
-    a.extend(COMMON_FLAGS.iter().map(|s| s.to_string()));
+    a.extend(common_flags());
     a.extend(cfg.flags.iter().cloned());
     a
 }

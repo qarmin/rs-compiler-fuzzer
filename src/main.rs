@@ -8,6 +8,7 @@ mod fuzz;
 mod rng;
 mod reduce;
 mod bisect;
+mod demangle;
 mod miri;
 mod pack;
 mod runner;
@@ -29,6 +30,7 @@ USAGE:
   rs-compiler-fuzzer miri               run generated programs under Miri (UB reports = generator/Miri/std bugs; Miri-vs-native differences); same options as fuzz
   rs-compiler-fuzzer triage --dir DIR   reproduce on all channels, reduce, Miri-check, search GitHub, write STATUS.md/ISSUE.md/verdict
                             (--bisect SECS: find the first stable release / nightly that has the bug; --dirs ROOT: every finding below ROOT; --budget SECS reduction time per finding; --no-search; --no-reduce; --limit N)
+  rs-compiler-fuzzer retriage --pkg DIR  triage again (in place) every stored finding with an older fuzzer_id (--shard I/N, --limit N, --deadline SECS, --budget, --bisect)
   rs-compiler-fuzzer pack --pkg DIR     merge finding directories (--add DIR, repeatable) into an unpacked package, rebuild INDEX.md
                             (--toolchain NAME records where they were found; --contains KEYS_FILE checks that keys are present)
   rs-compiler-fuzzer interesting --cfg FILE --file F   oracle for external reducers (exit 0 = still interesting)
@@ -96,6 +98,8 @@ fn main() {
     let mut no_reduce = false;
     let mut limit = 8usize;
     let mut bisect_secs = 0u64;
+    let mut shard = String::from("0/1");
+    let mut deadline_secs = 0u64;
     let mut dirs_root: Option<PathBuf> = None;
     let mut cfg_file: Option<PathBuf> = None;
     let mut file_arg: Option<PathBuf> = None;
@@ -145,6 +149,8 @@ fn main() {
             "--no-search" => no_search = true,
             "--no-reduce" => no_reduce = true,
             "--bisect" => bisect_secs = num(val()),
+            "--shard" => shard = val(),
+            "--deadline" => deadline_secs = num(val()),
             "--limit" => limit = num(val()) as usize,
             "--dirs" => dirs_root = Some(PathBuf::from(val())),
             "--cfg" => cfg_file = Some(PathBuf::from(val())),
@@ -217,6 +223,35 @@ fn main() {
             }
             let _ = std::fs::remove_dir_all(out.join("work"));
             std::process::exit(worst);
+        }
+        "retriage" => {
+            // triage again every stored finding that was last triaged by an older `fuzzer_id`, in place
+            let pkg = pkg.unwrap_or_else(|| die("retriage needs --pkg DIR (an unpacked findings.zip)"));
+            let (si, sn) = shard.split_once('/').map(|(a, b)| (a.parse::<usize>().unwrap_or(0), b.parse::<usize>().unwrap_or(1).max(1))).unwrap_or((0, 1));
+            let stale: Vec<PathBuf> = triage::stale_findings(&pkg).into_iter().enumerate().filter(|(i, _)| i % sn == si).map(|x| x.1).collect();
+            eprintln!("retriage: {} stored finding(s) older than fuzzer_id {} in shard {shard}", stale.len(), triage::FUZZER_ID);
+            let o = triage::TriageOpts { budget: Duration::from_secs(budget), search: !no_search, work: out.join("work"), no_reduce, bisect: Duration::from_secs(bisect_secs) };
+            let start = std::time::Instant::now();
+            let per = Duration::from_secs(budget + bisect_secs + 240);
+            let mut done = 0;
+            for d in stale.iter().take(limit) {
+                if deadline_secs > 0 && start.elapsed() + per > Duration::from_secs(deadline_secs) {
+                    eprintln!("retriage: not enough time left for another finding");
+                    break;
+                }
+                eprintln!("retriage {}", d.display());
+                match triage::triage(&o, d) {
+                    Ok(s) => {
+                        eprintln!("    {s}");
+                        done += 1;
+                        println!("RETRIAGED {}", d.file_name().unwrap().to_string_lossy());
+                    }
+                    Err(e) => eprintln!("    failed: {e}"),
+                }
+            }
+            let _ = std::fs::remove_dir_all(out.join("work"));
+            eprintln!("retriage: {done} finding(s) updated");
+            std::process::exit(0);
         }
         "pack" => {
             let pkg = pkg.unwrap_or_else(|| die("pack needs --pkg DIR"));

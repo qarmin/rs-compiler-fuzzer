@@ -67,7 +67,10 @@ jobs:
           import json, os
           e = os.environ
           quick = e["EVENT"] == "push"
-          groups = e["IN_GROUPS"] or "arith,select;loops;control,recursion;enums,traits;borrows,asyncs;memory,simd,abi;collections,floats,unwind,generics"
+          # push (nightly only, free runner slots): finer groups = more parallel jobs; daily runs: 7 groups x nightly+stable
+          wide = "arith;select;loops;control;recursion;enums;traits;borrows,asyncs;memory;abi,simd;collections,floats;unwind,generics"
+          narrow = "arith,select;loops;control,recursion;enums,traits;borrows,asyncs;memory,simd,abi;collections,floats,unwind,generics"
+          groups = e["IN_GROUPS"] or (wide if quick else narrow)
           toolchains = e["IN_TOOLCHAINS"] or ("nightly" if quick else "nightly,stable")
           inc = [{"toolchain": t.strip(), "strategies": g.strip(), "name": g.strip().replace(",", "+")}
                  for t in toolchains.split(",") for g in groups.split(";")]
@@ -144,6 +147,19 @@ jobs:
             --out fuzz-out \
             "${seed_arg[@]}"
 
+      - name: Store the raw findings first (the runner can disappear during the long triage)
+        if: always()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TOOLCHAIN: ${{ matrix.toolchain }}
+        run: |
+          adds=""
+          for d in fuzz-out/findings fuzz-out/triaged; do [ -d "$d" ] && adds="$adds $d"; done
+          if [ -z "$adds" ]; then echo "nothing to store"; exit 0; fi
+          export BIN=$PWD/target/release/rs-compiler-fuzzer KEYS_FILE=$PWD/stored-keys-raw.txt ADD_DIRS="$adds"
+          tools/release_sync.sh tools/store_mutator.sh
+
       - name: Triage new findings (reproduce on every channel, reduce, Miri, bisect, search GitHub)
         if: always()
         continue-on-error: true
@@ -154,13 +170,14 @@ jobs:
         run: |
           shopt -s nullglob
           bin=./target/release/rs-compiler-fuzzer
-          # what is left of the job's 170 minutes after fuzzing (cap 90): split over at most 3 findings
+          # what is left of the job's 170 minutes after fuzzing (cap 90): split over at most 2 findings, most of it for
+          # the regression range (every probe installs a toolchain) and the reduction
           avail=$(( 165 - DURATION_MIN )); [ $avail -gt 90 ] && avail=90; [ $avail -lt 10 ] && avail=10
-          per=$(( avail * 60 / 3 ))
-          reduce=$(( per * 5 / 9 )); bisect=$(( per * 3 / 9 ))
+          per=$(( avail * 60 / 2 ))
+          reduce=$(( per * 4 / 10 )); bisect=$(( per * 5 / 10 ))
           echo "triage budget: ${avail} min total, per finding reduce ${reduce}s + bisect ${bisect}s"
           timeout ${avail}m bash -c "
-            [ -d fuzz-out/findings ] && $bin triage --dirs fuzz-out/findings --limit 3 --budget $reduce --bisect $bisect --out triage-out
+            [ -d fuzz-out/findings ] && $bin triage --dirs fuzz-out/findings --limit 2 --budget $reduce --bisect $bisect --out triage-out
             [ -d fuzz-out/triaged ] && $bin triage --dirs fuzz-out/triaged --limit 1 --budget $reduce --bisect $bisect --out triage-out
             true"
           true
