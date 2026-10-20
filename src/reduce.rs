@@ -392,9 +392,11 @@ fn top_args(src: &str, open: usize, close: usize) -> Vec<(usize, usize)> {
 }
 
 /// All single-edit simplifications of `src` as `(position, new text)`, in textual order.
-fn expr_candidates(src: &str) -> Vec<(usize, String)> {
+/// Edits `(start, end, replacement)` of `src` (applied lazily: materialising every candidate text of a big
+/// file at once needs gigabytes).
+fn expr_candidates(src: &str) -> Vec<(usize, usize, String)> {
     let b = src.as_bytes();
-    let mut out: Vec<(usize, String)> = Vec::new();
+    let mut out: Vec<(usize, usize, String)> = Vec::new();
     let keywords = ["if", "while", "match", "for", "fn", "return", "in", "else", "let", "mut", "loop", "unsafe", "as"];
     let mut i = 0;
     while i < b.len() {
@@ -422,7 +424,7 @@ fn expr_candidates(src: &str) -> Vec<(usize, String)> {
                     let rs = postfix_start(b, i);
                     for (s, e) in top_args(src, j, close) {
                         let arg = src[s..e].trim();
-                        out.push((rs, format!("{}({}){}", &src[..rs], arg, &src[close + 1..])));
+                        out.push((rs, close + 1, format!("({arg})")));
                     }
                 }
             }
@@ -440,7 +442,7 @@ fn expr_candidates(src: &str) -> Vec<(usize, String)> {
                 if let Some(close) = matching(b, j) {
                     for (s, e) in top_args(src, j, close) {
                         let arg = src[s..e].trim();
-                        out.push((i, format!("{}({}){}", &src[..i], arg, &src[close + 1..])));
+                        out.push((i, close + 1, format!("({arg})")));
                     }
                 }
             }
@@ -472,8 +474,8 @@ fn expr_candidates(src: &str) -> Vec<(usize, String)> {
                             let o2 = o2 + src[o2..].find('{').unwrap_or(0);
                             if src[c1 + 1..o2].trim() == "else" {
                                 if let Some(c2) = matching(b, o2) {
-                                    out.push((i, format!("{}{}{}", &src[..i], &src[o1..=c1], &src[c2 + 1..])));
-                                    out.push((i, format!("{}{}{}", &src[..i], &src[o2..=c2], &src[c2 + 1..])));
+                                    out.push((i, c2 + 1, src[o1..=c1].to_string()));
+                                    out.push((i, c2 + 1, src[o2..=c2].to_string()));
                                 }
                             }
                         }
@@ -491,7 +493,7 @@ fn expr_candidates(src: &str) -> Vec<(usize, String)> {
                     e += 1;
                 }
                 if e > k {
-                    out.push((i, format!("{}{}", &src[..i - 1], &src[e..])));
+                    out.push((i - 1, e, String::new()));
                 }
             }
             i = j.max(i + 1);
@@ -499,7 +501,7 @@ fn expr_candidates(src: &str) -> Vec<(usize, String)> {
         }
         // unary minus in front of a literal
         if c == b'-' && i + 1 < b.len() && b[i + 1].is_ascii_digit() && (i == 0 || matches!(b[i - 1], b'(' | b' ' | b',' | b'=')) {
-            out.push((i, format!("{}{}", &src[..i], &src[i + 1..])));
+            out.push((i, i + 1, String::new()));
         }
         // integer literals: try 0 and 1 (suffix kept)
         if c.is_ascii_digit() && (i == 0 || !(b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_' || b[i - 1] == b'.')) {
@@ -519,7 +521,7 @@ fn expr_candidates(src: &str) -> Vec<(usize, String)> {
                 if suffix.is_empty() || suffix.starts_with('u') || suffix.starts_with('i') {
                     for rep in ["0", "1"] {
                         if digits != rep {
-                            out.push((i, format!("{}{}{}{}", &src[..i], rep, suffix, &src[k..])));
+                            out.push((i, k, format!("{rep}{suffix}")));
                         }
                     }
                 }
@@ -537,6 +539,10 @@ fn expr_candidates(src: &str) -> Vec<(usize, String)> {
 /// Apply `expr_candidates` greedily, last position first, evaluating several candidates at once.
 pub fn simplify_exprs(it: &Interest, src: &str, deadline: Instant) -> String {
     let mut cur = src.to_string();
+    if cur.len() > 60_000 {
+        return cur; // far too many candidates; the case-level and line-level passes come first
+    }
+    let apply = |s: &str, e: &(usize, usize, String)| format!("{}{}{}", &s[..e.0], e.2, &s[e.1..]);
     loop {
         let mut cands = expr_candidates(&cur);
         let mut progress = false;
@@ -545,8 +551,8 @@ pub fn simplify_exprs(it: &Interest, src: &str, deadline: Instant) -> String {
                 return cur;
             }
             let lo = cands.len().saturating_sub(4);
-            let batch: Vec<(usize, String)> = cands[lo..].iter().rev().cloned().collect();
-            let texts: Vec<String> = batch.iter().map(|c| c.1.clone()).collect();
+            let batch: Vec<(usize, usize, String)> = cands[lo..].iter().rev().cloned().collect();
+            let texts: Vec<String> = batch.iter().map(|e| apply(&cur, e)).collect();
             let res = par_map(&texts, 4, |c| c.len() < cur.len() + 8 && it.check(c));
             match res.iter().position(|&ok| ok) {
                 Some(p) => {
