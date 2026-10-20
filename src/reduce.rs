@@ -621,6 +621,9 @@ pub fn strip_parens(it: &Interest, src: &str) -> String {
 
 /// `rustfmt` the result if it stays interesting (the issue text is easier to read).
 pub fn format_if_interesting(it: &Interest, src: &str) -> String {
+    if src.lines().count() > 400 {
+        return src.to_string(); // formatting only makes a big leftover bigger
+    }
     let dir = it.work.join(format!("fmt{}_{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
     let _ = std::fs::create_dir_all(&dir);
     let f = dir.join("x.rs");
@@ -721,6 +724,20 @@ pub fn shrink_cases(it: &Interest, src: &str, deadline: Instant) -> String {
         }
         out.join("\n") + "\n"
     };
+    // cases are independent modules: first look for ONE case that shows the bug on its own (a few seconds per try instead of
+    // minutes for the whole batch), smallest first
+    let mut order: Vec<usize> = (0..mods.len()).collect();
+    order.sort_by_key(|&k| mods[k].1 - mods[k].0);
+    let singles: Vec<String> = order.iter().map(|&k| build(&[k])).collect();
+    for chunk in singles.chunks(4) {
+        if expired(deadline) {
+            break;
+        }
+        let res = par_map(chunk, 4, |c| it.check(c));
+        if let Some(p) = res.iter().position(|&ok| ok) {
+            return chunk[p].clone();
+        }
+    }
     let mut keep: Vec<usize> = (0..mods.len()).collect();
     let mut n = keep.len().div_ceil(2);
     while n >= 1 {

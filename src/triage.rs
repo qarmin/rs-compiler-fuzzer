@@ -438,7 +438,11 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     if !did_reduce {
         warns.push("not reduced (reducer did not run or the original was not interesting under its limits)".into());
     } else if rl > 80 {
-        warns.push(format!("still {rl} lines - reduce further by hand (tools: tools/reduce.py, treereduce-rust)"));
+        if rl > 300 {
+            blockers.push(format!("still {rl} lines and no single case shows it on its own: it depends on the size/shape of the whole program (inlining or similar) - needs a longer reduction or a hand investigation, not ready to report"));
+        } else {
+            warns.push(format!("still {rl} lines - reduce further by hand (tools: tools/reduce.py, treereduce-rust)"));
+        }
     }
     match m.verdict.as_str() {
         "ub" => blockers.push(format!("Miri reports undefined behaviour: {}", m.detail)),
