@@ -8,6 +8,7 @@ mod fuzz;
 mod rng;
 mod reduce;
 mod bisect;
+mod demangle;
 mod miri;
 mod pack;
 mod runner;

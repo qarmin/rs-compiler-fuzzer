@@ -13,6 +13,8 @@ pub struct Bisect {
     pub lines: Vec<String>,
     /// one-line summary for status.cfg / the index
     pub summary: String,
+    /// the points of contact for the issue's version table: (toolchain with its `rustc -V`, reproduces)
+    pub edges: Vec<(String, bool)>,
 }
 
 const OLDEST_STABLE_MINOR: u32 = 80;
@@ -51,6 +53,8 @@ struct Ctx<'a> {
     work: &'a Path,
     deadline: Instant,
     notes: Vec<String>,
+    /// requested toolchain -> (toolchain actually used, `rustc -V`, reproduces)
+    results: std::collections::HashMap<String, (String, String, bool)>,
 }
 
 impl Ctx<'_> {
@@ -59,14 +63,30 @@ impl Ctx<'_> {
         if Instant::now() > self.deadline {
             return None;
         }
-        if !install(tc) {
+        // a nightly that was never published (or is not installable) is replaced by the next day's
+        let mut used = tc.to_string();
+        let mut installed = install(&used);
+        if !installed {
+            if let Some(date) = tc.strip_prefix("nightly-") {
+                for d in 1..=2 {
+                    used = format!("nightly-{}", date_add(date, d));
+                    installed = install(&used);
+                    if installed {
+                        break;
+                    }
+                }
+            }
+        }
+        if !installed {
             self.notes.push(format!("{tc}: could not be installed"));
             return None;
         }
-        let rustc = vec!["rustc".to_string(), format!("+{tc}")];
+        let tc_used = used.as_str();
+        let version = rustc_version(tc_used);
+        let rustc = vec!["rustc".to_string(), format!("+{tc_used}")];
         let lim = Limits { compile: Duration::from_secs(300), run: Duration::from_secs(20) };
         let (r, a, b) = reproduces(&rustc, self.src, self.base, self.bad, self.sig, &lim, self.work);
-        uninstall(tc);
+        uninstall(tc_used);
         let res = match r {
             Repro::Yes => true,
             Repro::No => {
@@ -78,7 +98,16 @@ impl Ctx<'_> {
             }
             Repro::NotApplicable => false,
         };
+        self.results.insert(tc.to_string(), (used, version, res));
         Some(res)
+    }
+
+    /// `name (rustc -V)` of a probed toolchain, for the version table.
+    fn label(&self, tc: &str) -> String {
+        match self.results.get(tc) {
+            Some((used, ver, _)) => format!("{used} ({ver})"),
+            None => tc.to_string(),
+        }
     }
 }
 
@@ -96,7 +125,8 @@ fn search(mut lo: i64, mut hi: i64, mut probe: impl FnMut(i64) -> Option<bool>) 
 }
 
 pub fn bisect(src: &Path, base: &Config, bad: &Config, sig: &Option<String>, work: &Path, budget: Duration, stable_reproduces: bool, nightly_reproduces: bool) -> Bisect {
-    let mut cx = Ctx { src, base, bad, sig, work, deadline: Instant::now() + budget, notes: Vec::new() };
+    let mut cx = Ctx { src, base, bad, sig, work, deadline: Instant::now() + budget, notes: Vec::new(), results: Default::default() };
+    let mut edges: Vec<(String, bool)> = Vec::new();
     let mut lines = Vec::new();
     let mut summary = Vec::new();
 
@@ -107,11 +137,15 @@ pub fn bisect(src: &Path, base: &Config, bad: &Config, sig: &Option<String>, wor
             let lo = OLDEST_STABLE_MINOR as i64;
             match cx.probe(&tc(lo)) {
                 Some(true) => {
+                    edges.push((cx.label(&tc(lo)), true));
                     lines.push(format!("stable: already present in {} (oldest version tested)", tc(lo)));
                     summary.push(format!("stable: since <= {}", tc(lo)));
                 }
                 Some(false) => {
                     let (g, b) = search(lo, latest, |m| cx.probe(&tc(m)));
+                    // `latest` itself was seen reproducing by the caller; label it with the installed stable
+                    edges.push((cx.label(&tc(g)), false));
+                    edges.push((if b == latest { format!("stable {} ({})", tc(b), rustc_version("stable")) } else { cx.label(&tc(b)) }, true));
                     if b - g == 1 {
                         lines.push(format!("stable: **first affected release is {}** (last good: {})", tc(b), tc(g)));
                         summary.push(format!("stable: first bad {}", tc(b)));
@@ -135,6 +169,7 @@ pub fn bisect(src: &Path, base: &Config, bad: &Config, sig: &Option<String>, wor
             let lo = NIGHTLY_DAYS;
             match cx.probe(&day(0 + lo)) {
                 Some(true) => {
+                    edges.push((cx.label(&day(lo)), true));
                     lines.push(format!("nightly: already present in {} (a year back, oldest tested)", day(lo)));
                     summary.push("nightly: older than a year".into());
                 }
@@ -142,6 +177,8 @@ pub fn bisect(src: &Path, base: &Config, bad: &Config, sig: &Option<String>, wor
                     // j = NIGHTLY_DAYS - days back: 0 = oldest (good) .. NIGHTLY_DAYS = newest (bad)
                     let (g, b) = search(0, NIGHTLY_DAYS, |j| cx.probe(&day(NIGHTLY_DAYS - j)));
                     let (gt, bt) = (day(NIGHTLY_DAYS - g), day(NIGHTLY_DAYS - b));
+                    edges.push((cx.label(&gt), false));
+                    edges.push((if b == NIGHTLY_DAYS { format!("{bt} ({v})") } else { cx.label(&bt) }, true));
                     if b - g == 1 {
                         lines.push(format!("nightly: **first affected: {bt}** (last good: {gt}); `cargo bisect-rustc --start {} --end {}` narrows it to a PR", &gt[8..], &bt[8..]));
                         summary.push(format!("nightly: first bad {bt}"));
@@ -157,5 +194,5 @@ pub fn bisect(src: &Path, base: &Config, bad: &Config, sig: &Option<String>, wor
     for n in cx.notes.iter().take(6) {
         lines.push(format!("note: {n}"));
     }
-    Bisect { lines, summary: summary.join("; ") }
+    Bisect { lines, summary: summary.join("; "), edges }
 }

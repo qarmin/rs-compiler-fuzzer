@@ -115,7 +115,11 @@ by hand. The `*-checks` configs and `PANIC` lines can also point at a generator 
   [Shrink Ray](https://github.com/DRMacIver/shrinkray) (`pip install shrinkray`; by far the best on expression chains) after flattening the harness into a plain `fn main`, plus built-in expression passes and [treereduce-rust](https://github.com/langston-barrett/treereduce) when Shrink Ray is missing, checks the reduced
   program with Miri, searches rust-lang/rust issues with `gh`) and prints the result into the log, the step
   summary and an artifact. Every finding gets a `STATUS.md` with a verdict - `READY TO REPORT` /
-  `ALMOST READY` (with the open items) / `NOT READY` (with the blockers) - and an `ISSUE.md` draft.
+  `ALMOST READY` (with the open items) / `NOT READY` (with the blockers) - and an `ISSUE.md` draft (plus `ISSUE_TITLE.txt`) in the rust-lang format: the reduced program only, the shortest
+  command lines (triage drops every flag the bug does not need: `--edition`, `-C debug-assertions`..., and tries a
+  flag-less reference build), the full compiler output with demangled symbols, `rustc -vV`, and one table with the
+  newest stable/beta/nightly plus the exact points of contact of the regression (e.g. `1.98.0 | no`, `1.99.0 | yes`,
+  `nightly-2026-08-15 | no`, `nightly-2026-08-16 | yes`).
   Runners are `ubuntu-26.04`.
 - **Storage = one asset**: the `Nightly` release holds a single `findings.zip` (`INDEX.md` + `findings/<strategy>__<config>__<hash>/`).
   `tools/release_sync.sh` does read-modify-write with optimistic concurrency: it remembers which asset was

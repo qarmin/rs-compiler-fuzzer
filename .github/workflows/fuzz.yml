@@ -154,13 +154,14 @@ jobs:
         run: |
           shopt -s nullglob
           bin=./target/release/rs-compiler-fuzzer
-          # what is left of the job's 170 minutes after fuzzing (cap 90): split over at most 3 findings
+          # what is left of the job's 170 minutes after fuzzing (cap 90): split over at most 2 findings, most of it for
+          # the regression range (every probe installs a toolchain) and the reduction
           avail=$(( 165 - DURATION_MIN )); [ $avail -gt 90 ] && avail=90; [ $avail -lt 10 ] && avail=10
-          per=$(( avail * 60 / 3 ))
-          reduce=$(( per * 5 / 9 )); bisect=$(( per * 3 / 9 ))
+          per=$(( avail * 60 / 2 ))
+          reduce=$(( per * 4 / 10 )); bisect=$(( per * 5 / 10 ))
           echo "triage budget: ${avail} min total, per finding reduce ${reduce}s + bisect ${bisect}s"
           timeout ${avail}m bash -c "
-            [ -d fuzz-out/findings ] && $bin triage --dirs fuzz-out/findings --limit 3 --budget $reduce --bisect $bisect --out triage-out
+            [ -d fuzz-out/findings ] && $bin triage --dirs fuzz-out/findings --limit 2 --budget $reduce --bisect $bisect --out triage-out
             [ -d fuzz-out/triaged ] && $bin triage --dirs fuzz-out/triaged --limit 1 --budget $reduce --bisect $bisect --out triage-out
             true"
           true

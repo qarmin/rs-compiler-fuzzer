@@ -246,12 +246,30 @@ fn lines_of(s: &str) -> usize {
     s.lines().filter(|l| !l.trim().is_empty()).count()
 }
 
+/// `["-C", "opt-level=3", "--edition", "2021", "-Zfoo"]` -> `[["-C","opt-level=3"], ["--edition","2021"], ["-Zfoo"]]`
+fn flag_groups(flags: &[String]) -> Vec<Vec<String>> {
+    let mut out: Vec<Vec<String>> = Vec::new();
+    let mut i = 0;
+    while i < flags.len() {
+        let takes_value = (flags[i] == "-C" || flags[i] == "-Z" || (flags[i].starts_with("--") && !flags[i].contains('='))) && i + 1 < flags.len() && !flags[i + 1].starts_with('-');
+        if takes_value {
+            out.push(vec![flags[i].clone(), flags[i + 1].clone()]);
+            i += 2;
+        } else {
+            out.push(vec![flags[i].clone()]);
+            i += 1;
+        }
+    }
+    out
+}
+
 pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     let meta = read_cfg(&dir.join("repro.cfg"));
     let case = std::fs::read_to_string(dir.join("case.rs")).map_err(|e| format!("{}: {e}", dir.display()))?;
     let get = |k: &str| meta.get(k).cloned().unwrap_or_default();
-    let base = Config::new(&get("base_name"), &get("base_flags"));
-    let bad = Config::new(&get("bad_name"), &get("bad_flags"));
+    crate::runner::set_common_flags(None);
+    let mut base = Config::new(&get("base_name"), &get("base_flags"));
+    let mut bad = Config::new(&get("bad_name"), &get("bad_flags"));
     let sig = std::fs::read_to_string(dir.join("signature.txt")).ok().filter(|s| !s.trim().is_empty());
     let crash = sig.is_some();
     std::fs::create_dir_all(&o.work).unwrap();
@@ -299,7 +317,72 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
         }
         matrix2.push((ch.clone(), ver.clone(), r));
     }
-    let still = matrix2.iter().any(|m| m.2 == Repro::Yes);
+    let mut still = matrix2.iter().any(|m| m.2 == Repro::Yes);
+
+    // 3b. the shortest command line that still shows it (the issue shows exactly these flags)
+    if still {
+        let yes_channels: Vec<String> = matrix2.iter().filter(|m| m.2 == Repro::Yes).map(|m| m.0.clone()).collect();
+        let ok = |base: &Config, bad: &Config| {
+            yes_channels.iter().all(|ch| {
+                let rustc = vec!["rustc".to_string(), format!("+{ch}")];
+                reproduces(&rustc, &reduced_path, base, bad, &sig, &lim, &o.work).0 == Repro::Yes
+            })
+        };
+        let flat = |g: &[Vec<String>]| g.iter().flatten().cloned().collect::<Vec<String>>();
+        let mut common = flag_groups(&crate::runner::common_flags());
+        for i in (0..common.len()).rev() {
+            let mut cand = common.clone();
+            cand.remove(i);
+            crate::runner::set_common_flags(Some(flat(&cand)));
+            if ok(&base, &bad) {
+                common = cand;
+            }
+        }
+        crate::runner::set_common_flags(Some(flat(&common)));
+        // the reference configuration: nothing at all if possible
+        if !base.flags.is_empty() {
+            let mut cand = base.clone();
+            cand.flags.clear();
+            if ok(&cand, &bad) {
+                base = cand;
+            } else {
+                let mut groups = flag_groups(&base.flags);
+                for i in (0..groups.len()).rev() {
+                    let mut g2 = groups.clone();
+                    g2.remove(i);
+                    let mut cand = base.clone();
+                    cand.flags = flat(&g2);
+                    if ok(&cand, &bad) {
+                        groups = g2;
+                        base = cand;
+                    }
+                }
+            }
+        }
+        let mut groups = flag_groups(&bad.flags);
+        for i in (0..groups.len()).rev() {
+            let mut g2 = groups.clone();
+            g2.remove(i);
+            let mut cand = bad.clone();
+            cand.flags = flat(&g2);
+            if ok(&base, &cand) {
+                groups = g2;
+                bad = cand;
+            }
+        }
+        // matrix and outputs again, with the final flags
+        matrix2.clear();
+        outputs = None;
+        for (ch, ver) in &chans {
+            let rustc = vec!["rustc".to_string(), format!("+{ch}")];
+            let (r, a, b) = reproduces(&rustc, &reduced_path, &base, &bad, &sig, &lim, &o.work);
+            if r == Repro::Yes && outputs.is_none() {
+                outputs = Some((a, b));
+            }
+            matrix2.push((ch.clone(), ver.clone(), r));
+        }
+        still = matrix2.iter().any(|m| m.2 == Repro::Yes);
+    }
 
     // 4. Miri (only meaningful for wrong-code findings)
     let m = if crash || !still {
@@ -444,9 +527,10 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     }
     std::fs::write(dir.join("STATUS.md"), &md).unwrap();
 
-    // issue draft: only the reduced program, the commands, the output and a version table
+    // issue draft: only the reduced program, the shortest commands, the output and a version table
     let mut is = String::new();
-    let cmd = |c: &Config| format!("rustc case.rs {} {}", crate::runner::COMMON_FLAGS.join(" "), c.flags.join(" ")).trim().to_string();
+    let common_txt = crate::runner::common_flags().join(" ");
+    let cmd = |c: &Config| format!("rustc case.rs {} {}", common_txt, c.flags.join(" ")).split_whitespace().collect::<Vec<_>>().join(" ");
     let first_yes = matrix2.iter().find(|m| m.2 == Repro::Yes).map(|m| m.0.clone());
     let vv = first_yes
         .as_ref()
@@ -456,21 +540,23 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
             exec(c, Duration::from_secs(30)).ok().map(|r| String::from_utf8_lossy(&r.stdout).trim().to_string())
         })
         .unwrap_or_default();
-    let error_text = |o: &Outcome| -> String {
-        match o {
-            Outcome::CompileFail(e) => {
-                let keep: Vec<&str> = e.lines().filter(|l| l.starts_with("error") || l.contains("ERROR") || l.contains("panicked") || l.contains("Assertion") || l.contains("Stack dump") || l.starts_with("note:")).take(12).collect();
-                if keep.is_empty() { e.lines().take(12).collect::<Vec<_>>().join("\n") } else { keep.join("\n") }
-            }
-            other => other.describe(),
-        }
+    let title = if crash {
+        let s = sig.clone().unwrap_or_default().replace('#', "N");
+        if bad.flags.is_empty() { s } else { format!("{s} with `{}`", bad.flags.join(" ")) }
+    } else {
+        format!("Miscompilation: `{}` and `{}` produce different output", base.flags.join(" "), bad.flags.join(" "))
     };
-    let _ = writeln!(is, "<!-- Draft generated by rs-compiler-fuzzer (verdict: {verdict}); edit before submitting. Title suggestion: {} -->\n", if crash { format!("LLVM ERROR / crash with `{}`: {}", bad.flags.join(" "), sig.clone().unwrap_or_default().replace('#', "N")) } else { format!("Miscompilation: `{}` and `{}` produce different output", base.flags.join(" "), bad.flags.join(" ")) });
+    let _ = std::fs::write(dir.join("ISSUE_TITLE.txt"), format!("{title}\n"));
     let _ = writeln!(is, "I tried this code:\n\n```rust\n{}\n```\n", reduced.trim_end());
     match &outputs {
         Some((a, b)) if crash => {
             let a_out = if let Outcome::Ran { stdout, .. } = a { stdout.trim().to_string() } else { String::new() };
-            let _ = writeln!(is, "This command {}:\n```\n{}\n```\nbut this one\n```\n{}\n```\nshows an error\n```\n{}\n```\n", if a_out.is_empty() { "doesn't print anything".to_string() } else { format!("prints `{}`", a_out.lines().next().unwrap_or("")) }, cmd(&base), cmd(&bad), error_text(b));
+            let err = match b {
+                Outcome::CompileFail(e) => crate::demangle::demangle_text(e.trim()).chars().take(20000).collect::<String>(),
+                other => other.describe(),
+            };
+            let works = if a_out.is_empty() { "compiles and runs fine".to_string() } else { format!("compiles, and running the binary prints `{}`", a_out.lines().next().unwrap_or("")) };
+            let _ = writeln!(is, "This command {works}:\n```\n{}\n```\nbut this one\n```\n{}\n```\nshows an error\n```\n{err}\n```\n", cmd(&base), cmd(&bad));
         }
         Some((a, b)) => {
             let show = |o: &Outcome| match o {
@@ -487,15 +573,16 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
             let _ = writeln!(is, "Commands:\n```\n{}\n{}\n```\n(did not reproduce when this draft was written)\n", cmd(&base), cmd(&bad));
         }
     }
-    if let Some(b) = bis.as_ref().filter(|b| !b.summary.is_empty()) {
-        let _ = writeln!(is, "Regression range:\n{}\n", b.lines.iter().filter(|l| !l.starts_with("note:")).map(|l| format!("- {l}")).collect::<Vec<_>>().join("\n"));
-    }
-    let _ = writeln!(is, "### Meta\n\n<!--\nIf you're using the stable version of the compiler, you should also check if the\nbug also exists in the beta or nightly versions.\n-->\n");
-    let _ = writeln!(is, "`rustc --version --verbose`:\n```\n{vv}\n```\n");
+    let _ = writeln!(is, "### Meta\n\n`rustc --version --verbose`:\n```\n{vv}\n```\n");
     let _ = writeln!(is, "Problem was found by a rust fuzzer (created by an LLM) - https://github.com/qarmin/rs-compiler-fuzzer\n");
     let _ = writeln!(is, "| channel | reproducible |\n|---|---|");
     for (ch, ver, r) in &matrix2 {
         let _ = writeln!(is, "| {ch} ({ver}) | {} |", r.word());
+    }
+    if let Some(b) = &bis {
+        for (label, yes) in &b.edges {
+            let _ = writeln!(is, "| {label} | {} |", if *yes { "yes" } else { "no" });
+        }
     }
     std::fs::write(dir.join("ISSUE.md"), is).unwrap();
 
