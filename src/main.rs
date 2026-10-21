@@ -228,7 +228,7 @@ fn main() {
             // triage again every stored finding that was last triaged by an older `fuzzer_id`, in place
             let pkg = pkg.unwrap_or_else(|| die("retriage needs --pkg DIR (an unpacked findings.zip)"));
             let (si, sn) = shard.split_once('/').map(|(a, b)| (a.parse::<usize>().unwrap_or(0), b.parse::<usize>().unwrap_or(1).max(1))).unwrap_or((0, 1));
-            let stale: Vec<PathBuf> = triage::stale_findings(&pkg).into_iter().enumerate().filter(|(i, _)| i % sn == si).map(|x| x.1).collect();
+            let stale: Vec<PathBuf> = triage::stale_findings(&pkg).into_iter().filter(|p| pack::name_hash(&p.file_name().unwrap().to_string_lossy()) % sn as u64 == si as u64).collect();
             eprintln!("retriage: {} stored finding(s) older than fuzzer_id {} in shard {shard}", stale.len(), triage::FUZZER_ID);
             let o = triage::TriageOpts { budget: Duration::from_secs(budget), search: !no_search, work: out.join("work"), no_reduce, bisect: Duration::from_secs(bisect_secs) };
             let start = std::time::Instant::now();

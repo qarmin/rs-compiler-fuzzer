@@ -1,8 +1,9 @@
 name: fuzz
 
 # Differential fuzzing of rustc. One job per (toolchain, strategy group).
-#  - push to master : quick check, nightly only, `fast` profile (no fat/thin LTO, no single-CGU builds), 1 h
-#  - 00:00 UTC daily: nightly + stable, `full` profile, 2 h of fuzzing per job (GitHub limits a job to ~2h50)
+#  - push to master : nightly only, `fast` profile (no fat/thin LTO, no single-CGU builds), many small groups
+#  - ~00:00 Warsaw time daily (22:00 UTC; 23:00 in winter): nightly + stable, `full` profile
+#  Every job: 45 min of fuzzing, then about an hour of triage/minimisation of what it found (about 2 h per job in total).
 #  - manual dispatch: everything is configurable
 # New findings are triaged (reproduced on stable/beta/nightly, reduced, Miri-checked, searched on GitHub) and merged into the
 # single package `findings.zip` of the `Nightly` release (tools/release_sync.sh; verify.yml keeps it up to date).
@@ -10,11 +11,11 @@ on:
   push:
     branches: [master]
   schedule:
-    - cron: "0 0 * * *"
+    - cron: "0 22 * * *"
   workflow_dispatch:
     inputs:
       duration_minutes:
-        description: "Minutes each job keeps starting new batches (default 120; 60 on push)"
+        description: "Minutes each job keeps starting new batches (default 45; triage of the findings follows)"
         default: ""
       profile:
         description: "fast = skip the slowest configs, full = everything (default full; fast on push)"
@@ -75,7 +76,7 @@ jobs:
           inc = [{"toolchain": t.strip(), "strategies": g.strip(), "name": g.strip().replace(",", "+")}
                  for t in toolchains.split(",") for g in groups.split(";")]
           print("matrix=" + json.dumps({"include": inc}))
-          print("duration=" + (e["IN_DURATION"] or ("60" if quick else "120")))
+          print("duration=" + (e["IN_DURATION"] or "45"))
           print("profile=" + (e["IN_PROFILE"] or ("fast" if quick else "full")))
           print("scale=" + (e["IN_SCALE"] or ("50" if quick else "100")))
           PY
@@ -110,18 +111,12 @@ jobs:
 
       - run: cargo +stable build --release
 
-      - name: Cache cargo binaries
-        uses: actions/cache@v5
-        with:
-          path: ~/.cargo/bin/treereduce-rust
-          key: treereduce-rust-${{ runner.os }}-v1
-
-      - name: Install triage tools (treereduce-rust, other channels, Miri)
+      - name: Install triage tools (other channels, Miri, Shrink Ray, treereduce-rust)
         run: |
           for c in stable beta nightly; do rustup toolchain install $c --profile minimal; done
           rustup component add miri rust-src --toolchain nightly || echo "miri unavailable on this nightly"
           python3 -m venv "$HOME/sr" && "$HOME/sr/bin/pip" install -q shrinkray && echo "$HOME/sr/bin" >> "$GITHUB_PATH" || echo "shrinkray unavailable"
-          command -v treereduce-rust >/dev/null || cargo +stable install treereduce-rust --locked || echo "treereduce-rust unavailable, using built-in reducer only"
+          cargo +stable install treereduce-rust --locked || echo "treereduce-rust unavailable"
 
       - name: Canaries
         continue-on-error: true
@@ -147,7 +142,8 @@ jobs:
             --out fuzz-out \
             "${seed_arg[@]}"
 
-      - name: Store the raw findings first (the runner can disappear during the long triage)
+      # The raw findings are stored first: whatever happens to the runner during the long triage, they are not lost.
+      - name: Store the findings in the single package (release asset findings.zip)
         if: always()
         continue-on-error: true
         env:
@@ -160,40 +156,26 @@ jobs:
           export BIN=$PWD/target/release/rs-compiler-fuzzer KEYS_FILE=$PWD/stored-keys-raw.txt ADD_DIRS="$adds"
           tools/release_sync.sh tools/store_mutator.sh
 
-      - name: Triage new findings (reproduce on every channel, reduce, Miri, bisect, search GitHub)
+      - name: Triage and store each finding (about an hour; every result is stored right away)
         if: always()
         continue-on-error: true
-        timeout-minutes: 100
-        env:
-          GH_TOKEN: ${{ github.token }}
-          DURATION_MIN: ${{ needs.plan.outputs.duration }}
-        run: |
-          shopt -s nullglob
-          bin=./target/release/rs-compiler-fuzzer
-          # what is left of the job's 170 minutes after fuzzing (cap 90): split over at most 2 findings, most of it for
-          # the regression range (every probe installs a toolchain) and the reduction
-          avail=$(( 165 - DURATION_MIN )); [ $avail -gt 90 ] && avail=90; [ $avail -lt 10 ] && avail=10
-          per=$(( avail * 60 / 2 ))
-          reduce=$(( per * 4 / 10 )); bisect=$(( per * 5 / 10 ))
-          echo "triage budget: ${avail} min total, per finding reduce ${reduce}s + bisect ${bisect}s"
-          timeout ${avail}m bash -c "
-            [ -d fuzz-out/findings ] && $bin triage --dirs fuzz-out/findings --limit 2 --budget $reduce --bisect $bisect --out triage-out
-            [ -d fuzz-out/triaged ] && $bin triage --dirs fuzz-out/triaged --limit 1 --budget $reduce --bisect $bisect --out triage-out
-            true"
-          true
-
-      - name: Store findings in the single package (release asset findings.zip)
-        if: always()
+        timeout-minutes: 75
         env:
           GH_TOKEN: ${{ github.token }}
           TOOLCHAIN: ${{ matrix.toolchain }}
         run: |
-          adds=""
-          for d in fuzz-out/findings fuzz-out/triaged; do [ -d "$d" ] && adds="$adds $d"; done
-          if [ -z "$adds" ]; then echo "nothing to store"; exit 0; fi
-          export BIN=$PWD/target/release/rs-compiler-fuzzer KEYS_FILE=$PWD/stored-keys.txt ADD_DIRS="$adds"
-          # the mutator is idempotent: release_sync.sh runs it again if another job updated the package meanwhile
-          tools/release_sync.sh tools/store_mutator.sh
+          shopt -s nullglob
+          export BIN=$PWD/target/release/rs-compiler-fuzzer KEYS_FILE=$PWD/stored-keys.txt
+          end=$((SECONDS + 62 * 60)); n=0
+          for d in fuzz-out/findings/*/ fuzz-out/triaged/*/; do
+            d=${d%/}
+            left=$((end - SECONDS))
+            { [ $n -ge 3 ] || [ $left -lt 900 ]; } && { echo "stopping triage (n=$n, ${left}s left); retriage.yml continues with the rest"; break; }
+            part=$(( left / 3 )); [ $part -gt 720 ] && part=720
+            "$BIN" triage --dir "$d" --budget $part --bisect $part --out triage-out || true
+            ADD_DIRS="$d" tools/release_sync.sh tools/store_mutator.sh || true
+            n=$((n + 1))
+          done
 
       - name: Print findings into the log
         if: always()

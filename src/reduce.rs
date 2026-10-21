@@ -11,7 +11,8 @@
 use crate::runner::{build_and_run, par_map, Config, Limits, Outcome};
 use std::path::PathBuf;
 use std::collections::HashMap;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::thread;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -101,8 +102,19 @@ impl Interest {
     }
 }
 
+static DEADLINE_HIT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 fn expired(deadline: Instant) -> bool {
-    Instant::now() >= deadline
+    let e = Instant::now() >= deadline;
+    if e {
+        DEADLINE_HIT.store(true, Ordering::Relaxed);
+    }
+    e
+}
+
+/// True when the last `reduce_all` finished every stage before its deadlines (so its result is a local minimum of all passes).
+pub fn last_run_complete() -> bool {
+    !DEADLINE_HIT.load(Ordering::Relaxed)
 }
 
 /// Pass 1: remove chunks of lines, halving the chunk size.
@@ -392,9 +404,11 @@ fn top_args(src: &str, open: usize, close: usize) -> Vec<(usize, usize)> {
 }
 
 /// All single-edit simplifications of `src` as `(position, new text)`, in textual order.
-fn expr_candidates(src: &str) -> Vec<(usize, String)> {
+/// Edits `(start, end, replacement)` of `src` (applied lazily: materialising every candidate text of a big
+/// file at once needs gigabytes).
+fn expr_candidates(src: &str) -> Vec<(usize, usize, String)> {
     let b = src.as_bytes();
-    let mut out: Vec<(usize, String)> = Vec::new();
+    let mut out: Vec<(usize, usize, String)> = Vec::new();
     let keywords = ["if", "while", "match", "for", "fn", "return", "in", "else", "let", "mut", "loop", "unsafe", "as"];
     let mut i = 0;
     while i < b.len() {
@@ -422,7 +436,7 @@ fn expr_candidates(src: &str) -> Vec<(usize, String)> {
                     let rs = postfix_start(b, i);
                     for (s, e) in top_args(src, j, close) {
                         let arg = src[s..e].trim();
-                        out.push((rs, format!("{}({}){}", &src[..rs], arg, &src[close + 1..])));
+                        out.push((rs, close + 1, format!("({arg})")));
                     }
                 }
             }
@@ -440,7 +454,7 @@ fn expr_candidates(src: &str) -> Vec<(usize, String)> {
                 if let Some(close) = matching(b, j) {
                     for (s, e) in top_args(src, j, close) {
                         let arg = src[s..e].trim();
-                        out.push((i, format!("{}({}){}", &src[..i], arg, &src[close + 1..])));
+                        out.push((i, close + 1, format!("({arg})")));
                     }
                 }
             }
@@ -472,8 +486,8 @@ fn expr_candidates(src: &str) -> Vec<(usize, String)> {
                             let o2 = o2 + src[o2..].find('{').unwrap_or(0);
                             if src[c1 + 1..o2].trim() == "else" {
                                 if let Some(c2) = matching(b, o2) {
-                                    out.push((i, format!("{}{}{}", &src[..i], &src[o1..=c1], &src[c2 + 1..])));
-                                    out.push((i, format!("{}{}{}", &src[..i], &src[o2..=c2], &src[c2 + 1..])));
+                                    out.push((i, c2 + 1, src[o1..=c1].to_string()));
+                                    out.push((i, c2 + 1, src[o2..=c2].to_string()));
                                 }
                             }
                         }
@@ -491,7 +505,7 @@ fn expr_candidates(src: &str) -> Vec<(usize, String)> {
                     e += 1;
                 }
                 if e > k {
-                    out.push((i, format!("{}{}", &src[..i - 1], &src[e..])));
+                    out.push((i - 1, e, String::new()));
                 }
             }
             i = j.max(i + 1);
@@ -499,7 +513,7 @@ fn expr_candidates(src: &str) -> Vec<(usize, String)> {
         }
         // unary minus in front of a literal
         if c == b'-' && i + 1 < b.len() && b[i + 1].is_ascii_digit() && (i == 0 || matches!(b[i - 1], b'(' | b' ' | b',' | b'=')) {
-            out.push((i, format!("{}{}", &src[..i], &src[i + 1..])));
+            out.push((i, i + 1, String::new()));
         }
         // integer literals: try 0 and 1 (suffix kept)
         if c.is_ascii_digit() && (i == 0 || !(b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_' || b[i - 1] == b'.')) {
@@ -519,7 +533,7 @@ fn expr_candidates(src: &str) -> Vec<(usize, String)> {
                 if suffix.is_empty() || suffix.starts_with('u') || suffix.starts_with('i') {
                     for rep in ["0", "1"] {
                         if digits != rep {
-                            out.push((i, format!("{}{}{}{}", &src[..i], rep, suffix, &src[k..])));
+                            out.push((i, k, format!("{rep}{suffix}")));
                         }
                     }
                 }
@@ -537,6 +551,10 @@ fn expr_candidates(src: &str) -> Vec<(usize, String)> {
 /// Apply `expr_candidates` greedily, last position first, evaluating several candidates at once.
 pub fn simplify_exprs(it: &Interest, src: &str, deadline: Instant) -> String {
     let mut cur = src.to_string();
+    if cur.len() > 60_000 {
+        return cur; // far too many candidates; the case-level and line-level passes come first
+    }
+    let apply = |s: &str, e: &(usize, usize, String)| format!("{}{}{}", &s[..e.0], e.2, &s[e.1..]);
     loop {
         let mut cands = expr_candidates(&cur);
         let mut progress = false;
@@ -545,9 +563,9 @@ pub fn simplify_exprs(it: &Interest, src: &str, deadline: Instant) -> String {
                 return cur;
             }
             let lo = cands.len().saturating_sub(4);
-            let batch: Vec<(usize, String)> = cands[lo..].iter().rev().cloned().collect();
-            let texts: Vec<String> = batch.iter().map(|c| c.1.clone()).collect();
-            let res = par_map(&texts, 4, |c| c.len() < cur.len() + 8 && it.check(c));
+            let batch: Vec<(usize, usize, String)> = cands[lo..].iter().rev().cloned().collect();
+            let texts: Vec<String> = batch.iter().map(|e| apply(&cur, e)).collect();
+            let res = par_map(&texts, 4, |c| (c.len() < cur.len() || (c.len() == cur.len() && c.as_str() < cur.as_str())) && it.check(c));
             match res.iter().position(|&ok| ok) {
                 Some(p) => {
                     let pos = batch[p].0;
@@ -613,8 +631,38 @@ pub fn strip_parens(it: &Interest, src: &str) -> String {
     if out != src && it.check(&out) { out } else { src.to_string() }
 }
 
+/// `use std::hint::black_box as a;` + `let a = a(1);` reads badly (the reducers shorten names): call it `black_box`
+/// again when the program stays interesting.
+pub fn unalias_black_box(it: &Interest, src: &str) -> String {
+    let Some(p) = src.find("use std::hint::black_box as ") else { return src.to_string() };
+    let rest = &src[p + "use std::hint::black_box as ".len()..];
+    let alias: String = rest.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+    if alias.is_empty() || alias == "black_box" || !rest[alias.len()..].starts_with(';') {
+        return src.to_string();
+    }
+    let b = src.as_bytes();
+    let mut out = String::with_capacity(src.len());
+    out.push_str(&src[..p]);
+    out.push_str("use std::hint::black_box;");
+    let mut i = p + "use std::hint::black_box as ".len() + alias.len() + 1;
+    while i < src.len() {
+        if src[i..].starts_with(&alias) && (i == 0 || !(b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_' || b[i - 1] == b'.' || b[i - 1] == b':')) && src.as_bytes().get(i + alias.len()) == Some(&b'(') {
+            out.push_str("black_box");
+            i += alias.len();
+        } else {
+            let ch = src[i..].chars().next().unwrap();
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+    if it.check(&out) { out } else { src.to_string() }
+}
+
 /// `rustfmt` the result if it stays interesting (the issue text is easier to read).
 pub fn format_if_interesting(it: &Interest, src: &str) -> String {
+    if src.lines().count() > 400 {
+        return src.to_string(); // formatting only makes a big leftover bigger
+    }
     let dir = it.work.join(format!("fmt{}_{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
     let _ = std::fs::create_dir_all(&dir);
     let f = dir.join("x.rs");
@@ -641,34 +689,168 @@ pub fn shrinkray(it: &Interest, src: &str, deadline: Instant, log: &mut ReduceLo
     let me = std::env::current_exe().unwrap();
     std::fs::write(&test, format!("#!/bin/bash\nexec \"{}\" interesting --cfg \"{}\" --file \"$1\"\n", me.display(), cfg.display())).unwrap();
     let _ = Command::new("chmod").arg("+x").arg(&test).status();
-    let remaining = deadline.saturating_duration_since(Instant::now()).as_secs().max(30);
-    let out = Command::new("timeout")
-        .arg("-s")
-        .arg("INT")
-        .arg(remaining.to_string())
-        .arg(&exe)
-        .args(["--ui", "basic", "--input-type", "arg", "--parallelism", "4", "--volume", "quiet", "--timeout", "300", "--memory-limit", "0", "--no-exit-on-completion"])
+    let sr_start = Instant::now();
+    // Shrink Ray keeps going after the last improvement (random restarts) and never exits on its own: stop it when the file
+    // has not changed for a while. A stall counts as "finished"; hitting the deadline does not.
+    let stall = Duration::from_secs((deadline.saturating_duration_since(sr_start).as_secs() / 5).clamp(45, 150) + (src.len() as u64 / 2000).min(240));
+    let mut child = match Command::new(&exe)
+        .args(["--ui", "basic", "--input-type", "arg", "--parallelism", "4", "--volume", "quiet", "--timeout", "300", "--memory-limit", "0", "--exit-on-completion"])
         .arg(&test)
         .arg(&case)
         .current_dir(&dir)
-        .output();
+        .stdout(std::fs::File::create(dir.join("sr.out")).map(Stdio::from).unwrap_or(Stdio::null()))
+        .stderr(std::fs::File::create(dir.join("sr.err")).map(Stdio::from).unwrap_or(Stdio::null()))
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(_) => return src.to_string(),
+    };
+    let mut last_text = std::fs::read_to_string(&case).unwrap_or_default();
+    let mut last_change = Instant::now();
+    let how;
+    loop {
+        match child.try_wait() {
+            Ok(Some(st)) => {
+                how = format!("exited by itself ({:?})", st.code());
+                break;
+            }
+            Ok(None) => {}
+            Err(_) => {
+                how = "lost".to_string();
+                break;
+            }
+        }
+        if Instant::now() >= deadline {
+            DEADLINE_HIT.store(true, Ordering::Relaxed);
+            how = "stopped at the deadline".to_string();
+            let _ = Command::new("kill").args(["-INT", &child.id().to_string()]).status();
+            break;
+        }
+        let now_text = std::fs::read_to_string(&case).unwrap_or_default();
+        if now_text != last_text {
+            last_text = now_text;
+            last_change = Instant::now();
+        } else if last_change.elapsed() > stall {
+            how = format!("no improvement for {}s", stall.as_secs());
+            let _ = Command::new("kill").args(["-INT", &child.id().to_string()]).status();
+            break;
+        }
+        thread::sleep(Duration::from_secs(2));
+    }
+    // give it a moment to write the final file, then make sure it is gone
+    for _ in 0..10 {
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            break;
+        }
+        thread::sleep(Duration::from_millis(500));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    log.0.push(format!("shrinkray {how} after {}s", sr_start.elapsed().as_secs()));
     let res = std::fs::read_to_string(&case).unwrap_or_else(|_| src.to_string());
     if res == src {
         // nothing happened: keep the tool's last words, otherwise a broken setup is invisible
-        if let Ok(o) = &out {
-            let text = format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
-            let tail: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).rev().take(6).collect();
-            log.0.push(format!("shrinkray made no progress (exit {:?}): {}", o.status.code(), tail.into_iter().rev().collect::<Vec<_>>().join(" | ")));
-        }
+        let text = format!("{}{}", std::fs::read_to_string(dir.join("sr.out")).unwrap_or_default(), std::fs::read_to_string(dir.join("sr.err")).unwrap_or_default());
+        let tail: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).rev().take(6).collect();
+        log.0.push(format!("shrinkray made no progress: {}", tail.into_iter().rev().collect::<Vec<_>>().join(" | ")));
     }
     let _ = std::fs::remove_dir_all(&dir);
     if res.trim().is_empty() || !it.check(&res) { src.to_string() } else { res }
+}
+
+/// A batch file (many `mod case_N`) -> only the case modules (and their `go!` calls) that are needed.
+/// Line-wise ddmin on a 400 KB batch is hopeless; modules are the natural unit.
+pub fn shrink_cases(it: &Interest, src: &str, deadline: Instant) -> String {
+    let lines: Vec<&str> = src.lines().collect();
+    // (first line, last line, id) of every top-level `mod case_N { ... }`
+    let mut mods: Vec<(usize, usize, String)> = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        if let Some(rest) = lines[i].strip_prefix("mod case_") {
+            let id: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+            let mut j = i + 1;
+            while j < lines.len() && lines[j] != "}" {
+                j += 1;
+            }
+            if !id.is_empty() && j < lines.len() {
+                mods.push((i, j, id));
+                i = j;
+            }
+        }
+        i += 1;
+    }
+    if mods.len() < 2 {
+        return src.to_string();
+    }
+    let build = |keep: &[usize]| -> String {
+        let ids: Vec<&str> = keep.iter().map(|&k| mods[k].2.as_str()).collect();
+        let mut out: Vec<&str> = Vec::new();
+        let mut skip_until = 0usize;
+        for (n, l) in lines.iter().enumerate() {
+            if n < skip_until {
+                continue;
+            }
+            if let Some(k) = mods.iter().position(|m| m.0 == n) {
+                if keep.contains(&k) {
+                    out.extend(&lines[mods[k].0..=mods[k].1]);
+                }
+                skip_until = mods[k].1 + 1;
+                continue;
+            }
+            // `    go!(ID, case_ID);`
+            if let Some(rest) = l.trim_start().strip_prefix("go!(") {
+                let id: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+                if !ids.contains(&id.as_str()) {
+                    continue;
+                }
+            }
+            out.push(l);
+        }
+        out.join("\n") + "\n"
+    };
+    // cases are independent modules: first look for ONE case that shows the bug on its own (a few seconds per try instead of
+    // minutes for the whole batch), smallest first
+    let mut order: Vec<usize> = (0..mods.len()).collect();
+    order.sort_by_key(|&k| mods[k].1 - mods[k].0);
+    let singles: Vec<String> = order.iter().map(|&k| build(&[k])).collect();
+    for chunk in singles.chunks(4) {
+        if expired(deadline) {
+            break;
+        }
+        let res = par_map(chunk, 4, |c| it.check(c));
+        if let Some(p) = res.iter().position(|&ok| ok) {
+            return chunk[p].clone();
+        }
+    }
+    let mut keep: Vec<usize> = (0..mods.len()).collect();
+    let mut n = keep.len().div_ceil(2);
+    while n >= 1 {
+        let mut i = 0;
+        while i < keep.len() && keep.len() > 1 {
+            if expired(deadline) {
+                return build(&keep);
+            }
+            let end = (i + n).min(keep.len());
+            let cand: Vec<usize> = keep[..i].iter().chain(keep[end..].iter()).copied().collect();
+            if !cand.is_empty() && it.check(&build(&cand)) {
+                keep = cand;
+            } else {
+                i += n;
+            }
+        }
+        if n == 1 {
+            break;
+        }
+        n = n.div_ceil(2);
+    }
+    build(&keep)
 }
 
 pub struct ReduceLog(pub Vec<String>);
 
 /// Full pipeline. `budget` bounds the whole thing.
 pub fn reduce_all(it: &Interest, src: &str, budget: Duration, log: &mut ReduceLog) -> String {
+    DEADLINE_HIT.store(false, Ordering::Relaxed);
     let start = Instant::now();
     let deadline = start + budget;
     let mut cur = src.to_string();
@@ -676,7 +858,9 @@ pub fn reduce_all(it: &Interest, src: &str, budget: Duration, log: &mut ReduceLo
         log.0.push(format!("{what}: {} lines / {} bytes ({:.0}s)", cur.lines().count(), cur.len(), start.elapsed().as_secs_f32()));
     };
     note(log, "start", &cur);
-    cur = shrink_lines(it, &cur, start + budget / 6);
+    cur = shrink_cases(it, &cur, start + budget / 4);
+    note(log, "after dropping unneeded cases", &cur);
+    cur = shrink_lines(it, &cur, start + budget * 2 / 5);
     note(log, "after line shrinking", &cur);
     // drop the harness: a plain `fn main` is what a human would post
     match flatten(&cur) {
@@ -692,9 +876,9 @@ pub fn reduce_all(it: &Interest, src: &str, budget: Duration, log: &mut ReduceLo
         Command::new(exe).arg("--version").output().is_ok()
     };
     if have_sr {
-        cur = shrinkray(it, &cur, start + budget * 7 / 10, log);
+        cur = shrinkray(it, &cur, start + budget * 11 / 20, log);
         note(log, "after shrinkray", &cur);
-        cur = drop_calls(it, &cur, start + budget * 4 / 5);
+        cur = drop_calls(it, &cur, start + budget * 7 / 10);
         cur = simplify_exprs(it, &cur, start + budget * 9 / 10);
         note(log, "after expression polish", &cur);
     } else {
@@ -718,6 +902,7 @@ pub fn reduce_all(it: &Interest, src: &str, budget: Duration, log: &mut ReduceLo
         cur = shrink_lines(it, &cur, fin);
         note(log, "after final passes", &cur);
     }
+    cur = unalias_black_box(it, &cur);
     cur = strip_parens(it, &cur);
     cur = format_if_interesting(it, &cur);
     note(log, "final (rustfmt)", &cur);

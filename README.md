@@ -127,10 +127,19 @@ by hand. The `*-checks` configs and `PANIC` lines can also point at a generator 
   the same asset; otherwise (another job wrote meanwhile) it backs off and redoes the merge on the fresh package.
   The merge (`pack`) is idempotent and the archive is deterministic, so unchanged findings produce no diff; at the end the
   keys that were stored are checked in the downloaded result.
+- **Pipeline**: every fuzz job fuzzes for 45 minutes, stores the raw findings in the package, and then spends about an hour
+  triaging what it found (drop unneeded cases, reduce with Shrink Ray, shortest flags, Miri, exact regression range, GitHub
+  search), storing each result as soon as it is ready. `retriage.yml` (when a fuzz/miri run ends, and daily at 01:30 UTC, 4
+  shards) continues with everything that has no result yet, an older `fuzzer_id`, or an unsettled minimisation; `verify.yml`
+  (01:00 UTC) re-runs the stored reproducers. Schedule: fuzz ~00:00 Warsaw time (22:00 UTC), verify 01:00 UTC, retriage
+  01:30 UTC, Miri 03:00 UTC.
+- **Minimisation status**: a finding is `READY TO REPORT` only when its minimisation *converged*: one run finished every pass
+  before its deadlines (`min_status: complete once`) and the next run, started from that result, changed nothing
+  (`converged`). Until then it stays `ALMOST READY` and is picked up again (at most 6 runs). `STATUS.md` has a Minimisation
+  section, `INDEX.md` a column with the status.
 - **`finding.json` + `fuzzer_id`**: every stored finding has a standard `finding.json` (strategy, kind, minimal flags, reduced
   program hash, regression edges, reproduction per channel, ...) and the `fuzzer_id` of the triage logic that produced it
-  (`FUZZER_ID` in `src/triage.rs`, bumped by hand when minimisation/bisect improve). `retriage.yml` (daily 05:00, 3 shards, or
-  manual) triages every finding with an older id again - continuing from its previous reduced program - and replaces it in the
+  (`FUZZER_ID` in `src/triage.rs`, bumped by hand when minimisation/bisect improve). `retriage.yml` triages every finding with an older id again - continuing from its previous reduced program - and replaces it in the
   package; the finding keeps its key, the same reduced program found twice is merged (`reduced_hash`).
 - `verify.yml` (daily, or manual): per channel (nightly, beta, stable) re-runs every stored finding and records
   `repro.<channel>`, `last_verified` and `state` (`open`/`fixed`) in its `status.cfg`, via the same sync. Nothing is deleted.
