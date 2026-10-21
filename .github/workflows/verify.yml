@@ -5,7 +5,7 @@ name: verify-stored-findings
 # state open/fixed - nothing is deleted), using tools/release_sync.sh so concurrent jobs do not lose updates.
 on:
   schedule:
-    - cron: "30 6 * * *"
+    - cron: "0 1 * * *"
   workflow_dispatch:
 
 permissions:

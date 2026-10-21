@@ -296,6 +296,8 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     let mut reduce_log = ReduceLog(Vec::new());
     let mut reduced = case.clone();
     let mut did_reduce = false;
+    let mut continued_from: Option<String> = None;
+    let reduce_started = std::time::Instant::now();
     if let (Some(pc), false) = (&primary, o.no_reduce) {
         if matrix.iter().any(|m| m.2 == Repro::Yes) {
             let it = Interest { rustc: vec!["rustc".into(), format!("+{pc}")], a: base.clone(), b: bad.clone(), crash_sig: sig.clone(), limits: Limits { compile: Duration::from_secs(120), run: Duration::from_secs(10) }, work: o.work.clone(), cache: Default::default() };
@@ -304,6 +306,7 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
             let start_src = match &previous {
                 Some(prev) if it.check(prev) => {
                     reduce_log.0.push(format!("continuing from the previously reduced program ({} lines)", prev.lines().count()));
+                    continued_from = Some(crate::pack::text_hash(prev));
                     prev.clone()
                 }
                 _ => case.clone(),
@@ -428,6 +431,24 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
         None
     };
 
+    // 5c. how settled is the minimisation? (the daily job keeps going until two runs agree)
+    let old_st = read_cfg(&dir.join("status.cfg"));
+    let min_runs = old_st.get("min_runs").and_then(|v| v.parse::<u32>().ok()).unwrap_or(0) + 1;
+    let complete = did_reduce && crate::reduce::last_run_complete();
+    let unchanged = continued_from.as_deref() == Some(crate::pack::text_hash(&reduced).as_str());
+    let min_status = if !did_reduce {
+        "not reduced".to_string()
+    } else if complete && unchanged {
+        "converged".to_string()
+    } else if min_runs >= 6 {
+        "converged (run limit)".to_string()
+    } else if complete {
+        "complete once - a confirmation run is pending".to_string()
+    } else {
+        "in progress - a pass ran out of time".to_string()
+    };
+    let converged = min_status.starts_with("converged");
+
     // 6. verdict
     let mut blockers: Vec<String> = Vec::new();
     let mut warns: Vec<String> = Vec::new();
@@ -454,7 +475,10 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     if !search.performed {
         warns.push(format!("upstream search {}", if search.note.is_empty() { "not performed".to_string() } else { search.note.clone() }));
     } else if !search.possible.is_empty() {
-        warns.push(format!("possible duplicates among the search results: {} - read them before reporting", search.possible.iter().take(6).cloned().collect::<Vec<_>>().join(", ")));
+        warns.push(format!("possible duplicates among the search results: {} - read them before reporting", search.possible.join(", ")));
+    }
+    if did_reduce && !converged {
+        warns.push(format!("minimisation not converged yet ({min_status}, run {min_runs}); the scheduled job continues it"));
     }
     let verdict = if !blockers.is_empty() {
         "NOT READY"
@@ -477,6 +501,9 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     st.insert("upstream_search".into(), if search.performed { if search.possible.is_empty() { "no matching issue found".into() } else { format!("possible duplicates: {}", search.possible.join(" ")) } } else { "not performed".into() });
     st.insert("kind".into(), if crash { "compiler-crash".into() } else { "wrong-code".into() });
     st.insert("fuzzer_id".into(), FUZZER_ID.to_string());
+    st.insert("min_status".into(), min_status.clone());
+    st.insert("min_runs".into(), min_runs.to_string());
+    st.insert("min_last_run_seconds".into(), reduce_started.elapsed().as_secs().to_string());
     st.insert("min_common_flags".into(), crate::runner::common_flags().join(" "));
     st.insert("min_base_flags".into(), base.flags.join(" "));
     st.insert("min_bad_flags".into(), bad.flags.join(" "));
@@ -535,6 +562,7 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
         }
         let _ = writeln!(md);
     }
+    let _ = writeln!(md, "### Minimisation\n\n- status: **{min_status}** (run {min_runs}; last run {}s; every pass finished before its deadline: {})\n", reduce_started.elapsed().as_secs(), if complete { "yes" } else { "no" });
     let _ = writeln!(md, "### UB check (Miri, nightly)\n\n- result: **{}** - {}", m.verdict, m.detail);
     if !miri_agrees.is_empty() {
         let _ = writeln!(md, "- {miri_agrees}");
@@ -635,7 +663,7 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
 /// Fixed findings and Miri findings are left alone.
 pub fn stale_findings(pkg: &Path) -> Vec<PathBuf> {
     let root = pkg.join("findings");
-    let mut v: Vec<(u32, PathBuf)> = std::fs::read_dir(&root)
+    let mut v: Vec<(u32, u32, PathBuf)> = std::fs::read_dir(&root)
         .into_iter()
         .flatten()
         .flatten()
@@ -646,9 +674,11 @@ pub fn stale_findings(pkg: &Path) -> Vec<PathBuf> {
             let meta = read_cfg(&p.join("repro.cfg"));
             let id = st.get("fuzzer_id").and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
             let skip = st.get("state").map(|s| s == "fixed").unwrap_or(false) || meta.get("mode").map(|m| m == "miri").unwrap_or(false);
-            (id < FUZZER_ID && !skip).then_some((id, p))
+            let runs = st.get("min_runs").and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
+            let unsettled = !st.get("min_status").map(|s| s.starts_with("converged")).unwrap_or(false) && runs < 6;
+            ((id < FUZZER_ID || unsettled) && !skip).then_some((id, runs, p))
         })
         .collect();
     v.sort();
-    v.into_iter().map(|x| x.1).collect()
+    v.into_iter().map(|x| x.2).collect()
 }

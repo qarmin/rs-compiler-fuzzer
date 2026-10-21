@@ -244,6 +244,17 @@ pub fn run(pkg: &Path, adds: &[PathBuf], toolchain: &str, contains: Option<&Path
     0
 }
 
+/// `rust-lang/rust#164603` -> markdown link; other text is kept.
+fn linkify(text: &str) -> String {
+    text.split_whitespace()
+        .map(|w| match w.split_once('#') {
+            Some((repo, n)) if repo.contains('/') && !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()) => format!("[{w}](https://github.com/{repo}/issues/{n})"),
+            _ => w.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 pub fn write_index(pkg: &Path) {
     let root = pkg.join("findings");
     let mut rows: Vec<(String, Cfg)> = std::fs::read_dir(&root)
@@ -261,12 +272,12 @@ pub fn write_index(pkg: &Path) {
         _ => 2,
     };
     rows.sort_by(|a, b| rank(&a.1).cmp(&rank(&b.1)).then(a.0.cmp(&b.0)));
-    let mut s = String::from("# Stored findings\n\nOne row per distinct finding; every directory under `findings/` has `STATUS.md` (verdict, reproduction per channel, UB check, upstream search) and, when reduced, `reduced.rs` + `ISSUE.md`.\n\n");
-    let _ = writeln!(s, "| verdict | state | class | finding | kind | reduced lines | seen | last seen | upstream |\n|---|---|---|---|---|---|---|---|---|");
+    let mut s = String::from("# Stored findings\n\nOne row per distinct finding; every directory under `findings/` has `finding.json`, `STATUS.md` (verdict, reproduction per channel, minimisation status, UB check, upstream search) and, once triaged, `reduced.rs` + `ISSUE.md`. A finding is READY TO REPORT only after its minimisation converged (two runs agree).\n\n");
+    let _ = writeln!(s, "| verdict | state | class | finding | kind | reduced lines | minimisation | seen | last seen | upstream |\n|---|---|---|---|---|---|---|---|---|---|");
     for (k, c) in &rows {
         let g = |n: &str| c.get(n).cloned().unwrap_or_else(|| "-".into());
-        let up = std::fs::read_to_string(root.join(k).join("known-issues.txt")).map(|t| t.split_whitespace().take(3).collect::<Vec<_>>().join(" ")).unwrap_or_else(|_| g("upstream_search"));
-        let _ = writeln!(s, "| {} | {} | {} | `{k}` | {} | {} | {}x | {} | {} |", g("verdict"), g("state"), g("class"), g("kind"), g("reduced_lines"), g("times_seen"), g("last_seen"), up.chars().take(80).collect::<String>());
+        let up = std::fs::read_to_string(root.join(k).join("known-issues.txt")).map(|t| linkify(&t)).unwrap_or_else(|_| linkify(&g("upstream_search")));
+        let _ = writeln!(s, "| {} | {} | {} | `{k}` | {} | {} | {} | {}x | {} | {} |", g("verdict"), g("state"), g("class"), g("kind"), g("reduced_lines"), g("min_status"), g("times_seen"), g("last_seen"), up);
     }
     let _ = writeln!(s, "\n{} findings.", rows.len());
     std::fs::write(pkg.join("INDEX.md"), s).unwrap();
