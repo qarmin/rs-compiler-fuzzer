@@ -9,6 +9,8 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 pub struct Bisect {
+    /// the PR (or commit range) `cargo bisect-rustc` blamed, as markdown lines for the issue
+    pub pr: Vec<String>,
     /// human readable lines for STATUS.md
     pub lines: Vec<String>,
     /// one-line summary for status.cfg / the index
@@ -19,6 +21,8 @@ pub struct Bisect {
 
 const OLDEST_STABLE_MINOR: u32 = 80;
 const NIGHTLY_DAYS: i64 = 365;
+/// Extra time for `cargo bisect-rustc` once the nightly range is a single day.
+const PR_SECONDS: u64 = 420;
 
 fn rustup(args: &[&str], secs: u64) -> bool {
     let mut c = Command::new("rustup");
@@ -130,6 +134,7 @@ pub fn bisect(src: &Path, base: &Config, bad: &Config, sig: &Option<String>, wor
     let mut edges: Vec<(String, bool)> = Vec::new();
     let mut lines = Vec::new();
     let mut summary = Vec::new();
+    let mut narrow: Option<(String, String)> = None;
 
     if stable_reproduces {
         let latest: i64 = rustc_version("stable").split_whitespace().nth(1).and_then(|v| v.split('.').nth(1)).and_then(|m| m.parse().ok()).unwrap_or(0);
@@ -187,6 +192,7 @@ pub fn bisect(src: &Path, base: &Config, bad: &Config, sig: &Option<String>, wor
                     if b - g == 1 {
                         lines.push(format!("nightly: **first affected: {bt}** (last good: {gt}); `cargo bisect-rustc --start {} --end {}` narrows it to a PR", &gt[8..], &bt[8..]));
                         summary.push(format!("nightly: first bad {bt}"));
+                        narrow = Some((gt[8..].to_string(), bt[8..].to_string()));
                     } else {
                         lines.push(format!("nightly: regressed after {gt} and no later than {bt} (time budget used up)"));
                         summary.push(format!("nightly: ({gt}, {bt}]"));
@@ -199,5 +205,63 @@ pub fn bisect(src: &Path, base: &Config, bad: &Config, sig: &Option<String>, wor
     for n in cx.notes.iter().take(6) {
         lines.push(format!("note: {n}"));
     }
-    Bisect { lines, summary: summary.join("; "), edges }
+    let mut pr = Vec::new();
+    if let Some((gt, bt)) = narrow {
+        // the nightly pair is one day apart: let cargo-bisect-rustc find the PR (own time allowance, beyond the probes)
+        pr = pr_range(src, base, bad, sig, work, &gt, &bt, Duration::from_secs(PR_SECONDS));
+        if let Some(l) = pr.iter().find(|l| l.contains("rust-lang/rust")) {
+            summary.push(format!("pr: {}", l.trim_start_matches("- ")));
+        }
+    }
+    Bisect { pr, lines, summary: summary.join("; "), edges }
+}
+
+/// Narrow a one-day nightly range down to the commit/PR with `cargo bisect-rustc` (needs it installed;
+/// without it, or when it runs out of time, the result says so and the dates stay the answer).
+fn pr_range(src: &Path, base: &Config, bad: &Config, sig: &Option<String>, work: &Path, start: &str, end: &str, budget: Duration) -> Vec<String> {
+    let mut probe = Command::new("cargo-bisect-rustc");
+    probe.arg("--version");
+    if !matches!(exec(probe, Duration::from_secs(20)), Ok(r) if r.code == Some(0)) {
+        return vec!["- PR not determined: `cargo-bisect-rustc` is not installed".into()];
+    }
+    let dir = work.join(format!("pr_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let it = crate::reduce::Interest { rustc: vec!["rustc".into()], a: base.clone(), b: bad.clone(), crash_sig: sig.clone(), limits: Limits { compile: Duration::from_secs(300), run: Duration::from_secs(20) }, work: dir.clone(), cache: Default::default() };
+    let (cfg, script, file) = (dir.join("interest.cfg"), dir.join("test.sh"), dir.join("reduced.rs"));
+    let me = std::env::current_exe().unwrap_or_else(|_| "rs-compiler-fuzzer".into());
+    let _ = std::fs::write(&cfg, it.to_cfg());
+    let _ = std::fs::copy(src, &file);
+    // exit 0 = the bug is present = "regression" for `--regress success`
+    let _ = std::fs::write(&script, format!("#!/bin/bash\nexec \"{}\" interesting --cfg \"{}\" --file \"{}\"\n", me.display(), cfg.display(), file.display()));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755));
+    }
+    let mut c = Command::new("cargo-bisect-rustc");
+    c.args(["--start", start, "--end", end, "--regress", "success"]).arg(format!("--script={}", script.display())).current_dir(&dir);
+    c.args(["--timeout", "300"]);
+    let out = exec(c, budget);
+    let _ = std::fs::remove_dir_all(&dir);
+    let text = match out {
+        Ok(r) => format!("{}\n{}", String::from_utf8_lossy(&r.stdout), r.stderr),
+        Err(e) => return vec![format!("- PR not determined: cannot run cargo-bisect-rustc ({e})")],
+    };
+    let mut res: Vec<String> = Vec::new();
+    for l in text.lines() {
+        let t = l.trim();
+        if t.starts_with("ERROR") || t.starts_with("error") {
+            continue;
+        }
+        if (t.starts_with("Regression in") && !t.contains("nightly-")) || t.contains("rust-lang/rust/pull/") || t.contains("rust-lang/rust/compare/") || t.contains("rust-lang/rust/commit/") {
+            res.push(format!("- {t}"));
+        }
+    }
+    res.dedup();
+    if res.is_empty() {
+        let tail: Vec<&str> = text.lines().rev().filter(|l| !l.trim().is_empty()).take(2).collect();
+        res.push(format!("- PR not determined within {}s ({})", budget.as_secs(), tail.into_iter().rev().collect::<Vec<_>>().join(" / ").chars().take(200).collect::<String>()));
+    }
+    res.truncate(8);
+    res
 }

@@ -87,6 +87,7 @@ jobs:
     steps:
       - env:
           GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           gh release view "$RELEASE" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
             gh release create "$RELEASE" --repo "$GITHUB_REPOSITORY" --prerelease --title "$RELEASE" \
@@ -117,6 +118,7 @@ jobs:
           rustup component add miri rust-src --toolchain nightly || echo "miri unavailable on this nightly"
           python3 -m venv "$HOME/sr" && "$HOME/sr/bin/pip" install -q shrinkray && echo "$HOME/sr/bin" >> "$GITHUB_PATH" || echo "shrinkray unavailable"
           cargo +stable install treereduce-rust --locked || echo "treereduce-rust unavailable"
+          cargo +stable install cargo-bisect-rustc --locked || echo "cargo-bisect-rustc unavailable"
 
       - name: Canaries
         continue-on-error: true
@@ -148,6 +150,7 @@ jobs:
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
           TOOLCHAIN: ${{ matrix.toolchain }}
         run: |
           adds=""
@@ -162,6 +165,7 @@ jobs:
         timeout-minutes: 75
         env:
           GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
           TOOLCHAIN: ${{ matrix.toolchain }}
         run: |
           shopt -s nullglob
