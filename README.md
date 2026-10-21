@@ -152,3 +152,12 @@ by hand. The `*-checks` configs and `PANIC` lines can also point at a generator 
 
 Open `I-miscompile` issues are the model for what to generate:
 <https://github.com/rust-lang/rust/issues?q=state%3Aopen%20label%3A%22I-miscompile%22>.
+
+## MIR or LLVM, and the offending PR
+
+- Every reproducing finding is retried on nightly with `-Zmir-opt-level=0` for both configurations. The result is in `STATUS.md`
+  ("MIR optimisations or LLVM?"), `status.cfg` (`mir_opt`) and the `ISSUE.md` draft: the difference remains = not a MIR optimisation (LLVM or
+  codegen); it disappears = a MIR optimisation is involved.
+- When the bisection over nightlies ends with two consecutive days, `cargo bisect-rustc` (installed by the fuzz and retriage jobs, uses
+  `GITHUB_TOKEN`) narrows them down to the commit/PR, with its own 7 minute allowance. The PR links go to `ISSUE.md` and `status.cfg`
+  (`regression_pr`); if it does not finish, the dates stay the answer.

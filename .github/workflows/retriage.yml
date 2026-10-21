@@ -57,11 +57,13 @@ jobs:
           rustup component add miri rust-src --toolchain nightly || echo "miri unavailable on this nightly"
           python3 -m venv "$HOME/sr" && "$HOME/sr/bin/pip" install -q shrinkray && echo "$HOME/sr/bin" >> "$GITHUB_PATH" || echo "shrinkray unavailable"
           cargo +stable install treereduce-rust --locked || echo "treereduce-rust unavailable"
+          cargo +stable install cargo-bisect-rustc --locked || echo "cargo-bisect-rustc unavailable"
       - run: cargo +stable build --release
 
       - name: Download the package
         env:
           GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           mkdir -p pkg
           if gh release download "$RELEASE" --repo "$GITHUB_REPOSITORY" --pattern findings.zip --dir . 2>/dev/null; then unzip -q -o findings.zip -d pkg; fi
@@ -70,6 +72,7 @@ jobs:
       - name: Triage, one finding at a time, and store each result right away
         env:
           GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
           LIMIT: ${{ inputs.limit || '6' }}
           REDUCE: ${{ inputs.reduce_seconds || '600' }}
           BISECT: ${{ inputs.bisect_seconds || '900' }}

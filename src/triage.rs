@@ -401,6 +401,23 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
         still = matrix2.iter().any(|m| m.2 == Repro::Yes);
     }
 
+    // 3b. MIR optimisations or LLVM? (-Zmir-opt-level=0 on nightly: if the difference stays, MIR opts are not the cause)
+    let mir_opt = if still && matrix2.iter().any(|m| m.0 == "nightly" && m.2 == Repro::Yes) {
+        let with0 = |c: &Config| {
+            let mut c = c.clone();
+            c.flags.push("-Zmir-opt-level=0".into());
+            c
+        };
+        let rustc = vec!["rustc".to_string(), "+nightly".to_string()];
+        match reproduces(&rustc, &reduced_path, &with0(&base), &with0(&bad), &sig, &lim, &o.work).0 {
+            Repro::Yes => "llvm: still reproduces with -Zmir-opt-level=0, so MIR optimisations are not the cause (LLVM or code generation)".to_string(),
+            Repro::No => "mir: does not reproduce with -Zmir-opt-level=0, so a MIR optimisation is involved".to_string(),
+            Repro::NotApplicable => "unknown: -Zmir-opt-level=0 not applicable".to_string(),
+        }
+    } else {
+        "unknown: not reproduced on nightly".to_string()
+    };
+
     // 4. Miri (only meaningful for wrong-code findings)
     let m = if crash || !still {
         MiriResult { verdict: "skipped".into(), detail: if crash { "not applicable (compiler crash)".into() } else { "does not reproduce".into() }, stdout: String::new() }
@@ -499,6 +516,7 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     st.insert("original_lines".into(), lines_of(&case).to_string());
     st.insert("miri".into(), format!("{}: {}", m.verdict, m.detail));
     st.insert("upstream_search".into(), if search.performed { if search.possible.is_empty() { "no matching issue found".into() } else { format!("possible duplicates: {}", search.possible.join(" ")) } } else { "not performed".into() });
+    st.insert("mir_opt".into(), mir_opt.clone());
     st.insert("kind".into(), if crash { "compiler-crash".into() } else { "wrong-code".into() });
     st.insert("fuzzer_id".into(), FUZZER_ID.to_string());
     st.insert("min_status".into(), min_status.clone());
@@ -515,6 +533,9 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
         st.insert(format!("repro.{ch}"), format!("{} ({})", r.word(), ver));
     }
     if let Some(b) = &bis {
+        if !b.pr.is_empty() {
+            st.insert("regression_pr".into(), b.pr.iter().map(|l| l.trim_start_matches("- ").to_string()).collect::<Vec<_>>().join(" | "));
+        }
         st.insert("regression".into(), if b.summary.is_empty() { "unknown".into() } else { b.summary.clone() });
     }
     st.insert("last_verified".into(), date.clone());
@@ -560,8 +581,12 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
         for l in &b.lines {
             let _ = writeln!(md, "- {l}");
         }
+        for l in &b.pr {
+            let _ = writeln!(md, "{l}");
+        }
         let _ = writeln!(md);
     }
+    let _ = writeln!(md, "### MIR optimisations or LLVM?\n\n- {mir_opt}\n");
     let _ = writeln!(md, "### Minimisation\n\n- status: **{min_status}** (run {min_runs}; last run {}s; every pass finished before its deadline: {})\n", reduce_started.elapsed().as_secs(), if complete { "yes" } else { "no" });
     let _ = writeln!(md, "### UB check (Miri, nightly)\n\n- result: **{}** - {}", m.verdict, m.detail);
     if !miri_agrees.is_empty() {
@@ -632,6 +657,9 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
             let _ = writeln!(is, "Commands:\n```\n{}\n{}\n```\n(did not reproduce when this draft was written)\n", cmd(&base), cmd(&bad));
         }
     }
+    if let Some(l) = mir_opt.strip_prefix("llvm: ").or_else(|| mir_opt.strip_prefix("mir: ")) {
+        let _ = writeln!(is, "{}\n", l.replace("does not reproduce", "The difference disappears").replace("still reproduces", "The difference remains").replacen(", so", "; so", 1).replace("with -Zmir-opt-level=0", "with `-Zmir-opt-level=0` (nightly)"));
+    }
     let _ = writeln!(is, "### Meta\n\n`rustc --version --verbose`:\n```\n{vv}\n```\n");
     let _ = writeln!(is, "Problem was found by a rust fuzzer (created by an LLM) - https://github.com/qarmin/rs-compiler-fuzzer\n");
     let _ = writeln!(is, "| channel | reproducible |\n|---|---|");
@@ -641,6 +669,12 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     if let Some(b) = &bis {
         for (label, yes) in &b.edges {
             let _ = writeln!(is, "| {label} | {} |", if *yes { "yes" } else { "no" });
+        }
+        if !b.pr.is_empty() {
+            let _ = writeln!(is, "\nBisected with `cargo bisect-rustc`:\n");
+            for l in &b.pr {
+                let _ = writeln!(is, "{l}");
+            }
         }
     }
     std::fs::write(dir.join("ISSUE.md"), is).unwrap();
