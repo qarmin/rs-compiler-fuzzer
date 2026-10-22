@@ -8,15 +8,167 @@ use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-pub struct Bisect {
-    /// the PR (or commit range) `cargo bisect-rustc` blamed, as markdown lines for the issue
-    pub pr: Vec<String>,
+/// One of the three regression searches (stable releases, nightlies, the PR).
+#[derive(Default, Clone, Debug)]
+pub struct Part {
+    /// a precise result (or "older than the search window")
+    pub done: bool,
+    /// the search does not apply (the bug does not reproduce on that channel)
+    pub na: bool,
     /// human readable lines for STATUS.md
     pub lines: Vec<String>,
     /// one-line summary for status.cfg / the index
     pub summary: String,
     /// the points of contact for the issue's version table: (toolchain with its `rustc -V`, reproduces)
     pub edges: Vec<(String, bool)>,
+    /// why it is not done (budget used up, tool missing ...)
+    pub note: String,
+    /// nightly: the two consecutive days between which it appeared (`YYYY-MM-DD`), input of the PR search
+    pub range: Option<(String, String)>,
+}
+
+#[derive(Default, Clone, Debug)]
+pub struct Bisect {
+    pub stable: Part,
+    pub nightly: Part,
+    pub pr: Part,
+    pub notes: Vec<String>,
+}
+
+/// Which searches to run (the others keep their stored result).
+#[derive(Clone, Copy)]
+pub struct Want {
+    pub stable: bool,
+    pub nightly: bool,
+    pub pr: bool,
+}
+
+impl Bisect {
+    pub fn lines(&self) -> Vec<String> {
+        let mut v: Vec<String> = Vec::new();
+        for p in [&self.stable, &self.nightly] {
+            v.extend(p.lines.iter().cloned());
+        }
+        v.extend(self.pr.lines.iter().cloned());
+        v.extend(self.notes.iter().map(|n| format!("note: {n}")));
+        v
+    }
+    pub fn summary(&self) -> String {
+        let mut v: Vec<&str> = Vec::new();
+        for p in [&self.stable, &self.nightly, &self.pr] {
+            if !p.summary.is_empty() {
+                v.push(&p.summary);
+            }
+        }
+        v.join("; ")
+    }
+    pub fn edges(&self) -> Vec<(String, bool)> {
+        self.stable.edges.iter().chain(self.nightly.edges.iter()).cloned().collect()
+    }
+    /// Findings stored before `bisect.txt` existed: rebuild what was known from `regression` / `regression_edges` / `regression_pr`.
+    pub fn from_legacy(st: &crate::triage::Cfg) -> Option<Bisect> {
+        let reg = st.get("regression")?;
+        if reg == "unknown" || reg.is_empty() {
+            return None;
+        }
+        let edges: Vec<(String, bool)> = st
+            .get("regression_edges")
+            .map(|e| e.split(" ; ").filter_map(|x| x.rsplit_once(" => ").map(|(l, y)| (l.to_string(), y == "yes"))).collect())
+            .unwrap_or_default();
+        let mut b = Bisect::default();
+        for piece in reg.split("; ") {
+            if let Some(rest) = piece.strip_prefix("stable:") {
+                b.stable.summary = piece.to_string();
+                b.stable.lines.push(format!("stable:{rest}"));
+                b.stable.done = rest.contains("first bad") || rest.contains("since");
+            } else if let Some(rest) = piece.strip_prefix("nightly:") {
+                b.nightly.summary = piece.to_string();
+                b.nightly.lines.push(format!("nightly:{rest}"));
+                b.nightly.done = rest.contains("first bad") || rest.contains("older than a year");
+                if let Some(d) = rest.trim().strip_prefix("first bad nightly-") {
+                    b.nightly.range = Some((date_add(d, -1), d.to_string()));
+                }
+            }
+        }
+        for (l, y) in edges {
+            if l.starts_with("nightly-") { b.nightly.edges.push((l, y)) } else { b.stable.edges.push((l, y)) }
+        }
+        if let Some(pr) = st.get("regression_pr") {
+            b.pr.lines = pr.split(" | ").map(|l| format!("- {l}")).collect();
+            b.pr.summary = format!("pr: {pr}");
+            b.pr.done = !b.pr.lines.is_empty();
+        }
+        Some(b)
+    }
+
+    /// Plain text form kept next to the finding (`bisect.txt`), so a later run can keep what is already known.
+    pub fn to_text(&self) -> String {
+        let mut s = String::new();
+        for (name, p) in [("stable", &self.stable), ("nightly", &self.nightly), ("pr", &self.pr)] {
+            s += &format!("[{name}]\ndone={}\nna={}\nsummary={}\nnote={}\n", p.done, p.na, p.summary, p.note);
+            if let Some((a, b)) = &p.range {
+                s += &format!("range={a},{b}\n");
+            }
+            for l in &p.lines {
+                s += &format!("line={l}\n");
+            }
+            for (l, y) in &p.edges {
+                s += &format!("edge={l} => {}\n", if *y { "yes" } else { "no" });
+            }
+        }
+        for n in &self.notes {
+            s += &format!("note-all={n}\n");
+        }
+        s
+    }
+
+    pub fn from_text(t: &str) -> Bisect {
+        let mut b = Bisect::default();
+        let mut cur: Option<&mut Part> = None;
+        // borrow-friendly: collect per section first
+        let mut sections: Vec<(String, Vec<&str>)> = Vec::new();
+        for l in t.lines() {
+            if let Some(name) = l.strip_prefix('[').and_then(|x| x.strip_suffix(']')) {
+                sections.push((name.to_string(), Vec::new()));
+            } else if let Some(last) = sections.last_mut() {
+                last.1.push(l);
+            } else if let Some(n) = l.strip_prefix("note-all=") {
+                b.notes.push(n.to_string());
+            }
+        }
+        let _ = &mut cur;
+        for (name, lines) in sections {
+            let mut p = Part::default();
+            for l in lines {
+                if let Some(x) = l.strip_prefix("done=") {
+                    p.done = x == "true";
+                } else if let Some(x) = l.strip_prefix("na=") {
+                    p.na = x == "true";
+                } else if let Some(x) = l.strip_prefix("summary=") {
+                    p.summary = x.to_string();
+                } else if let Some(x) = l.strip_prefix("note=") {
+                    p.note = x.to_string();
+                } else if let Some(x) = l.strip_prefix("range=") {
+                    p.range = x.split_once(',').map(|(a, b)| (a.to_string(), b.to_string()));
+                } else if let Some(x) = l.strip_prefix("line=") {
+                    p.lines.push(x.to_string());
+                } else if let Some(x) = l.strip_prefix("edge=") {
+                    if let Some((lab, y)) = x.rsplit_once(" => ") {
+                        p.edges.push((lab.to_string(), y == "yes"));
+                    }
+                } else if let Some(x) = l.strip_prefix("note-all=") {
+                    b.notes.push(x.to_string());
+                }
+            }
+            match name.as_str() {
+                "stable" => b.stable = p,
+                "nightly" => b.nightly = p,
+                "pr" => b.pr = p,
+                _ => {}
+            }
+        }
+        b
+    }
 }
 
 const OLDEST_STABLE_MINOR: u32 = 80;
@@ -38,7 +190,7 @@ fn uninstall(tc: &str) {
     rustup(&["toolchain", "uninstall", tc], 120);
 }
 
-fn date_add(date: &str, days: i64) -> String {
+pub(crate) fn date_add(date: &str, days: i64) -> String {
     let out = Command::new("date").args(["-u", "-d", &format!("{date} {days:+} days"), "+%F"]).output();
     out.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default()
 }
@@ -129,100 +281,135 @@ fn search(mut lo: i64, mut hi: i64, mut probe: impl FnMut(i64) -> Option<bool>) 
     (lo, hi)
 }
 
-pub fn bisect(src: &Path, base: &Config, bad: &Config, sig: &Option<String>, work: &Path, budget: Duration, stable_reproduces: bool, nightly_reproduces: bool) -> Bisect {
+pub fn bisect(src: &Path, base: &Config, bad: &Config, sig: &Option<String>, work: &Path, budget: Duration, want: Want, stable_reproduces: bool, nightly_reproduces: bool, prior: &Bisect) -> Bisect {
     let mut cx = Ctx { src, base, bad, sig, work, deadline: Instant::now() + budget, notes: Vec::new(), results: Default::default() };
-    let mut edges: Vec<(String, bool)> = Vec::new();
-    let mut lines = Vec::new();
-    let mut summary = Vec::new();
-    let mut narrow: Option<(String, String)> = None;
+    let mut out = prior.clone();
+    out.notes.clear();
 
-    if stable_reproduces {
-        let latest: i64 = rustc_version("stable").split_whitespace().nth(1).and_then(|v| v.split('.').nth(1)).and_then(|m| m.parse().ok()).unwrap_or(0);
-        if latest > OLDEST_STABLE_MINOR as i64 {
-            let tc = |m: i64| format!("1.{m}.0");
-            let lo = OLDEST_STABLE_MINOR as i64;
-            match cx.probe(&tc(lo)) {
-                Some(true) => {
-                    edges.push((cx.label(&tc(lo)), true));
-                    lines.push(format!("stable: already present in {} (oldest version tested)", tc(lo)));
-                    summary.push(format!("stable: since <= {}", tc(lo)));
-                }
-                Some(false) => {
-                    let (g, b) = search(lo, latest, |m| cx.probe(&tc(m)));
-                    // `latest` itself was seen reproducing by the caller; label it with the installed stable
-                    edges.push((cx.label(&tc(g)), false));
-                    if b == latest && !cx.results.contains_key(&tc(b)) {
-                        cx.deadline = cx.deadline.max(Instant::now() + Duration::from_secs(120));
-                        cx.probe(&tc(b));
-                    }
-                    edges.push((cx.label(&tc(b)), true));
-                    if b - g == 1 {
-                        lines.push(format!("stable: **first affected release is {}** (last good: {})", tc(b), tc(g)));
-                        summary.push(format!("stable: first bad {}", tc(b)));
-                    } else {
-                        lines.push(format!("stable: regressed after {} and no later than {} (time budget used up)", tc(g), tc(b)));
-                        summary.push(format!("stable: ({}, {}]", tc(g), tc(b)));
-                    }
-                }
-                None => lines.push("stable: not bisected (could not test the oldest release)".into()),
-            }
+    if want.stable {
+        out.stable = Part::default();
+        if !stable_reproduces {
+            out.stable.na = true;
+            out.stable.note = "does not reproduce on the current stable".into();
+        } else {
+            stable_search(&mut cx, &mut out.stable);
         }
     }
-
-    if nightly_reproduces {
-        // the date of the installed nightly, e.g. "rustc 1.101.0-nightly (8006091eb 2026-10-17)"
-        let v = rustc_version("nightly");
-        let hi_date = v.rsplit(' ').next().map(|d| d.trim_end_matches(')').to_string()).filter(|d| d.len() == 10).unwrap_or_default();
-        if !hi_date.is_empty() {
-            // rustc reports the commit date, the `nightly-D` toolchain published the day after
-            let day = |i: i64| format!("nightly-{}", date_add(&hi_date, 1 - i));
-            let lo = NIGHTLY_DAYS;
-            match cx.probe(&day(0 + lo)) {
-                Some(true) => {
-                    edges.push((cx.label(&day(lo)), true));
-                    lines.push(format!("nightly: already present in {} (a year back, oldest tested)", day(lo)));
-                    summary.push("nightly: older than a year".into());
-                }
-                Some(false) => {
-                    // j = NIGHTLY_DAYS - days back: 0 = oldest (good) .. NIGHTLY_DAYS = newest (bad)
-                    let (g, b) = search(0, NIGHTLY_DAYS, |j| cx.probe(&day(NIGHTLY_DAYS - j)));
-                    let (gt, bt) = (day(NIGHTLY_DAYS - g), day(NIGHTLY_DAYS - b));
-                    edges.push((cx.label(&gt), false));
-                    edges.push((if b == NIGHTLY_DAYS { format!("{bt} ({v})") } else { cx.label(&bt) }, true));
-                    if b - g == 1 {
-                        lines.push(format!("nightly: **first affected: {bt}** (last good: {gt}); `cargo bisect-rustc --start {} --end {}` narrows it to a PR", &gt[8..], &bt[8..]));
-                        summary.push(format!("nightly: first bad {bt}"));
-                        narrow = Some((gt[8..].to_string(), bt[8..].to_string()));
-                    } else {
-                        lines.push(format!("nightly: regressed after {gt} and no later than {bt} (time budget used up)"));
-                        summary.push(format!("nightly: ({gt}, {bt}]"));
-                    }
-                }
-                None => lines.push("nightly: not bisected (could not test a year-old nightly)".into()),
+    if want.nightly {
+        out.nightly = Part::default();
+        if !nightly_reproduces {
+            out.nightly.na = true;
+            out.nightly.note = "does not reproduce on the current nightly".into();
+        } else {
+            nightly_search(&mut cx, &mut out.nightly);
+        }
+    }
+    if want.pr {
+        out.pr = Part::default();
+        match out.nightly.range.clone() {
+            Some((gt, bt)) => pr_search(src, base, bad, sig, work, &gt, &bt, Duration::from_secs(PR_SECONDS), &mut out.pr),
+            None if out.nightly.na => {
+                out.pr.na = true;
+                out.pr.note = "does not reproduce on nightly".into();
             }
+            None if out.nightly.done => {
+                out.pr.na = true;
+                out.pr.note = "the bug is older than the nightly search window".into();
+            }
+            None => out.pr.note = "the nightly range is not narrowed to one day yet".into(),
         }
     }
     for n in cx.notes.iter().take(6) {
-        lines.push(format!("note: {n}"));
+        out.notes.push(n.clone());
     }
-    let mut pr = Vec::new();
-    if let Some((gt, bt)) = narrow {
-        // the nightly pair is one day apart: let cargo-bisect-rustc find the PR (own time allowance, beyond the probes)
-        pr = pr_range(src, base, bad, sig, work, &gt, &bt, Duration::from_secs(PR_SECONDS));
-        if let Some(l) = pr.iter().find(|l| l.contains("rust-lang/rust")) {
-            summary.push(format!("pr: {}", l.trim_start_matches("- ")));
+    out
+}
+
+fn stable_search(cx: &mut Ctx, part: &mut Part) {
+    let latest: i64 = rustc_version("stable").split_whitespace().nth(1).and_then(|v| v.split('.').nth(1)).and_then(|m| m.parse().ok()).unwrap_or(0);
+    if latest <= OLDEST_STABLE_MINOR as i64 {
+        part.note = "cannot determine the latest stable release".into();
+        return;
+    }
+    let tc = |m: i64| format!("1.{m}.0");
+    let lo = OLDEST_STABLE_MINOR as i64;
+    match cx.probe(&tc(lo)) {
+        Some(true) => {
+            part.edges.push((cx.label(&tc(lo)), true));
+            part.lines.push(format!("stable: already present in {} (oldest version tested)", tc(lo)));
+            part.summary = format!("stable: since <= {}", tc(lo));
+            part.done = true;
         }
+        Some(false) => {
+            let (g, b) = search(lo, latest, |m| cx.probe(&tc(m)));
+            // `latest` itself was seen reproducing by the caller; label it with the installed stable
+            part.edges.push((cx.label(&tc(g)), false));
+            if b == latest && !cx.results.contains_key(&tc(b)) {
+                cx.deadline = cx.deadline.max(Instant::now() + Duration::from_secs(120));
+                cx.probe(&tc(b));
+            }
+            part.edges.push((cx.label(&tc(b)), true));
+            if b - g == 1 {
+                part.lines.push(format!("stable: **first affected release is {}** (last good: {})", tc(b), tc(g)));
+                part.summary = format!("stable: first bad {}", tc(b));
+                part.done = true;
+            } else {
+                part.lines.push(format!("stable: regressed after {} and no later than {} (time budget used up)", tc(g), tc(b)));
+                part.summary = format!("stable: ({}, {}]", tc(g), tc(b));
+                part.note = format!("range ({}, {}] not narrowed to one release (time budget used up)", tc(g), tc(b));
+            }
+        }
+        None => part.note = "could not test the oldest release".into(),
     }
-    Bisect { pr, lines, summary: summary.join("; "), edges }
+}
+
+fn nightly_search(cx: &mut Ctx, part: &mut Part) {
+    // the date of the installed nightly, e.g. "rustc 1.101.0-nightly (8006091eb 2026-10-17)"
+    let v = rustc_version("nightly");
+    let hi_date = v.rsplit(' ').next().map(|d| d.trim_end_matches(')').to_string()).filter(|d| d.len() == 10).unwrap_or_default();
+    if hi_date.is_empty() {
+        part.note = "cannot determine the date of the installed nightly".into();
+        return;
+    }
+    // rustc reports the commit date, the `nightly-D` toolchain published the day after
+    let day = |i: i64| format!("nightly-{}", date_add(&hi_date, 1 - i));
+    let lo = NIGHTLY_DAYS;
+    match cx.probe(&day(lo)) {
+        Some(true) => {
+            part.edges.push((cx.label(&day(lo)), true));
+            part.lines.push(format!("nightly: already present in {} (a year back, oldest tested)", day(lo)));
+            part.summary = "nightly: older than a year".into();
+            part.done = true;
+        }
+        Some(false) => {
+            // j = NIGHTLY_DAYS - days back: 0 = oldest (good) .. NIGHTLY_DAYS = newest (bad)
+            let (g, b) = search(0, NIGHTLY_DAYS, |j| cx.probe(&day(NIGHTLY_DAYS - j)));
+            let (gt, bt) = (day(NIGHTLY_DAYS - g), day(NIGHTLY_DAYS - b));
+            part.edges.push((cx.label(&gt), false));
+            part.edges.push((if b == NIGHTLY_DAYS { format!("{bt} ({v})") } else { cx.label(&bt) }, true));
+            if b - g == 1 {
+                part.lines.push(format!("nightly: **first affected: {bt}** (last good: {gt})"));
+                part.summary = format!("nightly: first bad {bt}");
+                part.range = Some((gt[8..].to_string(), bt[8..].to_string()));
+                part.done = true;
+            } else {
+                part.lines.push(format!("nightly: regressed after {gt} and no later than {bt} (time budget used up)"));
+                part.summary = format!("nightly: ({gt}, {bt}]");
+                part.note = format!("range ({gt}, {bt}] not narrowed to one day (time budget used up)");
+            }
+        }
+        None => part.note = "could not test a year-old nightly".into(),
+    }
 }
 
 /// Narrow a one-day nightly range down to the commit/PR with `cargo bisect-rustc` (needs it installed;
-/// without it, or when it runs out of time, the result says so and the dates stay the answer).
-fn pr_range(src: &Path, base: &Config, bad: &Config, sig: &Option<String>, work: &Path, start: &str, end: &str, budget: Duration) -> Vec<String> {
+/// without it, or when it runs out of time, the part stays open and the dates are the answer).
+fn pr_search(src: &Path, base: &Config, bad: &Config, sig: &Option<String>, work: &Path, start: &str, end: &str, budget: Duration, part: &mut Part) {
     let mut probe = Command::new("cargo-bisect-rustc");
     probe.arg("--version");
     if !matches!(exec(probe, Duration::from_secs(20)), Ok(r) if r.code == Some(0)) {
-        return vec!["- PR not determined: `cargo-bisect-rustc` is not installed".into()];
+        part.note = "cargo-bisect-rustc is not installed".into();
+        return;
     }
     let dir = work.join(format!("pr_{}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);
@@ -245,7 +432,10 @@ fn pr_range(src: &Path, base: &Config, bad: &Config, sig: &Option<String>, work:
     let _ = std::fs::remove_dir_all(&dir);
     let text = match out {
         Ok(r) => format!("{}\n{}", String::from_utf8_lossy(&r.stdout), r.stderr),
-        Err(e) => return vec![format!("- PR not determined: cannot run cargo-bisect-rustc ({e})")],
+        Err(e) => {
+            part.note = format!("cannot run cargo-bisect-rustc ({e})");
+            return;
+        }
     };
     let mut res: Vec<String> = Vec::new();
     for l in text.lines() {
@@ -260,8 +450,11 @@ fn pr_range(src: &Path, base: &Config, bad: &Config, sig: &Option<String>, work:
     res.dedup();
     if res.is_empty() {
         let tail: Vec<&str> = text.lines().rev().filter(|l| !l.trim().is_empty()).take(2).collect();
-        res.push(format!("- PR not determined within {}s ({})", budget.as_secs(), tail.into_iter().rev().collect::<Vec<_>>().join(" / ").chars().take(200).collect::<String>()));
+        part.note = format!("no PR within {}s ({})", budget.as_secs(), tail.into_iter().rev().collect::<Vec<_>>().join(" / ").chars().take(200).collect::<String>());
+        return;
     }
     res.truncate(8);
-    res
+    part.summary = format!("pr: {}", res[0].trim_start_matches("- "));
+    part.lines = res;
+    part.done = true;
 }

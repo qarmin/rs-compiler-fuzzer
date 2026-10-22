@@ -26,6 +26,14 @@ mod memory;
 mod recursion;
 mod select;
 mod simd;
+mod stdlib;
+mod stdlib_coll;
+mod stdlib_float;
+mod stdlib_int;
+mod stdlib_misc;
+mod stdlib_more;
+mod stdlib_seq;
+mod stdlib_text;
 mod traits;
 mod unwind;
 
@@ -55,6 +63,7 @@ pub const ALL: &[Strategy] = &[
     Strategy { name: "generics", lines: 40000, about: "generic fns over a numeric trait monomorphised at all 12 integer types, via fn pointers/closures", generate: generics::generate },
     Strategy { name: "borrows", lines: 30000, about: "lifetimes, reborrow chains, split borrows, closures, cursors, interior mutability", generate: borrows::generate },
     Strategy { name: "memory", lines: 25000, about: "unions, repr(packed), MaybeUninit, raw pointers, niches, provenance round-trips", generate: memory::generate },
+    Strategy { name: "stdlib", lines: 20000, about: "calls to (nearly) every safe std function: integer/float/char/str methods, slices, iterators, Option/Result, cmp, mem, cells, collections (cmp::max was enough for a miscompilation)", generate: stdlib::generate },
     Strategy { name: "traits", lines: 18000, about: "dyn/generic dispatch, default-vs-override methods, const eval vs runtime, drop order", generate: traits::generate },
 ];
 
@@ -76,6 +85,14 @@ fn selftest(rng: &mut Rng) -> String {
     s
 }
 
+pub fn set_miri_mode(on: bool) {
+    stdlib::set_miri_mode(on);
+}
+
+pub fn stdlib_table_names() -> Vec<&'static str> {
+    stdlib::table_names()
+}
+
 pub fn find(name: &str) -> Option<&'static Strategy> {
     if name == "selftest" {
         return Some(&SELFTEST);
@@ -94,6 +111,11 @@ pub const SINTS: &[&str] = &["i8", "i16", "i32", "i64", "i128", "isize"];
 
 pub fn all_ints() -> Vec<&'static str> {
     UINTS.iter().chain(SINTS.iter()).copied().collect()
+}
+
+/// A small in-range value (0..=9) of integer type `ty`.
+pub fn small_ints(rng: &mut Rng, ty: &str) -> String {
+    format!("{}{ty}", rng.below(10))
 }
 
 pub fn bits(ty: &str) -> u32 {

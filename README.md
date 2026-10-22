@@ -105,7 +105,8 @@ by hand. The `*-checks` configs and `PANIC` lines can also point at a generator 
 
 ## CI
 
-- `ci.yml` (PR, push to master): `cargo test` and a short smoke run on nightly (`--profile fast`).
+- `ci.yml` (PR, push to master): `cargo test`, a short smoke run on nightly (`--profile fast`), an end-to-end reduction test and the
+  `stdlib` self-check (every snippet of the std strategy compiles on stable and nightly, runs without a panic; API coverage >= 90 %).
 - `fuzz.yml`:
   - **push to master**: nightly only, `fast` profile, half-size batches, 1 hour;
   - **00:00 UTC daily**: nightly **and** stable, `full` profile, 2 hours per job (jobs are limited to ~2h50);
@@ -114,8 +115,7 @@ by hand. The `*-checks` configs and `PANIC` lines can also point at a generator 
   fuzzes, then **triages** the new findings (`triage`: reproduces on stable/beta/nightly, reduces with the
   [Shrink Ray](https://github.com/DRMacIver/shrinkray) (`pip install shrinkray`; by far the best on expression chains) after flattening the harness into a plain `fn main`, plus built-in expression passes and [treereduce-rust](https://github.com/langston-barrett/treereduce) when Shrink Ray is missing, checks the reduced
   program with Miri, searches rust-lang/rust issues with `gh`) and prints the result into the log, the step
-  summary and an artifact. Every finding gets a `STATUS.md` with a verdict - `READY TO REPORT` /
-  `ALMOST READY` (with the open items) / `NOT READY` (with the blockers) - and an `ISSUE.md` draft (plus `ISSUE_TITLE.txt`) in the rust-lang format: the reduced program only, the shortest
+  summary and an artifact. Every finding gets a `STATUS.md` with a **checklist** (what is done, what is open - see below) and an `ISSUE.md` draft (plus `ISSUE_TITLE.txt`) in the rust-lang format: the reduced program only, the shortest
   command lines (triage drops every flag the bug does not need: `--edition`, `-C debug-assertions`..., and tries a
   flag-less reference build), the full compiler output with demangled symbols, `rustc -vV`, and one table with the
   newest stable/beta/nightly plus the exact points of contact of the regression (e.g. `1.98.0 | no`, `1.99.0 | yes`,
@@ -133,14 +133,24 @@ by hand. The `*-checks` configs and `PANIC` lines can also point at a generator 
   shards) continues with everything that has no result yet, an older `fuzzer_id`, or an unsettled minimisation; `verify.yml`
   (01:00 UTC) re-runs the stored reproducers. Schedule: fuzz ~00:00 Warsaw time (22:00 UTC), verify 01:00 UTC, retriage
   01:30 UTC, Miri 03:00 UTC.
-- **Minimisation status**: a finding is `READY TO REPORT` only when its minimisation *converged*: one run finished every pass
-  before its deadlines (`min_status: complete once`) and the next run, started from that result, changed nothing
-  (`converged`). Until then it stays `ALMOST READY` and is picked up again (at most 6 runs). `STATUS.md` has a Minimisation
-  section, `INDEX.md` a column with the status.
-- **`finding.json` + `fuzzer_id`**: every stored finding has a standard `finding.json` (strategy, kind, minimal flags, reduced
-  program hash, regression edges, reproduction per channel, ...) and the `fuzzer_id` of the triage logic that produced it
-  (`FUZZER_ID` in `src/triage.rs`, bumped by hand when minimisation/bisect improve). `retriage.yml` triages every finding with an older id again - continuing from its previous reduced program - and replaces it in the
-  package; the finding keeps its key, the same reduced program found twice is merged (`reduced_hash`).
+- **Checklist instead of a verdict** (`src/steps.rs`): every stored finding says which steps are done and which are open -
+  reproduced on stable/beta/nightly, **fully minimised**, shortest command line, Miri (UB) check, MIR-vs-LLVM, regression range
+  (stable / nightly / the PR), upstream search, issue draft, and (manual) reported. `STATUS.md` shows it as `- [x]` / `- [~]` (started) /
+  `- [ ]` / `- [!]` (failed), `INDEX.md` has "steps done" and the next open step, `finding.json` (schema 2) has the same as `steps`.
+  - *Fully minimised* means: one run finished every pass before its deadlines (`complete once`) and the next run, started from that
+    result, changed nothing (`converged`); at most 6 runs.
+  - **Steps are reset when they should be**: every step has a version. When the tool gets better at it (a new reduction pass:
+    `REDUCE_VERSION`, a better bisection ...) the version is bumped and the step is open again for every finding. Steps that depend
+    on the program (everything except the minimisation itself) also carry a hash of the reduced program and its command line: as soon
+    as a new minimisation changes the code, they are open again; if the minimisation did not touch the code, they stay done. The upstream
+    search is repeated after 14 days.
+  - `retriage.yml` (when a fuzz/miri run ends, and daily at 01:30 UTC, 4 shards) continues findings with open steps - closest to
+    completion first, each at most once per job - and only runs what is open (a converged minimisation is not repeated, a known regression
+    range is kept, `bisect.txt`/`search.txt` hold the details). Findings stored before the checklist existed get it derived from the fields
+    they have.
+- **`finding.json`**: the standard machine readable description of a stored finding (strategy, kind, minimal flags, reduced program hash,
+  regression edges, reproduction per channel, checklist ...), rewritten whenever `status.cfg` changes. When two jobs triaged the same
+  finding concurrently, the result with more finished steps wins; the same reduced program found twice is merged (`reduced_hash`).
 - `verify.yml` (daily, or manual): per channel (nightly, beta, stable) re-runs every stored finding and records
   `repro.<channel>`, `last_verified` and `state` (`open`/`fixed`) in its `status.cfg`, via the same sync. Nothing is deleted.
 
@@ -161,3 +171,22 @@ Open `I-miscompile` issues are the model for what to generate:
 - When the bisection over nightlies ends with two consecutive days, `cargo bisect-rustc` (installed by the fuzz and retriage jobs, uses
   `GITHUB_TOKEN`) narrows them down to the commit/PR, with its own 7 minute allowance. The PR links go to `ISSUE.md` and `status.cfg`
   (`regression_pr`); if it does not finish, the dates stay the answer.
+
+## The `stdlib` strategy: the whole safe std API
+
+`cmp::max` alone was enough to trigger a miscompilation, so `stdlib` calls (nearly) every safe, stable, deterministic function of
+the standard library on edge-case inputs: integer methods of all 12 widths (checked/wrapping/saturating/overflowing/strict, bit
+tricks, `ilog`, `isqrt`, `midpoint`, `NonZero`, `Wrapping`, `Saturating`), float methods with exact results (and the libm functions,
+quantised so that last-bit differences cannot cause false findings), `char`/`str`/`String`, slices, arrays, `Vec`, `VecDeque`, every
+`Iterator` adapter and consumer (also on a hand written iterator so the trait's default methods run), `Option`/`Result`, `cmp`,
+`mem`, cells, `Rc`/`Arc`/`Box`/`Cow`/`Pin`, ranges, `Duration`, `BTreeMap`/`BTreeSet`/`BinaryHeap`/`LinkedList`/`HashMap`/`HashSet`
+(order independent observations only), `fmt` (`Formatter`, the `debug_*` builders, all format traits on user types), in-memory `io`,
+atomics, `Mutex`/`RwLock`/`OnceLock`/channels/threads used deterministically, `CString`/`CStr`, `ptr`.
+
+- The snippets are tables of one-line Rust statements (`src/strategies/stdlib_*.rs`); a case is a prelude (edge-case values) plus a few
+  random snippets, each in its own block. Left out: `unsafe` functions, I/O on the real system, time, addresses, hasher randomness.
+- `tools/stdcov.py` measures the coverage from the rustdoc JSON of core/alloc/std (needs `rustup component add rust-docs-json --toolchain
+  nightly`): every public, stable (in the current stable release), non-unsafe function or method is compared with the calls in the tables
+  (by name; the output lists what is missing). Currently ~98 % of the in-scope names.
+- `tools/stdlib_selfcheck.sh [table ...]` compiles and runs each table on stable and nightly (`RSFUZZ_STDLIB_TABLE=<name>` forces one
+  table); `rs-compiler-fuzzer list` prints the table names. Run by the `stdlib` CI job.

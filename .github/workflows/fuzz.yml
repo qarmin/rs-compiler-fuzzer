@@ -69,8 +69,8 @@ jobs:
           e = os.environ
           quick = e["EVENT"] == "push"
           # push (nightly only, free runner slots): finer groups = more parallel jobs; daily runs: 7 groups x nightly+stable
-          wide = "arith;select;loops;control;recursion;enums;traits;borrows,asyncs;memory;abi,simd;collections,floats;unwind,generics"
-          narrow = "arith,select;loops;control,recursion;enums,traits;borrows,asyncs;memory,simd,abi;collections,floats,unwind,generics"
+          wide = "arith;select;loops;control;recursion;enums;traits;borrows,asyncs;memory;abi,simd;collections,floats;unwind,generics;stdlib"
+          narrow = "arith,select;loops;control,recursion;enums,traits;borrows,asyncs;memory,simd,abi;collections,floats,unwind,generics;stdlib"
           groups = e["IN_GROUPS"] or (wide if quick else narrow)
           toolchains = e["IN_TOOLCHAINS"] or ("nightly" if quick else "nightly,stable")
           inc = [{"toolchain": t.strip(), "strategies": g.strip(), "name": g.strip().replace(",", "+")}
@@ -112,13 +112,22 @@ jobs:
 
       - run: cargo +stable build --release
 
+      - name: Cache the reducers (Shrink Ray, treereduce-rust, cargo-bisect-rustc)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/sr
+            ~/.cargo/bin/treereduce-rust
+            ~/.cargo/bin/cargo-bisect-rustc
+          key: reducers-${{ runner.os }}-v1
       - name: Install triage tools (other channels, Miri, Shrink Ray, treereduce-rust)
         run: |
           for c in stable beta nightly; do rustup toolchain install $c --profile minimal; done
           rustup component add miri rust-src --toolchain nightly || echo "miri unavailable on this nightly"
-          python3 -m venv "$HOME/sr" && "$HOME/sr/bin/pip" install -q shrinkray && echo "$HOME/sr/bin" >> "$GITHUB_PATH" || echo "shrinkray unavailable"
-          cargo +stable install treereduce-rust --locked || echo "treereduce-rust unavailable"
-          cargo +stable install cargo-bisect-rustc --locked || echo "cargo-bisect-rustc unavailable"
+          [ -d "$HOME/sr" ] || { python3 -m venv "$HOME/sr" && "$HOME/sr/bin/pip" install -q shrinkray || echo "shrinkray unavailable"; }
+          echo "$HOME/sr/bin" >> "$GITHUB_PATH"
+          [ -x "$HOME/.cargo/bin/treereduce-rust" ] || cargo +stable install treereduce-rust --locked || echo "treereduce-rust unavailable"
+          [ -x "$HOME/.cargo/bin/cargo-bisect-rustc" ] || cargo +stable install cargo-bisect-rustc --locked || echo "cargo-bisect-rustc unavailable"
 
       - name: Canaries
         continue-on-error: true
@@ -210,8 +219,8 @@ jobs:
             echo "- known \`$(basename "$d")\`: $(tr '\n' ' ' < "$d/known-issues.txt")" >> "$GITHUB_STEP_SUMMARY"
           done
           for r in fuzz-out/findings/*/ fuzz-out/triaged/*/; do
-            v=$(sed -n 's/^verdict=//p' "$r/status.cfg" 2>/dev/null)
-            { echo "<details><summary>${v:-UNTRIAGED} - $r</summary>"; echo; cat "$r/STATUS.md" 2>/dev/null; echo; cat "$r/report.md"; echo "</details>"; } >> "$GITHUB_STEP_SUMMARY"
+            v=$(sed -n 's/^progress=//p' "$r/status.cfg" 2>/dev/null)
+            { echo "<details><summary>${v:-?} steps done - $r</summary>"; echo; cat "$r/STATUS.md" 2>/dev/null; echo; cat "$r/report.md"; echo "</details>"; } >> "$GITHUB_STEP_SUMMARY"
           done
 
       - uses: actions/upload-artifact@v6
