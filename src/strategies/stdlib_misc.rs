@@ -2,7 +2,7 @@
 //! `Duration`, tuples, `Default`/`Clone`/`From`/`Into`, `Reverse`, `Bound`.
 //! Prelude: `T` (integer type), `a b c: T`, `o1 o2: Option<T>`, `r1 r2: Result<T, T>`, `k: usize`, `f: bool`.
 
-use super::lit;
+use super::lit_plain as lit;
 use super::stdlib::{bbv, emit, pick_table, wrap};
 use crate::rng::Rng;
 
@@ -17,7 +17,7 @@ const OPTION: &[&str] = &[
     "h.put(&Some(o1).flatten()); h.put(&Some(Some(a)).flatten()); h.put(&Some(r1).transpose()); h.put(&o1.map(|p| (p, p)).unzip()); h.put(&Some((a, b)).unzip());",
     "h.put(&o1.as_ref().copied()); h.put(&o1.as_ref().cloned()); h.put(&Some(&a).copied()); h.put(&Some(&b).cloned()); h.put(&Some(&mut c.clone()).map(|p| *p).unwrap_or(0)); h.put(&o1.cmp(&o2)); h.put(&o1.partial_cmp(&o2)); h.put(&(o1 == o2)); h.put(&(o1 < o2)); h.put(&o1.max(o2)); h.put(&o1.min(o2));",
     "h.put(&Some(a).expect(\"some\")); h.put(&Some(b).unwrap()); h.put(&Option::<T>::None.is_none()); h.put(&Option::<T>::default()); h.put(&Some(a).iter().next()); h.put(&Option::from(a)); h.put(&Some(a).into_iter().sum::<T>()); h.put(&[o1, o2].iter().flatten().count()); h.put(&[o1, o2].into_iter().flatten().max());",
-    "h.put(&[Some(a), o1].into_iter().collect::<Option<Vec<T>>>()); h.put(&[Some(a), Some(b)].into_iter().sum::<Option<T>>()); h.put(&[Some(a), o1].into_iter().product::<Option<T>>()); h.put(&o1.is_some_and(|p| p == a).then_some(b)); h.put(&f.then(|| a)); h.put(&f.then_some(b));",
+    "h.put(&[Some(a), o1].into_iter().collect::<Option<Vec<T>>>()); h.put(&[Some(a % 3), Some(b % 3)].into_iter().sum::<Option<T>>()); h.put(&[Some(a % 2), o1.map(|p| p % 2)].into_iter().product::<Option<T>>()); h.put(&o1.is_some_and(|p| p == a).then_some(b)); h.put(&f.then(|| a)); h.put(&f.then_some(b));",
     "{ use std::ops::*; let x = (o1, o2); h.put(&x); h.put(&x.0.zip(x.1)); h.put(&(x.0.is_some() as u8 + x.1.is_some() as u8)); h.put(&Some(a).map(|p| p.wrapping_add(1)).filter(|p| *p != 0).and_then(|p| p.checked_mul(2)).unwrap_or(0)); }",
     "h.put(&o1.inspect(|_| {}).is_some()); let mut cnt = 0; let _ = o1.inspect(|_| cnt += 1); h.put(&cnt); h.put(&o1.is_some_and(|p| { cnt += 1; p > a })); h.put(&cnt);",
     "let mut x = o1; h.put(&*x.get_or_insert_default()); let y: Option<String> = Some(String::from(\"ab\")); h.put(&y.as_deref()); let mut z = y.clone(); h.put(&z.as_deref_mut().map(|s| { s.make_ascii_uppercase(); s.len() })); h.put(&z); h.put(&o1.map_or_default(|p| p.wrapping_add(1))); let mut w = Some(vec![a]); h.put(&w.as_mut_slice().len()); h.put(&Some(a).as_slice().len());",
@@ -29,7 +29,7 @@ const RESULT: &[&str] = &[
     "h.put(&r1.iter().count()); h.put(&r1.into_iter().chain(r2).collect::<Vec<T>>()); h.put(&r1.ok().xor(r2.ok())); h.put(&r1.ok().zip(r2.err()));",
     "h.put(&Ok::<Option<T>, T>(o1).transpose()); h.put(&Ok::<T, T>(a).ok()); h.put(&Err::<T, T>(b).err()); h.put(&Ok::<T, T>(a).expect(\"ok\")); h.put(&Err::<T, T>(b).expect_err(\"err\")); h.put(&Ok::<T, T>(a).unwrap()); h.put(&Err::<T, T>(b).unwrap_err()); h.put(&Ok::<Result<T, T>, T>(r1).and_then(|x| x));",
     "h.put(&r1.cmp(&r2)); h.put(&r1.partial_cmp(&r2)); h.put(&(r1 == r2)); h.put(&(r1 < r2)); h.put(&r1.max(r2)); h.put(&r1.min(r2)); h.put(&r1.clone().is_ok()); h.put(&r1.inspect(|_| {}).is_ok()); h.put(&r1.inspect_err(|_| {}).is_ok());",
-    "h.put(&[r1, r2].into_iter().collect::<Result<Vec<T>, T>>()); h.put(&[Ok(a), Ok(b)].into_iter().sum::<Result<T, T>>()); h.put(&[r1, Ok(a)].into_iter().product::<Result<T, T>>()); h.put(&[r1, r2].iter().filter(|r| r.is_ok()).count()); h.put(&[r1, r2].into_iter().flatten().count());",
+    "h.put(&[r1, r2].into_iter().collect::<Result<Vec<T>, T>>()); h.put(&[Ok::<T, T>(a % 3), Ok(b % 3)].into_iter().sum::<Result<T, T>>()); h.put(&[r1.map(|p| p % 2), Ok(a % 2)].into_iter().product::<Result<T, T>>()); h.put(&[r1, r2].iter().filter(|r| r.is_ok()).count()); h.put(&[r1, r2].into_iter().flatten().count());",
     "let x = u8::try_from(a).map(|p| p as T); h.put(&x.is_ok()); h.put(&x.map_err(|e| e.to_string())); let y: Result<u32, std::num::ParseIntError> = \"12\".parse(); h.put(&y.map_err(|e| e.to_string())); let z: Result<bool, std::str::ParseBoolError> = \"maybe\".parse(); h.put(&z.map_err(|e| e.to_string()));",
     "let q: Result<T, Box<dyn std::error::Error>> = Err(\"boom\".into()); h.put(&q.map_err(|e| e.to_string())); let q2: Result<T, String> = Err(format!(\"{a}\")); h.put(&q2.clone().unwrap_or_default());",
     "let y: Result<String, T> = Ok(String::from(\"ab\")); h.put(&y.as_deref().map(|s| s.len())); let mut z = y.clone(); h.put(&z.as_deref_mut().map(|s| { s.make_ascii_uppercase(); s.len() }).ok()); h.put(&r1.map_or_default(|p| p.wrapping_add(1))); h.put(&r2.unwrap_or_default());",

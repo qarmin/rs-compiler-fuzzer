@@ -30,7 +30,29 @@ fn flit(rng: &mut Rng, ty: &str) -> String {
         _ => format!("{}{ty}", rng.pick(c)),
     };
     // a leading '-' would bind looser than a method call on the literal
-    if s.starts_with('-') { format!("({s})") } else { s }
+    let s = if s.starts_with('-') { format!("({s})") } else { s };
+    if rng.chance(14) { fwrap(rng, &s, ty) } else { s }
+}
+
+/// Value-preserving std round trips of a float expression (NaN payloads and signs are not touched by any of them).
+fn fwrap(rng: &mut Rng, x: &str, ty: &str) -> String {
+    let w = match rng.below(14) {
+        0 => format!("Some({x}).unwrap_or(0.0)"),
+        1 => format!("Some({x}).map(|v| v).unwrap()"),
+        2 => format!("[{x}][0]"),
+        3 => format!("{ty}::from_bits(({x}).to_bits())"),
+        4 => format!("{ty}::from_le_bytes(({x}).to_le_bytes())"),
+        5 => format!("{ty}::from_be_bytes(({x}).to_be_bytes())"),
+        6 => format!("std::hint::black_box({x})"),
+        7 => format!("*Box::new({x})"),
+        8 => format!("std::convert::identity({x})"),
+        9 => format!("{{ let c = std::cell::Cell::new({x}); c.set(c.get()); c.get() }}"),
+        10 => format!("Ok::<{ty}, ()>({x}).unwrap()"),
+        11 => format!("[{x}; 2].iter().copied().last().unwrap()"),
+        12 => format!("std::iter::once({x}).next().unwrap()"),
+        _ => format!("{{ let mut t = [{x}, 1.0]; t.swap(0, 1); t.swap(0, 1); t[0] }}"),
+    };
+    format!("({w})")
 }
 
 fn fexpr(rng: &mut Rng, vars: &[V], ty: &str, depth: u32) -> String {

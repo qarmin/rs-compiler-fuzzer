@@ -132,8 +132,97 @@ pub fn signed(ty: &str) -> bool {
     ty.starts_with('i')
 }
 
-/// An in-range integer literal for `ty`, biased towards edge values optimisers care about.
+/// An in-range integer literal for `ty`, biased towards edge values optimisers care about. Every so often the value is
+/// sent through a std round trip (`Some(x).unwrap_or(..)`, `to_string().parse()`, `from_le_bytes(to_le_bytes())`, ...), so
+/// that all the strategies exercise a wide range of std functions on their values (see [`std_wrap`]).
 pub fn lit(rng: &mut Rng, ty: &str) -> String {
+    let l = lit_plain(rng, ty);
+    if rng.chance(14) { std_wrap(rng, &l, ty) } else { l }
+}
+
+/// Like [`lit`] but always a plain literal (patterns, constants).
+pub fn lit_plain(rng: &mut Rng, ty: &str) -> String {
+    lit_base(rng, ty)
+}
+
+/// Value-preserving (or deterministically transforming) std round trips of an integer expression: Option/Result
+/// combinators, cmp, mem, cells, smart pointers, byte conversions, iterators, sorting. Total for every input (no overflow,
+/// no panic), so they are fine under every overflow-check setting.
+pub fn std_wrap(rng: &mut Rng, x: &str, ty: &str) -> String {
+    let other = lit_base(rng, ty);
+    let k = rng.below(bits(ty) as usize);
+    let t = ty;
+    let w = match rng.below(64) {
+        0 => format!("Some({x}).unwrap_or({other})"),
+        1 => format!("Some({x}).map(|v| v).unwrap()"),
+        2 => format!("Ok::<{t}, ()>({x}).unwrap_or_default()"),
+        3 => format!("[{x}][0]"),
+        4 => format!("std::cmp::max({x}, {other})"),
+        5 => format!("std::cmp::min({x}, {other})"),
+        6 => format!("({x}).clamp({t}::MIN, {t}::MAX)"),
+        7 => format!("{t}::from_le_bytes(({x}).to_le_bytes())"),
+        8 => format!("{t}::from_be_bytes(({x}).to_be_bytes())"),
+        9 => format!("{t}::from_ne_bytes(({x}).to_ne_bytes())"),
+        10 => format!("({x}).swap_bytes().swap_bytes()"),
+        11 => format!("({x}).reverse_bits().reverse_bits()"),
+        12 => format!("({x}).rotate_left({k}).rotate_right({k})"),
+        13 => format!("{t}::try_from({x}).unwrap()"),
+        14 => format!("({x}).to_string().parse::<{t}>().unwrap()"),
+        15 => format!("std::iter::once({x}).sum::<{t}>()"),
+        16 => format!("std::iter::repeat({x}).take(2).last().unwrap()"),
+        17 => format!("vec![{x}; 2].into_iter().max().unwrap()"),
+        18 => format!("[{x}, {other}].iter().copied().rev().last().unwrap()"),
+        19 => format!("Some({x}).filter(|_| true).unwrap()"),
+        20 => format!("Some({x}).and_then(|v| v.checked_add(0)).unwrap()"),
+        21 => format!("Some({x}).xor(None).unwrap()"),
+        22 => format!("Some({x}).zip(Some(1u8)).map(|(v, _)| v).unwrap()"),
+        23 => format!("Some({x}).ok_or(()).unwrap()"),
+        24 => format!("({x}).checked_add(0).unwrap()"),
+        25 => format!("({x}).checked_sub(0).unwrap()"),
+        26 => format!("({x}).checked_mul(1).unwrap()"),
+        27 => format!("({x}).saturating_mul(1)"),
+        28 => format!("({x}).wrapping_pow(1)"),
+        29 => format!("({x}).pow(1)"),
+        30 => format!("({x}).div_euclid(1)"),
+        31 => format!("({x}).midpoint({x})"),
+        32 => format!("({x}).min({x}).max({x})"),
+        33 => format!("{{ let mut t = {x}; let u = std::mem::replace(&mut t, 0); u.wrapping_add(t) }}"),
+        34 => format!("{{ let mut t = [{x}, {other}]; t.swap(0, 1); t.reverse(); t[0] }}"),
+        35 => format!("std::hint::black_box({x})"),
+        36 => format!("(std::num::Wrapping({x}) + std::num::Wrapping(0)).0"),
+        37 => format!("std::num::Saturating({x}).0"),
+        38 => format!("{{ let c = std::cell::Cell::new({x}); c.set(c.get()); c.replace(c.get()) }}"),
+        39 => format!("*std::rc::Rc::new({x})"),
+        40 => format!("*Box::new({x})"),
+        41 => format!("*std::borrow::Cow::Borrowed(&{x})"),
+        42 => format!("std::convert::identity({x})"),
+        43 => format!("{{ let o: Option<{t}> = Some({x}); match o {{ Some(v) => v, None => {other} }} }}"),
+        44 => format!("{{ let mut a = [{x}, {other}]; a.sort_unstable(); a[1] }}"),
+        45 => format!("{{ let mut a = vec![{other}, {x}]; a.sort(); a.dedup(); a.pop().unwrap() }}"),
+        46 => format!("({x}).wrapping_add({other}).wrapping_sub({other})"),
+        47 => format!("(({x}) as i128 as {t})"),
+        48 => format!("{t}::from_str_radix(&format!(\"{{:x}}\", ({x}) as u128 & {t}::MAX as u128), 16).unwrap_or({x})"),
+        49 => format!("std::array::from_fn::<{t}, 2, _>(|i| if i == 0 {{ {x} }} else {{ {other} }})[0]"),
+        50 => format!("[{x}; 3].map(|v| v.wrapping_add(0))[2]"),
+        51 => format!("({x}..={x}).next().unwrap()"),
+        52 => format!("({x}..={x}).last().unwrap()"),
+        53 => format!("[{x}, {other}].into_iter().min_by_key(|v| *v != {x}).unwrap()"),
+        54 => format!("[{x}].iter().position(|v| *v == {x}).map_or({other}, |_| {x})"),
+        55 => format!("({x}).max({x})"),
+        56 => format!("std::cmp::max_by({x}, {x}, |p, q| p.cmp(q))"),
+        57 => format!("std::cmp::min_by_key({x}, {x}, |p| p.wrapping_neg())"),
+        58 => format!("[{x}, {other}].iter().fold({x}, |a, b| if *b == {other} {{ a }} else {{ *b }})"),
+        59 => format!("Some({x}).into_iter().chain(None).next().unwrap()"),
+        60 => format!("std::mem::take(&mut {{ {x} }})"),
+        61 => format!("{{ let v = vec![{x}, {other}]; v.first().copied().unwrap_or_default() }}"),
+        62 => format!("*[{x}, {other}].first().unwrap()"),
+        _ => format!("{{ let (a, b) = ({x}, {other}); [a, b].into_iter().find(|v| *v == a).unwrap() }}"),
+    };
+    // callers append method calls and casts: keep it one operand
+    format!("({w})")
+}
+
+fn lit_base(rng: &mut Rng, ty: &str) -> String {
     let b = bits(ty);
     let raw: u128 = match rng.below(8) {
         0 => 0,

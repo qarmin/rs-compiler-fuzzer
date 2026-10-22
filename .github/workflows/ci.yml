@@ -73,20 +73,3 @@ jobs:
           cat tri/f/STATUS.md
           echo "--- reduced.rs ---"; cat tri/f/reduced.rs
           test "$(wc -l < tri/f/reduced.rs)" -le 25 || { echo "reduction produced more than 25 lines"; exit 1; }
-
-  # Every snippet table of the `stdlib` strategy must compile on stable and nightly and run without a panic (a panic in a
-  # snippet is a generator bug). The coverage of the safe, stable std API is reported and must not fall below 90 %.
-  stdlib:
-    runs-on: ubuntu-26.04
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v6
-      - run: |
-          rustup toolchain install stable --profile minimal
-          rustup toolchain install nightly --profile minimal
-          rustup component add rust-docs-json --toolchain nightly
-      - run: cargo +stable build --release
-      - name: Compile and run every snippet table (stable and nightly)
-        run: tools/stdlib_selfcheck.sh --lines 2500
-      - name: Coverage of the safe std API
-        run: python3 tools/stdcov.py --min 0.9

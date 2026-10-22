@@ -1,6 +1,7 @@
 #!/bin/bash
 # Compile and run every snippet table of the `stdlib` strategy on the given toolchains (default: stable nightly).
-# A table fails when its batch does not compile or a case panics (a panic in a snippet is a generator bug).
+# A table fails when its batch does not compile, a case panics (a panic in a snippet is a generator bug), or the output with
+# overflow checks and debug assertions ON differs from the output with them off (a snippet must not depend on them).
 #   tools/stdlib_selfcheck.sh [--lines N] [--seed S] [table ...]
 set -u
 BIN=${BIN:-./target/release/rs-compiler-fuzzer}
@@ -21,6 +22,9 @@ for t in "${TABLES[@]}"; do
       echo "FAIL compile  $t [$tc]"; grep -E "error" "$W/$t.$tc.err" | head -5 | cut -c1-300; fail=1; continue
     fi
     timeout 120 "$W/$t.$tc" > "$W/$t.$tc.out" 2>&1; code=$?
+    rustc +"$tc" --edition 2021 -C debug-assertions=on -C overflow-checks=on --error-format=short "$W/$t.rs" -o "$W/$t.$tc.chk" 2> /dev/null
+    timeout 120 "$W/$t.$tc.chk" > "$W/$t.$tc.chk.out" 2>&1
+    if ! cmp -s "$W/$t.$tc.out" "$W/$t.$tc.chk.out"; then echo "FAIL checks   $t [$tc] output differs with overflow checks / debug assertions on:"; diff "$W/$t.$tc.out" "$W/$t.$tc.chk.out" | head -4; fail=1; fi
     p=$(grep -c PANIC "$W/$t.$tc.out"); n=$(wc -l < "$W/$t.$tc.out")
     if [ $code -ne 0 ] || [ "$p" -ne 0 ] || [ "$n" -lt 5 ]; then echo "FAIL run      $t [$tc] exit=$code panics=$p lines=$n"; fail=1; else echo "ok            $t [$tc] ($n cases)"; fi
   done

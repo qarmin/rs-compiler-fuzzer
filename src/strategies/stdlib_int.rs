@@ -3,7 +3,7 @@
 //! `d: &str`, `r: u32` (radix). Divisors are `| 1`; shifts/exponents are small.
 
 use super::stdlib::{bbv, counterpart, emit, int_lit, is_unsigned, small, wrap};
-use super::{all_ints, bits, lit};
+use super::{all_ints, bits, lit_plain as lit};
 use crate::rng::Rng;
 
 const ANY: &[&str] = &[
@@ -74,7 +74,7 @@ const ANY: &[&str] = &[
 ];
 
 const UNSIGNED: &[&str] = &[
-    "h.put(&a.is_power_of_two()); h.put(&a.checked_next_power_of_two()); h.put(&(a & 0xff).next_power_of_two());",
+    "h.put(&a.is_power_of_two()); h.put(&a.checked_next_power_of_two()); h.put(&(a >> 1).next_power_of_two());",
     "h.put(&a.div_ceil(b | 1)); h.put(&a.checked_next_multiple_of(b)); h.put(&(a >> (T::BITS / 2)).next_multiple_of((b >> (T::BITS / 2)) | 1));",
     "h.put(&a.checked_add_signed(ib)); h.put(&a.wrapping_add_signed(ib)); h.put(&a.saturating_add_signed(ib)); h.put(&a.overflowing_add_signed(ib));",
     "h.put(&a.cast_signed()); h.put(&b.cast_signed().cast_unsigned()); h.put(&a.isqrt()); h.put(&b.isqrt());",

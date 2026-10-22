@@ -8,7 +8,7 @@
 //!   logging each drop into a shared `Vec` that is hashed;
 //! - a boxed expression tree evaluated before and after an ownership-consuming simplifier.
 
-use super::lit;
+use super::lit_plain as lit;
 use crate::rng::Rng;
 use crate::w;
 

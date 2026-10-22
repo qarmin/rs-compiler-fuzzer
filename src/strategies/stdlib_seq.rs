@@ -3,7 +3,7 @@
 //! (use `% len` before indexing), `sv`: sorted `v`.
 
 use super::stdlib::{bbv, emit, pick_table, wrap};
-use super::{lit, small_ints};
+use super::{lit_plain as lit, small_ints};
 use crate::rng::Rng;
 
 pub const NAMES: &[&str] = &["slice", "vec", "iter"];
@@ -33,7 +33,7 @@ const SLICE: &[&str] = &[
     "let mut x = v.clone(); if !x.is_empty() { let i = k % x.len(); let (l, m, r) = x.select_nth_unstable_by(i, |p, q| q.cmp(p)); h.put(&(l.len(), *m, r.len())); } let mut y = v.clone(); if !y.is_empty() { let i = j % y.len(); h.put(&*y.select_nth_unstable_by_key(i, |p| p.wrapping_neg()).1); }",
     "let mut x = v.clone(); let mut c = 0; x.sort_by(|p, q| { c += 1; p.cmp(q) }); h.put(&x); h.put(&(c > 0 || x.len() < 2)); x.reverse(); x.sort_by_key(|p| p.count_ones()); h.put(&x);",
     "let ar = [a, b, a, b]; h.put(&ar.len()); h.put(&ar.map(|p| p.wrapping_add(1))); h.put(&ar.iter().rev().collect::<Vec<_>>()); h.put(&ar.each_ref().map(|p| *p)); h.put(&ar.as_slice().first()); let [f, .., l] = ar; h.put(&(f, l)); h.put(&ar.split_first().map(|(p, r)| (*p, r.len())));",
-    "let ar: [T; 4] = std::array::from_fn(|i| a.wrapping_add(i as T)); h.put(&ar); h.put(&<[T; 3]>::try_from(&v[..v.len().min(3)]).is_ok()); h.put(&<[T; 2]>::try_from(v.clone()).ok()); let r2: Result<[T; 2], _> = w.clone().try_into(); h.put(&r2.ok()); h.put(&(ar.iter().sum::<T>() == 0));",
+    "let ar: [T; 4] = std::array::from_fn(|i| a.wrapping_add(i as T)); h.put(&ar); h.put(&<[T; 3]>::try_from(&v[..v.len().min(3)]).is_ok()); h.put(&<[T; 2]>::try_from(v.clone()).ok()); let r2: Result<[T; 2], _> = w.clone().try_into(); h.put(&r2.ok()); h.put(&(ar.iter().map(|p| p % 3).sum::<T>() == 0));",
     "let ar = [[a, b], [b, a], [a, a]]; h.put(&ar.concat()); h.put(&ar.as_flattened()); h.put(&ar.iter().flatten().count()); h.put(&ar.as_flattened().len()); h.put(&ar.map(|r| r[0].wrapping_add(r[1])));",
     "let mut ar = [a, b, a, b, a]; ar.reverse(); ar.sort(); h.put(&ar); ar.rotate_left(k % 5); h.put(&ar); ar.swap(0, 4); h.put(&ar); ar.fill(b); h.put(&ar); h.put(&(ar == [b; 5])); h.put(&ar.contains(&a)); h.put(&ar.iter().all(|p| *p == b));",
     "let ar = [a; 4]; let br = [b; 4]; h.put(&(ar == br)); h.put(&ar.cmp(&br));",
@@ -59,7 +59,7 @@ const VEC: &[&str] = &[
     "let mut x = v.clone(); let y = x.split_off(k.min(x.len())); h.put(&x); h.put(&y); x.append(&mut w.clone()); h.put(&x); let mut z = w.clone(); x.append(&mut z); h.put(&z.len()); x.extend_from_slice(&y); x.extend(y.iter()); x.extend(w.iter().copied().rev()); h.put(&x);",
     "let mut x = v.clone(); x.resize(k + 3, a); h.put(&x); x.resize(j, b); h.put(&x); x.resize_with(k + j, || a.wrapping_add(1)); h.put(&x); x.extend_from_within(..x.len().min(2)); h.put(&x);",
     "let mut x = v.clone(); x.dedup(); x.shrink_to_fit(); h.put(&(x.capacity() >= x.len())); x.reserve(k); h.put(&(x.capacity() - x.len() >= k)); x.shrink_to(0); let y = Vec::<T>::with_capacity(j); h.put(&(y.capacity() >= j)); h.put(&y.len());",
-    "let x = v.clone(); h.put(&x.iter().map(|p| *p as u128).sum::<u128>()); let y: Vec<T> = x.iter().copied().collect(); h.put(&(x == y)); let z: Box<[T]> = x.clone().into(); h.put(&z.len()); let q: Vec<T> = z.into_vec(); h.put(&q); let r: std::rc::Rc<[T]> = std::rc::Rc::from(q.clone()); h.put(&r.len());",
+    "let x = v.clone(); h.put(&x.iter().map(|p| (*p as u128) % 5).sum::<u128>()); let y: Vec<T> = x.iter().copied().collect(); h.put(&(x == y)); let z: Box<[T]> = x.clone().into(); h.put(&z.len()); let q: Vec<T> = z.into_vec(); h.put(&q); let r: std::rc::Rc<[T]> = std::rc::Rc::from(q.clone()); h.put(&r.len());",
     "let x = vec![a; k + 1]; h.put(&x.len()); let y = vec![vec![b; 2]; j + 1]; h.put(&y.concat()); h.put(&y.iter().map(|r| r.len()).sum::<usize>()); h.put(&Vec::from([a, b])); h.put(&Vec::from(&[a][..])); h.put(&Vec::<T>::new().is_empty());",
     "let mut x = v.clone(); let mut it = x.drain(..); h.put(&it.next()); h.put(&it.next_back()); h.put(&it.len()); drop(it); h.put(&x); let mut y = v.clone(); y.iter_mut().for_each(|p| *p = p.wrapping_mul(3)); h.put(&y); for p in y.iter_mut().rev().step_by(2) { *p = a; } h.put(&y);",
     "let x = v.clone(); let mut i = x.into_iter(); h.put(&i.next()); h.put(&i.next_back()); h.put(&i.len()); h.put(&i.as_slice().len()); h.put(&i.rev().collect::<Vec<_>>()); let y: Vec<(usize, T)> = v.iter().copied().enumerate().collect(); h.put(&y);",
@@ -80,7 +80,7 @@ const VEC: &[&str] = &[
 
 const ITER: &[&str] = &[
     "h.put(&v.iter().copied().fold(0 as T, |s, p| s.wrapping_add(p))); h.put(&v.iter().copied().map(|p| p.wrapping_mul(a)).fold(0 as T, |s, p| s ^ p)); h.put(&v.iter().copied().reduce(|s, p| s.wrapping_sub(p))); h.put(&v.iter().rfold(0 as T, |s, p| s.wrapping_mul(31).wrapping_add(*p)));",
-    "h.put(&v.iter().sum::<T>()); h.put(&v.iter().copied().product::<T>()); h.put(&v.iter().copied().map(|p| p as u128).sum::<u128>()); h.put(&v.iter().map(|p| *p as u64).max());",
+    "h.put(&v.iter().map(|p| p % 3).sum::<T>()); h.put(&v.iter().map(|p| p % 2).product::<T>()); h.put(&v.iter().copied().map(|p| (p as u128) % 5).sum::<u128>()); h.put(&v.iter().map(|p| *p as u64).max());",
     "h.put(&v.iter().count()); h.put(&v.iter().last()); h.put(&v.iter().nth(k)); h.put(&v.iter().nth_back(j)); h.put(&v.iter().skip(k).next()); h.put(&v.iter().rev().nth(k)); h.put(&v.iter().step_by(k + 1).count()); h.put(&v.iter().size_hint());",
     "h.put(&v.iter().any(|p| *p == a)); h.put(&v.iter().all(|p| *p != b)); h.put(&v.iter().find(|p| **p > a)); h.put(&v.iter().rfind(|p| **p < b)); h.put(&v.iter().find_map(|p| p.checked_add(a))); h.put(&v.iter().filter_map(|p| p.checked_sub(b)).count()); h.put(&v.iter().position(|p| *p == a));",
     "h.put(&v.iter().copied().filter(|p| p % 2 == 1 || *p == a).collect::<Vec<_>>()); h.put(&v.iter().take_while(|p| **p != a).count()); h.put(&v.iter().skip_while(|p| **p != b).count()); h.put(&v.iter().map_while(|p| p.checked_add(a)).count()); h.put(&v.iter().take(k).skip(j).count());",
@@ -105,7 +105,7 @@ const ITER: &[&str] = &[
     "let mut x = v.clone(); x.iter_mut().for_each(|p| *p = p.wrapping_add(a)); h.put(&x); for (p, q) in x.iter_mut().zip(w.iter()) { *p = p.wrapping_mul(*q); } h.put(&x); x.iter_mut().rev().enumerate().for_each(|(i, p)| *p = p.wrapping_add(i as T)); h.put(&x);",
     "let mut x = v.clone(); x.extend(std::iter::repeat(a).take(k)); x.extend((0..j).map(|i| i as T)); h.put(&x); let y: Vec<T> = Vec::from_iter(x.iter().copied().rev()); h.put(&y); let mut z = Vec::new(); z.extend_from_slice(&y[..y.len().min(k)]); h.put(&z);",
     "h.put(&v.iter().copied().max_by(|p, q| p.cmp(q)).into_iter().chain(v.iter().copied().min_by_key(|p| *p)).collect::<Vec<_>>());",
-    "h.put(&v.iter().copied().sum::<T>().wrapping_add(w.iter().copied().product::<T>())); h.put(&v.iter().zip(w.iter()).map(|(p, q)| p.wrapping_mul(*q)).sum::<T>());",
+    "h.put(&v.iter().map(|p| p % 3).sum::<T>().wrapping_add(w.iter().map(|p| p % 2).product::<T>())); h.put(&v.iter().zip(w.iter()).map(|(p, q)| p.wrapping_mul(*q) % 3).sum::<T>());",
     "let it = v.iter().copied().map(|p| p.wrapping_add(1)); let bx: Box<dyn Iterator<Item = T>> = Box::new(it); h.put(&bx.filter(|p| p % 2 == 0).count()); let mut dy: Box<dyn DoubleEndedIterator<Item = &T> + '_> = Box::new(v.iter()); h.put(&dy.next_back()); h.put(&dy.next());",
     "let mut it = v.iter().copied(); h.put(&it.len()); h.put(&it.nth(k)); h.put(&it.len()); let mut it2 = v.iter().rev(); h.put(&it2.len()); h.put(&it2.next_back()); h.put(&it2.rev().len());",
     "h.put(&v.iter().map(|p| (p, 1)).count()); h.put(&v.iter().rev().copied().min_by_key(|p| p.wrapping_neg())); h.put(&v.iter().copied().is_sorted()); h.put(&v.iter().copied().collect::<Vec<_>>().iter().eq(v.iter()));",

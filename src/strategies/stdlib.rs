@@ -14,7 +14,7 @@
 //! `HashMap` iteration order, and libm results (`sin`, `exp`, `powf` ... may legitimately differ
 //! between constant folding and the runtime library). NaN payloads/signs are normalised by `Feed`.
 
-use super::{lit, signed, UINTS};
+use super::{lit_plain as lit, signed, UINTS};
 use crate::rng::Rng;
 
 static MIRI_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);

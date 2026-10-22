@@ -4,7 +4,7 @@
 //! impls, `CString`/`CStr`, `Pin`, `ptr`.
 
 use super::stdlib::{bbv, emit, pick_table, wrap};
-use super::{lit, small_ints};
+use super::{lit_plain as lit, small_ints};
 use crate::rng::Rng;
 
 pub const NAMES: &[&str] = &["fmt", "io", "atomic", "sync", "custom", "ffi"];
@@ -149,7 +149,7 @@ const CUSTOM_ITEMS: &str = "    #[derive(Clone)] struct It { lo: T, hi: T }
 ";
 
 const CUSTOM: &[&str] = &[
-    "let it = It { lo: a.min(b), hi: a.max(b).min(a.min(b).saturating_add(20)) }; h.put(&it.clone().collect::<Vec<T>>()); h.put(&it.clone().rev().collect::<Vec<T>>()); h.put(&it.clone().sum::<T>()); h.put(&it.clone().count()); h.put(&it.clone().last()); h.put(&it.clone().nth(k)); h.put(&it.clone().nth_back(k)); h.put(&it.clone().size_hint());",
+    "let it = It { lo: a.min(b), hi: a.max(b).min(a.min(b).saturating_add(20)) }; h.put(&it.clone().collect::<Vec<T>>()); h.put(&it.clone().rev().collect::<Vec<T>>()); h.put(&it.clone().map(|p| p & 3).sum::<T>()); h.put(&it.clone().count()); h.put(&it.clone().last()); h.put(&it.clone().nth(k)); h.put(&it.clone().nth_back(k)); h.put(&it.clone().size_hint());",
     "let it = It { lo: 0, hi: (k + 4) as T }; h.put(&it.clone().try_fold(0 as T, |s, p| s.checked_add(p))); h.put(&it.clone().try_rfold(0 as T, |s, p| s.checked_add(p * 2))); h.put(&it.clone().rfold(0 as T, |s, p| s.wrapping_mul(3).wrapping_add(p))); h.put(&it.clone().rfind(|p| p % 2 == 1)); h.put(&it.clone().find(|p| *p > 1)); h.put(&it.clone().rev().position(|p| p == 1));",
     "let it = It { lo: 0, hi: (k + 6) as T }; h.put(&it.clone().step_by(2).collect::<Vec<_>>()); h.put(&it.clone().skip(2).take(3).collect::<Vec<_>>()); h.put(&it.clone().zip(it.clone().skip(1)).map(|(x, y)| x + y).collect::<Vec<_>>()); h.put(&it.clone().chain(it.clone().rev()).collect::<Vec<_>>()); h.put(&it.clone().enumerate().filter(|(i, _)| i % 2 == 0).count()); h.put(&it.clone().peekable().peek().copied()); h.put(&it.clone().cycle().take(10).collect::<Vec<_>>());",
     "let it = It { lo: 0, hi: (k + 6) as T }; h.put(&it.clone().map_while(|p| if p < 4 { Some(p * 2) } else { None }).collect::<Vec<_>>()); h.put(&it.clone().scan(0 as T, |s, p| { *s += p; Some(*s) }).collect::<Vec<_>>()); h.put(&it.clone().flat_map(|p| [p, p]).count()); h.put(&it.clone().inspect(|_| {}).fuse().count()); h.put(&it.clone().partition::<Vec<T>, _>(|p| p % 2 == 0)); h.put(&it.clone().map(|p| (p, p.wrapping_neg())).unzip::<T, T, Vec<T>, Vec<T>>());",

@@ -3,7 +3,7 @@
 //! Prelude: `T` (key type), `a b c: T`, `v: Vec<T>`, `m: BTreeMap<T, u64>`, `s: BTreeSet<T>`, `k: usize`.
 
 use super::stdlib::{bbv, emit, pick_table, wrap};
-use super::{lit, small_ints};
+use super::{lit_plain as lit, small_ints};
 use crate::rng::Rng;
 
 pub const NAMES: &[&str] = &["bmap", "bset", "heap", "list", "hash"];
@@ -43,7 +43,7 @@ const LIST: &[&str] = &[
     "let mut x: std::collections::LinkedList<T> = v.iter().copied().collect(); let mut y = x.split_off(k.min(x.len())); h.put(&x.iter().count()); h.put(&y.iter().count()); x.append(&mut y); h.put(&y.is_empty()); h.put(&x); x.clear(); h.put(&x.is_empty());",
     "let mut x: std::collections::LinkedList<T> = v.iter().copied().collect(); for p in x.iter_mut() { *p = p.wrapping_add(a); } h.put(&x.iter().copied().collect::<Vec<_>>()); if let Some(f) = x.front_mut() { *f = b; } if let Some(l) = x.back_mut() { *l = c; } h.put(&x); h.put(&(x == x.clone())); h.put(&x.cmp(&x.clone()));",
     "let x: std::collections::LinkedList<T> = std::collections::LinkedList::from([a, b, c]); h.put(&x.into_iter().rev().collect::<Vec<_>>()); let mut y = std::collections::LinkedList::new(); y.extend(v.iter().copied()); h.put(&y.len());",
-    "let mut x: std::collections::LinkedList<T> = v.iter().copied().collect(); let e: Vec<T> = x.extract_if(|p| *p % 2 == 0).collect(); h.put(&e); h.put(&x); *x.push_back_mut(a) += 1; *x.push_front_mut(b) += 1; h.put(&x);",
+    "let mut x: std::collections::LinkedList<T> = v.iter().copied().collect(); let e: Vec<T> = x.extract_if(|p| *p % 2 == 0).collect(); h.put(&e); h.put(&x); *x.push_back_mut(a) = a.wrapping_add(1); *x.push_front_mut(b) = b.wrapping_add(1); h.put(&x);",
 ];
 
 const HASH: &[&str] = &[
