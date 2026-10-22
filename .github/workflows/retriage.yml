@@ -26,7 +26,7 @@ on:
         default: "600"
       bisect_seconds:
         description: "Regression-range time per finding"
-        default: "900"
+        default: "1500"
 
 permissions:
   contents: write
@@ -85,7 +85,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           LIMIT: ${{ inputs.limit || '6' }}
           REDUCE: ${{ inputs.reduce_seconds || '600' }}
-          BISECT: ${{ inputs.bisect_seconds || '900' }}
+          BISECT: ${{ inputs.bisect_seconds || '1500' }}
         run: |
           export BIN=$PWD/target/release/rs-compiler-fuzzer KEYS_FILE=$PWD/stored-keys.txt TOOLCHAIN=retriage
           end=$((SECONDS + 98 * 60)); n=0; : > retriaged-keys.txt
