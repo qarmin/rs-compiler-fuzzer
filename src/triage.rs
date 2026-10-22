@@ -9,6 +9,7 @@
 //!     ending in an explicit verdict with the reasons.
 
 use crate::reduce::{reduce_all, Interest, ReduceLog};
+use crate::steps;
 use crate::runner::{build_and_run, crash_signature, exec, Config, Limits, Outcome};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -28,7 +29,7 @@ pub struct TriageOpts {
 /// Version of the triage / minimisation logic. Bump it by hand whenever the results of `triage` get
 /// better (smarter reduction, more exact regression range, ...): every stored finding with a smaller
 /// `fuzzer_id` is then triaged again by the `retriage` job and replaced in the package.
-pub const FUZZER_ID: u32 = 3;
+pub const FUZZER_ID: u32 = 4;
 
 pub type Cfg = BTreeMap<String, String>;
 
@@ -118,7 +119,7 @@ fn miri(src: &str, work: &Path) -> MiriResult {
     std::fs::write(dir.join("Cargo.toml"), "[package]\nname = \"miri_check\"\nversion = \"0.0.0\"\nedition = \"2021\"\n").unwrap();
     std::fs::write(dir.join("src/main.rs"), format!("#![allow(warnings)]\n{src}")).unwrap();
     let mut c = Command::new("cargo");
-    c.args(["+nightly", "miri", "run", "-q"]).current_dir(&dir).env("MIRIFLAGS", "-Zmiri-disable-isolation");
+    c.args(["+nightly", "miri", "run", "-q"]).current_dir(&dir).env("MIRIFLAGS", "-Zmiri-disable-isolation -Zmiri-ignore-leaks").env("CARGO_PROFILE_DEV_OVERFLOW_CHECKS", "false").env("CARGO_PROFILE_DEV_DEBUG_ASSERTIONS", "false");
     let r = exec(c, Duration::from_secs(900));
     let _ = std::fs::remove_dir_all(&dir);
     match r {
@@ -247,6 +248,10 @@ fn upstream_search(reduced: &str, bad: &Config, sig: &Option<String>) -> Search 
     s
 }
 
+fn show_flags(f: &str) -> String {
+    if f.trim().is_empty() { "(none)".to_string() } else { format!("`{f}`") }
+}
+
 fn lines_of(s: &str) -> usize {
     s.lines().filter(|l| !l.trim().is_empty()).count()
 }
@@ -268,6 +273,30 @@ fn flag_groups(flags: &[String]) -> Vec<Vec<String>> {
     out
 }
 
+fn search_to_text(s: &Search) -> String {
+    let mut t = format!("performed={}\nnote={}\npossible={}\n", s.performed, s.note, s.possible.join(" "));
+    for l in &s.lines {
+        t += &format!("line={l}\n");
+    }
+    t
+}
+
+fn search_from_text(t: &str) -> Search {
+    let mut s = Search::default();
+    for l in t.lines() {
+        if let Some(x) = l.strip_prefix("performed=") {
+            s.performed = x == "true";
+        } else if let Some(x) = l.strip_prefix("note=") {
+            s.note = x.to_string();
+        } else if let Some(x) = l.strip_prefix("possible=") {
+            s.possible = x.split_whitespace().map(String::from).collect();
+        } else if let Some(x) = l.strip_prefix("line=") {
+            s.lines.push(x.to_string());
+        }
+    }
+    s
+}
+
 pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     let meta = read_cfg(&dir.join("repro.cfg"));
     let case = std::fs::read_to_string(dir.join("case.rs")).map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -282,6 +311,12 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     let chans = channels();
     let case_path = o.work.join(format!("tri_case_{}.rs", std::process::id()));
     std::fs::write(&case_path, &case).unwrap();
+    let date = today();
+
+    // what is already known about this finding (older findings get their checklist derived from the fields they have)
+    let mut old = read_cfg(&dir.join("status.cfg"));
+    steps::backfill(&mut old, dir);
+    let prev_reduced = std::fs::read_to_string(dir.join("reduced.rs")).ok().filter(|p| !p.trim().is_empty() && p.len() < case.len());
 
     // 1. reproduction matrix on the original reproducer
     let mut matrix: Vec<(String, String, Repro)> = Vec::new();
@@ -292,38 +327,65 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     }
     let primary = matrix.iter().filter(|m| m.2 == Repro::Yes).map(|m| m.0.clone()).max_by_key(|c| (c == "nightly") as u8).or_else(|| chans.iter().find(|c| c.0 == "nightly").map(|c| c.0.clone()));
 
-    // 2. reduction
+    // 2. reduction - skipped when an earlier run already converged with this version of the minimiser
     let mut reduce_log = ReduceLog(Vec::new());
     let mut reduced = case.clone();
     let mut did_reduce = false;
     let mut continued_from: Option<String> = None;
     let reduce_started = std::time::Instant::now();
-    if let (Some(pc), false) = (&primary, o.no_reduce) {
-        if matrix.iter().any(|m| m.2 == Repro::Yes) {
-            let it = Interest { rustc: vec!["rustc".into(), format!("+{pc}")], a: base.clone(), b: bad.clone(), crash_sig: sig.clone(), limits: Limits { compile: Duration::from_secs(120), run: Duration::from_secs(10) }, work: o.work.clone(), cache: Default::default() };
-            // a finding that is triaged again continues from its earlier (already small) result when that still shows the bug
-            let previous = std::fs::read_to_string(dir.join("reduced.rs")).ok().filter(|p| !p.trim().is_empty() && p.len() < case.len());
-            let start_src = match &previous {
-                Some(prev) if it.check(prev) => {
-                    reduce_log.0.push(format!("continuing from the previously reduced program ({} lines)", prev.lines().count()));
-                    continued_from = Some(crate::pack::text_hash(prev));
-                    prev.clone()
+    let min_done = steps::current(&old, "minimized", "", &date).filter(|m| m.status == "done").is_some();
+    let min_version_ok = steps::get(&old, "minimized").map(|m| m.version == steps::REDUCE_VERSION).unwrap_or(true);
+    let prev_runs: u32 = if min_version_ok { old.get("min_runs").and_then(|v| v.parse().ok()).unwrap_or(0) } else { 0 };
+    let mut reduction_kept = false;
+    match (&prev_reduced, min_done) {
+        (Some(prev), true) => {
+            reduced = prev.clone();
+            reduction_kept = true;
+            reduce_log.0.push(format!("minimisation converged earlier ({} lines); not repeated", prev.lines().count()));
+        }
+        _ => {
+            if let (Some(pc), false) = (&primary, o.no_reduce) {
+                if matrix.iter().any(|m| m.2 == Repro::Yes) {
+                    let it = Interest { rustc: vec!["rustc".into(), format!("+{pc}")], a: base.clone(), b: bad.clone(), crash_sig: sig.clone(), limits: Limits { compile: Duration::from_secs(120), run: Duration::from_secs(10) }, work: o.work.clone(), cache: Default::default() };
+                    // a finding that is triaged again continues from its earlier (already small) result when that still shows the bug
+                    let start_src = match &prev_reduced {
+                        Some(prev) if it.check(prev) => {
+                            reduce_log.0.push(format!("continuing from the previously reduced program ({} lines)", prev.lines().count()));
+                            continued_from = Some(crate::pack::text_hash(prev));
+                            prev.clone()
+                        }
+                        _ => case.clone(),
+                    };
+                    if it.check(&start_src) {
+                        reduced = reduce_all(&it, &start_src, o.budget, &mut reduce_log);
+                        did_reduce = true;
+                    } else {
+                        reduce_log.0.push("original no longer interesting under the reducer's stricter limits - not reduced".into());
+                    }
                 }
-                _ => case.clone(),
-            };
-            if it.check(&start_src) {
-                reduced = reduce_all(&it, &start_src, o.budget, &mut reduce_log);
-                did_reduce = true;
-            } else {
-                reduce_log.0.push("original no longer interesting under the reducer's stricter limits - not reduced".into());
             }
         }
     }
     let reduced_path = o.work.join(format!("tri_reduced_{}.rs", std::process::id()));
     std::fs::write(&reduced_path, &reduced).unwrap();
     std::fs::write(dir.join("reduced.rs"), &reduced).unwrap();
+    let rhash = crate::pack::text_hash(&reduced);
+    // results of older findings that carry no program hash cannot be trusted once the program changed
+    if old.get("reduced_hash").map(|h| *h != rhash).unwrap_or(false) {
+        steps::forget_unhashed(&mut old);
+    }
 
-    // 3. matrix on the reduced reproducer + the outputs that go into the issue text
+    // 3. flags: reuse the stored shortest command line when the program is the same
+    let flags_ctx = |old: &Cfg| steps::current(old, "flags", &rhash, &date).is_some() && old.contains_key("min_bad_flags");
+    let flags_reused = flags_ctx(&old);
+    if flags_reused {
+        let g = |k: &str| old.get(k).cloned().unwrap_or_default();
+        crate::runner::set_common_flags(Some(g("min_common_flags").split_whitespace().map(String::from).collect()));
+        base = Config::new(&base.name, &g("min_base_flags"));
+        bad = Config::new(&bad.name, &g("min_bad_flags"));
+    }
+
+    // 3a. matrix on the reduced reproducer + the outputs that go into the issue text
     let mut matrix2: Vec<(String, String, Repro)> = Vec::new();
     let mut outputs: Option<(Outcome, Outcome)> = None;
     for (ch, ver) in &chans {
@@ -337,7 +399,7 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     let mut still = matrix2.iter().any(|m| m.2 == Repro::Yes);
 
     // 3b. the shortest command line that still shows it (the issue shows exactly these flags)
-    if still {
+    if still && !flags_reused {
         let yes_channels: Vec<String> = matrix2.iter().filter(|m| m.2 == Repro::Yes).map(|m| m.0.clone()).collect();
         let ok = |base: &Config, bad: &Config| {
             yes_channels.iter().all(|ch| {
@@ -400,9 +462,16 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
         }
         still = matrix2.iter().any(|m| m.2 == Repro::Yes);
     }
+    // everything below depends on the program *and* the command line
+    let common_txt = crate::runner::common_flags().join(" ");
+    let ctx = crate::pack::text_hash(&format!("{reduced}\n{common_txt}|{}|{}", base.flags.join(" "), bad.flags.join(" ")));
+    let cur = |id: &str| steps::current(&old, id, &ctx, &date).is_some();
 
-    // 3b. MIR optimisations or LLVM? (-Zmir-opt-level=0 on nightly: if the difference stays, MIR opts are not the cause)
-    let mir_opt = if still && matrix2.iter().any(|m| m.0 == "nightly" && m.2 == Repro::Yes) {
+    // 4. MIR optimisations or LLVM? (-Zmir-opt-level=0 on nightly: if the difference stays, MIR opts are not the cause)
+    let mir_reused = cur("mir_llvm") && old.contains_key("mir_opt");
+    let mir_opt = if mir_reused {
+        old.get("mir_opt").cloned().unwrap_or_default()
+    } else if still && matrix2.iter().any(|m| m.0 == "nightly" && m.2 == Repro::Yes) {
         let with0 = |c: &Config| {
             let mut c = c.clone();
             c.flags.push("-Zmir-opt-level=0".into());
@@ -418,42 +487,62 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
         "unknown: not reproduced on nightly".to_string()
     };
 
-    // 4. Miri (only meaningful for wrong-code findings)
-    let m = if crash || !still {
-        MiriResult { verdict: "skipped".into(), detail: if crash { "not applicable (compiler crash)".into() } else { "does not reproduce".into() }, stdout: String::new() }
+    // 5. Miri (only meaningful for wrong-code findings)
+    let ub_reused = !crash && still && cur("ub_check") && old.contains_key("miri");
+    let (m, miri_agrees) = if crash || !still {
+        (MiriResult { verdict: "skipped".into(), detail: if crash { "not applicable (compiler crash)".into() } else { "does not reproduce".into() }, stdout: String::new() }, String::new())
+    } else if ub_reused {
+        let s = old.get("miri").cloned().unwrap_or_default();
+        let (v, d) = s.split_once(": ").unwrap_or((s.as_str(), ""));
+        (MiriResult { verdict: v.to_string(), detail: d.to_string(), stdout: String::new() }, old.get("miri_agrees").cloned().unwrap_or_default())
     } else {
-        miri(&reduced, &o.work)
-    };
-    let miri_agrees = match (&outputs, m.verdict.as_str()) {
-        (Some((a, b)), "ok") => {
-            let norm = |s: &str| s.trim().to_string();
-            let (sa, sb) = (
-                if let Outcome::Ran { stdout, .. } = a { norm(stdout) } else { String::new() },
-                if let Outcome::Ran { stdout, .. } = b { norm(stdout) } else { String::new() },
-            );
-            let sm = norm(&m.stdout);
-            if sm == sa { format!("Miri's output equals `{}` (so `{}` looks wrong)", base.name, bad.name) } else if sm == sb { format!("Miri's output equals `{}` (so `{}` looks wrong)", bad.name, base.name) } else { "Miri's output matches neither side".to_string() }
-        }
-        _ => String::new(),
+        let m = miri(&reduced, &o.work);
+        let agrees = match (&outputs, m.verdict.as_str()) {
+            (Some((a, b)), "ok") => {
+                let norm = |s: &str| s.trim().to_string();
+                let (sa, sb) = (
+                    if let Outcome::Ran { stdout, .. } = a { norm(stdout) } else { String::new() },
+                    if let Outcome::Ran { stdout, .. } = b { norm(stdout) } else { String::new() },
+                );
+                let sm = norm(&m.stdout);
+                if sm == sa { format!("Miri's output equals `{}` (so `{}` looks wrong)", base.name, bad.name) } else if sm == sb { format!("Miri's output equals `{}` (so `{}` looks wrong)", bad.name, base.name) } else { "Miri's output matches neither side".to_string() }
+            }
+            _ => String::new(),
+        };
+        (m, agrees)
     };
 
-    // 5. upstream search
-    let search = if o.search { upstream_search(&reduced, &bad, &sig) } else { Search { note: "NOT PERFORMED (disabled)".into(), ..Default::default() } };
+    // 6. upstream search (repeated after two weeks)
+    let search_reused = cur("upstream") && dir.join("search.txt").exists();
+    let search = if search_reused {
+        search_from_text(&std::fs::read_to_string(dir.join("search.txt")).unwrap_or_default())
+    } else if o.search {
+        upstream_search(&reduced, &bad, &sig)
+    } else {
+        Search { note: "NOT PERFORMED (disabled)".into(), ..Default::default() }
+    };
 
-    // 5b. regression range
-    let bis = if !o.bisect.is_zero() && still && m.verdict != "ub" {
+    // 7. regression range: only the parts that are still open
+    let prior = std::fs::read_to_string(dir.join("bisect.txt")).ok().map(|t| crate::bisect::Bisect::from_text(&t)).or_else(|| crate::bisect::Bisect::from_legacy(&old));
+    let prior_known = prior.is_some();
+    let mut bis = prior.unwrap_or_default();
+    if !o.bisect.is_zero() && still && m.verdict != "ub" {
         let yes = |ch: &str| matrix2.iter().any(|m| m.0 == ch && m.2 == Repro::Yes);
-        Some(crate::bisect::bisect(&reduced_path, &base, &bad, &sig, &o.work, o.bisect, yes("stable"), yes("nightly")))
-    } else {
-        None
-    };
+        let want = crate::bisect::Want { stable: !prior_known || !cur("bisect_stable"), nightly: !prior_known || !cur("bisect_nightly"), pr: !prior_known || !cur("bisect_pr") };
+        if want.stable || want.nightly || want.pr {
+            bis = crate::bisect::bisect(&reduced_path, &base, &bad, &sig, &o.work, o.bisect, want, yes("stable"), yes("nightly"), &bis);
+        }
+    }
+    let _ = std::fs::write(dir.join("bisect.txt"), bis.to_text());
 
-    // 5c. how settled is the minimisation? (the daily job keeps going until two runs agree)
-    let old_st = read_cfg(&dir.join("status.cfg"));
-    let min_runs = old_st.get("min_runs").and_then(|v| v.parse::<u32>().ok()).unwrap_or(0) + 1;
+    // 8. how settled is the minimisation? (the daily job keeps going until two runs agree)
+    let min_runs = if reduction_kept { prev_runs } else if did_reduce { prev_runs + 1 } else { prev_runs };
     let complete = did_reduce && crate::reduce::last_run_complete();
-    let unchanged = continued_from.as_deref() == Some(crate::pack::text_hash(&reduced).as_str());
-    let min_status = if !did_reduce {
+    let unchanged = continued_from.as_deref() == Some(rhash.as_str());
+    let rl = lines_of(&reduced);
+    let min_status = if reduction_kept {
+        old.get("min_status").cloned().unwrap_or_else(|| "converged".into())
+    } else if !did_reduce {
         "not reduced".to_string()
     } else if complete && unchanged {
         "converged".to_string()
@@ -466,99 +555,140 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     };
     let converged = min_status.starts_with("converged");
 
-    // 6. verdict
-    let mut blockers: Vec<String> = Vec::new();
-    let mut warns: Vec<String> = Vec::new();
-    if !still {
-        blockers.push("does not reproduce on any installed channel any more".into());
+    // ---- the checklist
+    let mut st = old.clone();
+    let put = |st: &mut Cfg, id: &str, status: &str, hash: &str, note: String| steps::set(st, id, steps::State::new(status, hash, &date, &note));
+    // a step that was not redone keeps its result (and date) but now belongs to this program
+    let keep = |st: &mut Cfg, id: &str| {
+        if let Some(s) = steps::current(&old, id, &ctx, &date) {
+            let mut s = s;
+            s.hash = ctx.clone();
+            steps::set(st, id, s);
+        }
+    };
+    let yes_list: Vec<String> = matrix2.iter().filter(|m| m.2 == Repro::Yes).map(|m| m.0.clone()).collect();
+    if still {
+        put(&mut st, "reproduced", "done", &ctx, format!("reproduces on {}", yes_list.join(", ")));
+    } else {
+        put(&mut st, "reproduced", "failed", &ctx, "does not reproduce on any installed channel any more".into());
     }
-    let rl = lines_of(&reduced);
-    if !did_reduce {
-        warns.push("not reduced (reducer did not run or the original was not interesting under its limits)".into());
-    } else if rl > 80 {
-        if rl > 300 {
-            blockers.push(format!("still {rl} lines and no single case shows it on its own: it depends on the size/shape of the whole program (inlining or similar) - needs a longer reduction or a hand investigation, not ready to report"));
+    if !converged {
+        let note = if !did_reduce { "not reduced (the reducer did not run or the original was not interesting under its limits)".to_string() } else { format!("{min_status}; run {min_runs} of at most 6") };
+        put(&mut st, "minimized", if did_reduce { "partial" } else { "todo" }, "", note);
+    } else if rl > 300 {
+        put(&mut st, "minimized", "partial", "", format!("still {rl} lines and no single case shows it on its own: it depends on the size/shape of the whole program (inlining or similar) - needs a longer reduction or a hand investigation"));
+    } else {
+        let extra = if rl > 80 { format!(" - but still {rl} lines: reduce further by hand (tools/reduce.py, treereduce-rust)") } else { String::new() };
+        put(&mut st, "minimized", "done", "", format!("{min_status}, {rl} lines after {min_runs} run(s){extra}"));
+    }
+    if still && flags_reused {
+        keep(&mut st, "flags");
+    } else if still {
+        put(&mut st, "flags", "done", &ctx, format!("reference: {}; failing: {}; common: {}", show_flags(&base.flags.join(" ")), show_flags(&bad.flags.join(" ")), show_flags(&common_txt)));
+    } else {
+        put(&mut st, "flags", "todo", &ctx, "needs a reproducing program first".into());
+    }
+    if ub_reused {
+        keep(&mut st, "ub_check");
+    } else {
+    match m.verdict.as_str() {
+        "ok" => put(&mut st, "ub_check", "done", &ctx, "Miri found no undefined behaviour".into()),
+        "ub" => put(&mut st, "ub_check", "failed", &ctx, format!("Miri reports undefined behaviour: {}", m.detail)),
+        "panic" => put(&mut st, "ub_check", "partial", &ctx, format!("the program panics under Miri (arithmetic overflow?): {}", m.detail)),
+        "skipped" if crash => put(&mut st, "ub_check", "n/a", &ctx, "compiler crash: there is no program output to check".into()),
+        "skipped" => put(&mut st, "ub_check", "todo", &ctx, m.detail.clone()),
+        _ => put(&mut st, "ub_check", "partial", &ctx, format!("Miri could not decide: {}", m.detail)),
+    }
+    }
+    if mir_reused {
+        keep(&mut st, "mir_llvm");
+    } else if mir_opt.starts_with("llvm") || mir_opt.starts_with("mir") {
+        put(&mut st, "mir_llvm", "done", &ctx, mir_opt.clone());
+    } else if mir_opt.starts_with("unknown: not reproduced") {
+        put(&mut st, "mir_llvm", "n/a", &ctx, "does not reproduce on nightly".into());
+    } else {
+        put(&mut st, "mir_llvm", "todo", &ctx, mir_opt.clone());
+    }
+    for (id, part) in [("bisect_stable", &bis.stable), ("bisect_nightly", &bis.nightly), ("bisect_pr", &bis.pr)] {
+        let ran_here = !o.bisect.is_zero() && still && m.verdict != "ub";
+        if cur(id) && prior_known && !ran_here {
+            keep(&mut st, id);
+        } else if part.na {
+            put(&mut st, id, "n/a", &ctx, part.note.clone());
+        } else if part.done {
+            put(&mut st, id, "done", &ctx, part.summary.clone());
+        } else if cur(id) && prior_known {
+            keep(&mut st, id);
+        } else if !part.note.is_empty() || !part.lines.is_empty() {
+            put(&mut st, id, "partial", &ctx, part.note.clone());
         } else {
-            warns.push(format!("still {rl} lines - reduce further by hand (tools: tools/reduce.py, treereduce-rust)"));
+            put(&mut st, id, "todo", &ctx, if o.bisect.is_zero() { "regression search disabled".into() } else { "not done yet".into() });
         }
     }
-    match m.verdict.as_str() {
-        "ub" => blockers.push(format!("Miri reports undefined behaviour: {}", m.detail)),
-        "panic" => warns.push(format!("Miri: the program panics (probably arithmetic overflow, which is fine with `-C overflow-checks=off`): {}", m.detail)),
-        "error" => warns.push(format!("Miri check failed to run: {}", m.detail)),
-        "skipped" if !crash && still => warns.push(format!("UB check not done: {}", m.detail)),
-        _ => {}
-    }
-    if !search.performed {
-        warns.push(format!("upstream search {}", if search.note.is_empty() { "not performed".to_string() } else { search.note.clone() }));
-    } else if !search.possible.is_empty() {
-        warns.push(format!("possible duplicates among the search results: {} - read them before reporting", search.possible.join(", ")));
-    }
-    if did_reduce && !converged {
-        warns.push(format!("minimisation not converged yet ({min_status}, run {min_runs}); the scheduled job continues it"));
-    }
-    let verdict = if !blockers.is_empty() {
-        "NOT READY"
-    } else if warns.is_empty() {
-        "READY TO REPORT"
+    if search_reused {
+        keep(&mut st, "upstream");
+    } else if search.performed {
+        let note = if search.possible.is_empty() { "no matching issue found".to_string() } else { format!("possible duplicates: {} - read them before reporting", search.possible.join(" ")) };
+        put(&mut st, "upstream", "done", &ctx, note);
     } else {
-        "ALMOST READY"
-    };
+        put(&mut st, "upstream", "todo", &ctx, if search.note.is_empty() { "not performed".into() } else { search.note.clone() });
+    }
+    put(&mut st, "issue_draft", if still { "done" } else { "todo" }, &ctx, String::new());
 
     // ---- write status files
-    let date = today();
-    let mut st = read_cfg(&dir.join("status.cfg"));
-    st.insert("verdict".into(), verdict.into());
-    st.insert("blockers".into(), blockers.join("; "));
-    st.insert("warnings".into(), warns.join("; "));
+    st.remove("verdict");
+    st.remove("blockers");
+    st.remove("warnings");
     st.insert("triaged_at".into(), date.clone());
     st.insert("reduced_lines".into(), rl.to_string());
     st.insert("original_lines".into(), lines_of(&case).to_string());
     st.insert("miri".into(), format!("{}: {}", m.verdict, m.detail));
-    st.insert("upstream_search".into(), if search.performed { if search.possible.is_empty() { "no matching issue found".into() } else { format!("possible duplicates: {}", search.possible.join(" ")) } } else { "not performed".into() });
+    st.insert("miri_agrees".into(), miri_agrees.clone());
     st.insert("mir_opt".into(), mir_opt.clone());
+    st.insert("upstream_search".into(), if search.performed { if search.possible.is_empty() { "no matching issue found".into() } else { format!("possible duplicates: {}", search.possible.join(" ")) } } else { "not performed".into() });
     st.insert("kind".into(), if crash { "compiler-crash".into() } else { "wrong-code".into() });
     st.insert("fuzzer_id".into(), FUZZER_ID.to_string());
     st.insert("min_status".into(), min_status.clone());
     st.insert("min_runs".into(), min_runs.to_string());
-    st.insert("min_last_run_seconds".into(), reduce_started.elapsed().as_secs().to_string());
-    st.insert("min_common_flags".into(), crate::runner::common_flags().join(" "));
+    if !reduction_kept {
+        st.insert("min_last_run_seconds".into(), reduce_started.elapsed().as_secs().to_string());
+    }
+    st.insert("min_common_flags".into(), common_txt.clone());
     st.insert("min_base_flags".into(), base.flags.join(" "));
     st.insert("min_bad_flags".into(), bad.flags.join(" "));
-    st.insert("reduced_hash".into(), crate::pack::text_hash(&reduced));
-    if let Some(b) = &bis {
-        st.insert("regression_edges".into(), b.edges.iter().map(|(l, y)| format!("{l} => {}", if *y { "yes" } else { "no" })).collect::<Vec<_>>().join(" ; "));
+    st.insert("reduced_hash".into(), rhash.clone());
+    st.insert("context_hash".into(), ctx.clone());
+    st.insert("regression_edges".into(), bis.edges().iter().map(|(l, y)| format!("{l} => {}", if *y { "yes" } else { "no" })).collect::<Vec<_>>().join(" ; "));
+    st.insert("regression".into(), if bis.summary().is_empty() { "unknown".into() } else { bis.summary() });
+    if !bis.pr.lines.is_empty() {
+        st.insert("regression_pr".into(), bis.pr.lines.iter().map(|l| l.trim_start_matches("- ").to_string()).collect::<Vec<_>>().join(" | "));
+    } else {
+        st.remove("regression_pr");
     }
     for (ch, ver, r) in &matrix2 {
         st.insert(format!("repro.{ch}"), format!("{} ({})", r.word(), ver));
     }
-    if let Some(b) = &bis {
-        if !b.pr.is_empty() {
-            st.insert("regression_pr".into(), b.pr.iter().map(|l| l.trim_start_matches("- ").to_string()).collect::<Vec<_>>().join(" | "));
-        }
-        st.insert("regression".into(), if b.summary.is_empty() { "unknown".into() } else { b.summary.clone() });
-    }
     st.insert("last_verified".into(), date.clone());
     st.entry("state".into()).or_insert_with(|| "open".into());
+    let (done_n, total_n) = steps::progress(&st, &date);
+    st.insert("progress".into(), format!("{done_n}/{total_n}"));
     write_cfg(&dir.join("status.cfg"), &st);
+    if search.performed {
+        let _ = std::fs::write(dir.join("search.txt"), search_to_text(&search));
+    }
     crate::pack::write_finding_json(dir);
 
     let mut md = String::new();
-    let _ = writeln!(md, "## Status: {verdict} ({date})\n");
-    if !blockers.is_empty() {
-        let _ = writeln!(md, "Blockers:");
-        for b in &blockers {
-            let _ = writeln!(md, "- {b}");
+    let _ = writeln!(md, "## Status ({date})\n");
+    md += &steps::checklist_md(&st, &date);
+    let open = steps::open_steps(&st, &date);
+    if !open.is_empty() {
+        let _ = writeln!(md, "\nStill to do:");
+        for (title, why) in &open {
+            let _ = writeln!(md, "- {title}: {why}");
         }
-        let _ = writeln!(md);
     }
-    if !warns.is_empty() {
-        let _ = writeln!(md, "Still to do / check:");
-        for w in &warns {
-            let _ = writeln!(md, "- {w}");
-        }
-        let _ = writeln!(md);
-    }
+    let _ = writeln!(md);
     let _ = writeln!(md, "Kind: {}\n", if crash { "compiler crash / compile failure" } else { "wrong code (different output between two configurations)" });
     let _ = writeln!(md, "### Reproduction (reduced program, `reduced.rs`: {rl} lines; original `case.rs`: {} lines)\n", lines_of(&case));
     let _ = writeln!(md, "| channel | original case.rs | reduced.rs |\n|---|---|---|");
@@ -573,21 +703,17 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
         }
         let _ = writeln!(md);
     }
-    if let Some(b) = &bis {
-        let _ = writeln!(md, "### Regression range\n");
-        if b.lines.is_empty() {
-            let _ = writeln!(md, "- not determined");
-        }
-        for l in &b.lines {
-            let _ = writeln!(md, "- {l}");
-        }
-        for l in &b.pr {
-            let _ = writeln!(md, "{l}");
-        }
-        let _ = writeln!(md);
+    let _ = writeln!(md, "### Regression range\n");
+    let bl = bis.lines();
+    if bl.is_empty() {
+        let _ = writeln!(md, "- not determined");
     }
+    for l in &bl {
+        let _ = writeln!(md, "{}", if l.starts_with("- ") { l.clone() } else { format!("- {l}") });
+    }
+    let _ = writeln!(md);
     let _ = writeln!(md, "### MIR optimisations or LLVM?\n\n- {mir_opt}\n");
-    let _ = writeln!(md, "### Minimisation\n\n- status: **{min_status}** (run {min_runs}; last run {}s; every pass finished before its deadline: {})\n", reduce_started.elapsed().as_secs(), if complete { "yes" } else { "no" });
+    let _ = writeln!(md, "### Minimisation\n\n- status: **{min_status}** (run {min_runs}; last run {}s; every pass finished before its deadline: {})\n", reduce_started.elapsed().as_secs(), if complete { "yes" } else if reduction_kept { "kept from an earlier run" } else { "no" });
     let _ = writeln!(md, "### UB check (Miri, nightly)\n\n- result: **{}** - {}", m.verdict, m.detail);
     if !miri_agrees.is_empty() {
         let _ = writeln!(md, "- {miri_agrees}");
@@ -609,7 +735,6 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
 
     // issue draft: only the reduced program, the shortest commands, the output and a version table
     let mut is = String::new();
-    let common_txt = crate::runner::common_flags().join(" ");
     let cmd = |c: &Config| format!("rustc reduced.rs {} {}", common_txt, c.flags.join(" ")).split_whitespace().collect::<Vec<_>>().join(" ");
     let first_yes = matrix2.iter().find(|m| m.2 == Repro::Yes).map(|m| m.0.clone());
     let vv = first_yes
@@ -666,15 +791,13 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     for (ch, ver, r) in &matrix2 {
         let _ = writeln!(is, "| {ch} ({ver}) | {} |", r.word());
     }
-    if let Some(b) = &bis {
-        for (label, yes) in &b.edges {
-            let _ = writeln!(is, "| {label} | {} |", if *yes { "yes" } else { "no" });
-        }
-        if !b.pr.is_empty() {
-            let _ = writeln!(is, "\nBisected with `cargo bisect-rustc`:\n");
-            for l in &b.pr {
-                let _ = writeln!(is, "{l}");
-            }
+    for (label, yes) in bis.edges() {
+        let _ = writeln!(is, "| {label} | {} |", if yes { "yes" } else { "no" });
+    }
+    if !bis.pr.lines.is_empty() {
+        let _ = writeln!(is, "\nBisected with `cargo bisect-rustc`:\n");
+        for l in &bis.pr.lines {
+            let _ = writeln!(is, "{l}");
         }
     }
     std::fs::write(dir.join("ISSUE.md"), is).unwrap();
@@ -690,27 +813,39 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     }
     let _ = std::fs::remove_file(&case_path);
     let _ = std::fs::remove_file(&reduced_path);
-    Ok(format!("{verdict}: {}", if blockers.is_empty() { warns.join("; ") } else { blockers.join("; ") }))
+    let summary = open.iter().map(|(t, _)| *t).take(3).collect::<Vec<_>>().join("; ");
+    Ok(format!("{done_n}/{total_n} steps done{}", if open.is_empty() { String::new() } else { format!("; open: {summary}") }))
 }
 
-/// Stored findings (in an unpacked package) whose `fuzzer_id` is older than [`FUZZER_ID`], oldest first.
-/// Fixed findings and Miri findings are left alone.
-pub fn stale_findings(pkg: &Path) -> Vec<PathBuf> {
+/// Stored findings (in an unpacked package) with open checklist steps, closest to completion first. `skip` = keys already handled by
+/// this job. A finding whose only open step is the (long) minimisation is not started again on the day it was last triaged.
+pub fn stale_findings(pkg: &Path, skip: &std::collections::HashSet<String>) -> Vec<PathBuf> {
     let root = pkg.join("findings");
-    let mut v: Vec<(u32, u32, PathBuf)> = std::fs::read_dir(&root)
+    let today = today();
+    let mut v: Vec<(usize, String, PathBuf)> = std::fs::read_dir(&root)
         .into_iter()
         .flatten()
         .flatten()
         .map(|e| e.path())
         .filter(|p| p.join("case.rs").exists() && p.join("repro.cfg").exists())
         .filter_map(|p| {
-            let st = read_cfg(&p.join("status.cfg"));
+            let name = p.file_name()?.to_string_lossy().to_string();
+            let mut st = read_cfg(&p.join("status.cfg"));
             let meta = read_cfg(&p.join("repro.cfg"));
-            let id = st.get("fuzzer_id").and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
-            let skip = st.get("state").map(|s| s == "fixed").unwrap_or(false) || meta.get("mode").map(|m| m == "miri").unwrap_or(false);
-            let runs = st.get("min_runs").and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
-            let unsettled = !st.get("min_status").map(|s| s.starts_with("converged")).unwrap_or(false) && runs < 6;
-            ((id < FUZZER_ID || unsettled) && !skip).then_some((id, runs, p))
+            steps::backfill(&mut st, &p);
+            let done = st.get("state").map(|s| s == "fixed").unwrap_or(false) || meta.get("mode").map(|m| m == "miri").unwrap_or(false) || skip.contains(&name);
+            if done || steps::has_failure(&st) {
+                return None;
+            }
+            let open = steps::open_steps(&st, &today);
+            if open.is_empty() {
+                return None;
+            }
+            let only_min = open.len() == 1 && open[0].0 == steps::step("minimized").title;
+            if only_min && st.get("triaged_at").map(|d| *d == today).unwrap_or(false) {
+                return None;
+            }
+            Some((open.len(), name, p))
         })
         .collect();
     v.sort();

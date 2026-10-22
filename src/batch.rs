@@ -42,6 +42,22 @@ mod rt {
     pub trait Feed { fn feed_into(&self, h: &mut H); }
     macro_rules! feed_int { ($($t:ty),*) => { $( impl Feed for $t { fn feed_into(&self, h: &mut H) { h.feed(*self as u64) } } )* } }
     feed_int!(u8, u16, u32, u64, usize, i8, i16, i32, i64, isize, bool, char);
+    impl Feed for str { fn feed_into(&self, h: &mut H) { h.feed(self.len() as u64); for b in self.bytes() { h.feed(b as u64) } } }
+    impl Feed for String { fn feed_into(&self, h: &mut H) { self.as_str().feed_into(h) } }
+    impl Feed for f64 { fn feed_into(&self, h: &mut H) { h.feed(if self.is_nan() { 0x7ff8_dead } else { self.to_bits() }) } }
+    impl Feed for f32 { fn feed_into(&self, h: &mut H) { h.feed(if self.is_nan() { 0x7fc0_dead } else { self.to_bits() as u64 }) } }
+    impl Feed for std::cmp::Ordering { fn feed_into(&self, h: &mut H) { h.feed(*self as i8 as u64) } }
+    impl Feed for std::time::Duration { fn feed_into(&self, h: &mut H) { h.feed128(self.as_nanos()) } }
+    impl<A: Feed, B: Feed, C: Feed, D: Feed> Feed for (A, B, C, D) { fn feed_into(&self, h: &mut H) { self.0.feed_into(h); self.1.feed_into(h); self.2.feed_into(h); self.3.feed_into(h) } }
+    impl<T: Feed> Feed for std::collections::BTreeSet<T> { fn feed_into(&self, h: &mut H) { h.feed(self.len() as u64); for x in self { x.feed_into(h) } } }
+    impl<K: Feed, V: Feed> Feed for std::collections::BTreeMap<K, V> { fn feed_into(&self, h: &mut H) { h.feed(self.len() as u64); for (k, v) in self { k.feed_into(h); v.feed_into(h) } } }
+    impl<T: Feed> Feed for std::collections::LinkedList<T> { fn feed_into(&self, h: &mut H) { h.feed(self.len() as u64); for x in self { x.feed_into(h) } } }
+    impl Feed for () { fn feed_into(&self, h: &mut H) { h.feed(0x55) } }
+    impl<A: Feed, B: Feed, C: Feed> Feed for (A, B, C) { fn feed_into(&self, h: &mut H) { self.0.feed_into(h); self.1.feed_into(h); self.2.feed_into(h) } }
+    impl<T: Feed, E: Feed> Feed for Result<T, E> {
+        fn feed_into(&self, h: &mut H) { match self { Ok(v) => { h.feed(2); v.feed_into(h) } Err(e) => { h.feed(3); e.feed_into(h) } } }
+    }
+    impl<T: Feed> Feed for std::collections::VecDeque<T> { fn feed_into(&self, h: &mut H) { h.feed(self.len() as u64); for x in self { x.feed_into(h) } } }
     impl Feed for u128 { fn feed_into(&self, h: &mut H) { h.feed128(*self) } }
     impl Feed for i128 { fn feed_into(&self, h: &mut H) { h.feed128(*self as u128) } }
     impl<T: Feed> Feed for Option<T> {

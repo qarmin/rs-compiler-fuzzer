@@ -43,7 +43,7 @@ impl Miri {
         let mut c = Command::new("cargo");
         c.args(["+nightly", "miri", "run", "--release", "-q"])
             .current_dir(&self.proj)
-            .env("MIRIFLAGS", "-Zmiri-disable-isolation")
+            .env("MIRIFLAGS", "-Zmiri-disable-isolation -Zmiri-ignore-leaks")
             // the fuzz configs compare with `-C opt-level=0 -C overflow-checks=off`
             .env("CARGO_PROFILE_RELEASE_OPT_LEVEL", "0")
             .env("CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS", "false")
@@ -112,7 +112,7 @@ impl State<'_> {
         let native = &self.o.configs[0];
         let native_cmd = format!("rustc case.rs {} {} -o case && ./case", crate::runner::COMMON_FLAGS.join(" "), native.flags.join(" ")).replace("  ", " ");
         let miri_cmd = "cargo new miri_case && cp case.rs miri_case/src/main.rs && cd miri_case\n\
-            MIRIFLAGS=-Zmiri-disable-isolation CARGO_PROFILE_RELEASE_OPT_LEVEL=0 CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS=false \\\n\
+            MIRIFLAGS=\"-Zmiri-disable-isolation -Zmiri-ignore-leaks\" CARGO_PROFILE_RELEASE_OPT_LEVEL=0 CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS=false \\\n\
             CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=false cargo +nightly miri run --release";
         let what = match kind {
             "ub" => "Miri reports undefined behavior in a program that is meant to be UB-free",
@@ -152,13 +152,12 @@ impl State<'_> {
         let _ = writeln!(is, "### Meta\n\n```\n{}\n{}\n```\n\nProblem was found by a rust fuzzer (created by an LLM) - https://github.com/qarmin/rs-compiler-fuzzer", self.versions.0, self.versions.1);
         std::fs::write(dir.join("ISSUE.md"), is).unwrap();
 
-        let verdict = "NOT READY";
-        let mut st = String::new();
-        let _ = writeln!(st, "## Status: {verdict} (Miri {kind})\n\n- Found by running generated programs under Miri; the case is not reduced and was not checked against a second tool.\n- Decide first whether the generator or Miri is at fault: see `report.md`.\n- Search for the message in rust-lang/miri and rust-lang/rust before reporting.\n");
+                let mut st = String::new();
+        let _ = writeln!(st, "## Status (Miri {kind})\n\n- Found by running generated programs under Miri; the case is not reduced and was not checked against a second tool.\n- Decide first whether the generator or Miri is at fault: see `report.md`.\n- Search for the message in rust-lang/miri and rust-lang/rust before reporting.\n");
         std::fs::write(dir.join("STATUS.md"), st).unwrap();
         let cfg = format!("strategy={strategy}\nbase_name=native\nbase_flags=\nbad_name=miri-{kind}\nbad_flags=\nbatch_seed={batch_seed}\nmode=miri\ntoolchain=nightly\n");
         std::fs::write(dir.join("repro.cfg"), cfg).unwrap();
-        let status = format!("verdict={verdict}\nkind=miri-{kind}\nstate=open\nblockers=not triaged (Miri finding)\nwarnings=\n");
+        let status = format!("kind=miri-{kind}\nstate=open\nprogress=0/0\n");
         std::fs::write(dir.join("status.cfg"), status).unwrap();
         eprintln!("  MIRI {kind}: {sig}  -> {}", dir.display());
     }
@@ -250,6 +249,7 @@ fn miri_cap(strategy: &str) -> usize {
 }
 
 pub fn run(o: &Opts) -> i32 {
+    crate::strategies::set_miri_mode(true);
     let work = o.out.join("work");
     std::fs::create_dir_all(&work).unwrap();
     std::fs::create_dir_all(o.out.join("miri")).unwrap();

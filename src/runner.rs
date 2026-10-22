@@ -69,8 +69,22 @@ fn drain<R: Read + Send + 'static>(mut r: R, limit: usize) -> thread::JoinHandle
     })
 }
 
+unsafe extern "C" {
+    fn prctl(option: i32, arg2: u64, arg3: u64, arg4: u64, arg5: u64) -> i32;
+}
+
 pub fn exec(mut cmd: Command, timeout: Duration) -> std::io::Result<Exec> {
     cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).process_group(0);
+    // a test binary must not outlive the process that started it (a killed reducer left them spinning for the rest of the job):
+    // PR_SET_PDEATHSIG = 1, SIGKILL = 9
+    #[cfg(target_os = "linux")]
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        cmd.pre_exec(|| {
+            prctl(1, 9, 0, 0, 0);
+            Ok(())
+        });
+    }
     let mut child = cmd.spawn()?;
     let pid = child.id();
     let so = drain(child.stdout.take().unwrap(), 32 << 20);

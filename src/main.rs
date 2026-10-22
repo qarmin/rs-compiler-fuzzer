@@ -11,6 +11,7 @@ mod bisect;
 mod demangle;
 mod miri;
 mod pack;
+mod steps;
 mod runner;
 mod triage;
 mod strategies;
@@ -107,6 +108,7 @@ fn main() {
     let mut pkg: Option<PathBuf> = None;
     let mut toolchain_name = String::from("unknown");
     let mut contains: Option<PathBuf> = None;
+    let mut skip_file: Option<PathBuf> = None;
     let mut minimize_secs = 1500u64;
     let mut strategy: Option<String> = None;
     let mut case_seed: Option<u64> = None;
@@ -159,6 +161,7 @@ fn main() {
             "--pkg" => pkg = Some(PathBuf::from(val())),
             "--toolchain" => toolchain_name = val(),
             "--contains" => contains = Some(PathBuf::from(val())),
+            "--skip" => skip_file = Some(PathBuf::from(val())),
             "--minimize-secs" => minimize_secs = num(val()),
             "--strategy" => strategy = Some(val()),
             "--case-seed" => case_seed = Some(num(val())),
@@ -184,6 +187,7 @@ fn main() {
             for s in strategies::ALL {
                 println!("  {:<10} {}", s.name, s.about);
             }
+            println!("stdlib tables: {}", strategies::stdlib_table_names().join(" "));
             println!("default configurations (nightly adds -Z ones):");
             for c in fuzz::default_configs(true) {
                 println!("  {:<16} {}{}", c.name, c.flags.join(" "), if c.slow { "   [slow: not in --profile fast]" } else { "" });
@@ -228,8 +232,9 @@ fn main() {
             // triage again every stored finding that was last triaged by an older `fuzzer_id`, in place
             let pkg = pkg.unwrap_or_else(|| die("retriage needs --pkg DIR (an unpacked findings.zip)"));
             let (si, sn) = shard.split_once('/').map(|(a, b)| (a.parse::<usize>().unwrap_or(0), b.parse::<usize>().unwrap_or(1).max(1))).unwrap_or((0, 1));
-            let stale: Vec<PathBuf> = triage::stale_findings(&pkg).into_iter().filter(|p| pack::name_hash(&p.file_name().unwrap().to_string_lossy()) % sn as u64 == si as u64).collect();
-            eprintln!("retriage: {} stored finding(s) older than fuzzer_id {} in shard {shard}", stale.len(), triage::FUZZER_ID);
+            let skip: std::collections::HashSet<String> = skip_file.as_ref().and_then(|f| std::fs::read_to_string(f).ok()).map(|t| t.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect()).unwrap_or_default();
+            let stale: Vec<PathBuf> = triage::stale_findings(&pkg, &skip).into_iter().filter(|p| pack::name_hash(&p.file_name().unwrap().to_string_lossy()) % sn as u64 == si as u64).collect();
+            eprintln!("retriage: {} stored finding(s) with open checklist steps in shard {shard}", stale.len());
             let o = triage::TriageOpts { budget: Duration::from_secs(budget), search: !no_search, work: out.join("work"), no_reduce, bisect: Duration::from_secs(bisect_secs) };
             let start = std::time::Instant::now();
             let per = Duration::from_secs(budget + bisect_secs + 240);

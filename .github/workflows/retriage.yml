@@ -5,10 +5,11 @@ name: retriage
 # swallow findings: the fuzz jobs only store raw findings in the package, this workflow picks them up when the fuzz
 # run finishes (and once a day for everything that is outdated).
 #
-# Every stored finding carries the `fuzzer_id` of the triage logic that produced its reduced program, regression
-# range and flags (finding.json / status.cfg). When src/triage.rs bumps FUZZER_ID because the minimisation or the
-# bisect got better, this job triages the older findings again and replaces them in the single package, so old
-# entries do not stay as unminimised leftovers. Findings that already are at the current id are left alone.
+# Every stored finding has a checklist (src/steps.rs, `step.*` in status.cfg / finding.json): reproduced, fully minimised,
+# shortest flags, Miri, MIR-vs-LLVM, regression range (stable / nightly / PR), upstream search, issue draft. This job
+# continues every finding with open steps - closest to completion first - and stores each result right away. A step is
+# open again when the tool got better at it (version bump in src/steps.rs) or when a new minimisation changed the
+# reduced program (everything derived from the old program is then redone). Finished steps are not repeated.
 on:
   workflow_run:
     workflows: [fuzz, miri]
@@ -51,13 +52,22 @@ jobs:
         shard: ["0/4", "1/4", "2/4", "3/4"]
     steps:
       - uses: actions/checkout@v6
+      - name: Cache the reducers (Shrink Ray, treereduce-rust, cargo-bisect-rustc)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/sr
+            ~/.cargo/bin/treereduce-rust
+            ~/.cargo/bin/cargo-bisect-rustc
+          key: reducers-${{ runner.os }}-v1
       - name: Toolchains and reducers
         run: |
           for c in stable beta nightly; do rustup toolchain install $c --profile minimal; done
           rustup component add miri rust-src --toolchain nightly || echo "miri unavailable on this nightly"
-          python3 -m venv "$HOME/sr" && "$HOME/sr/bin/pip" install -q shrinkray && echo "$HOME/sr/bin" >> "$GITHUB_PATH" || echo "shrinkray unavailable"
-          cargo +stable install treereduce-rust --locked || echo "treereduce-rust unavailable"
-          cargo +stable install cargo-bisect-rustc --locked || echo "cargo-bisect-rustc unavailable"
+          [ -d "$HOME/sr" ] || { python3 -m venv "$HOME/sr" && "$HOME/sr/bin/pip" install -q shrinkray || echo "shrinkray unavailable"; }
+          echo "$HOME/sr/bin" >> "$GITHUB_PATH"
+          [ -x "$HOME/.cargo/bin/treereduce-rust" ] || cargo +stable install treereduce-rust --locked || echo "treereduce-rust unavailable"
+          [ -x "$HOME/.cargo/bin/cargo-bisect-rustc" ] || cargo +stable install cargo-bisect-rustc --locked || echo "cargo-bisect-rustc unavailable"
       - run: cargo +stable build --release
 
       - name: Download the package
@@ -78,11 +88,11 @@ jobs:
           BISECT: ${{ inputs.bisect_seconds || '900' }}
         run: |
           export BIN=$PWD/target/release/rs-compiler-fuzzer KEYS_FILE=$PWD/stored-keys.txt TOOLCHAIN=retriage
-          end=$((SECONDS + 98 * 60)); n=0
+          end=$((SECONDS + 98 * 60)); n=0; : > retriaged-keys.txt
           for i in $(seq 1 "$LIMIT"); do
             # not enough time for another finding (reduction + regression range + reproduction matrix)
             [ $((end - SECONDS)) -lt $((REDUCE + BISECT + 420)) ] && { echo "no time left for another finding"; break; }
-            "$BIN" retriage --pkg pkg --shard "${{ matrix.shard }}" --limit 1 --budget "$REDUCE" --bisect "$BISECT" --out retriage-out | tee one.txt
+            "$BIN" retriage --pkg pkg --shard "${{ matrix.shard }}" --limit 1 --skip retriaged-keys.txt --budget "$REDUCE" --bisect "$BISECT" --out retriage-out | tee one.txt
             k=$(sed -n 's/^RETRIAGED //p' one.txt | head -n1)
             [ -z "$k" ] && { echo "nothing (more) to re-triage in this shard"; break; }
             rm -rf upd && mkdir -p "upd/$k" && cp -r "pkg/findings/$k/." "upd/$k/"

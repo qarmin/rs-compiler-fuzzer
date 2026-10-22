@@ -59,14 +59,14 @@ pub fn write_finding_json(dir: &Path) {
     let mut field = |k: &str, v: String| {
         s.push_str(&format!("  {}: {},\n", json_str(k), v));
     };
-    field("schema", "1".into());
+    field("schema", "2".into());
     field("fuzzer_id", num(&st, "fuzzer_id").to_string());
     field("key", json_str(&g(&st, "key")));
     field("strategy", json_str(&g(&meta, "strategy")));
     field("kind", json_str(&g(&st, "kind")));
     field("class", json_str(&g(&st, "class")));
     field("state", json_str(&g(&st, "state")));
-    field("verdict", json_str(&g(&st, "verdict")));
+    field("progress", json_str(&g(&st, "progress")));
     field("base", format!("{{\"name\": {}, \"flags\": {}}}", json_str(&g(&meta, "base_name")), flags(&g(&st, "min_base_flags"))));
     field("bad", format!("{{\"name\": {}, \"flags\": {}}}", json_str(&g(&meta, "bad_name")), flags(&g(&st, "min_bad_flags"))));
     field("original_flags", format!("{{\"base\": {}, \"bad\": {}}}", flags(&g(&meta, "base_flags")), flags(&g(&meta, "bad_flags"))));
@@ -86,6 +86,25 @@ pub fn write_finding_json(dir: &Path) {
     field("regression", json_str(&g(&st, "regression")));
     field("regression_edges", json_str(&g(&st, "regression_edges")));
     s.push_str(&format!("  \"repro\": {{\n{}\n  }},\n", repro.join(",\n")));
+    let mut st2 = st.clone();
+    crate::steps::backfill(&mut st2, dir);
+    let today = today();
+    let h = st2.get("context_hash").or_else(|| st2.get("reduced_hash")).cloned().unwrap_or_default();
+    let steps_json: Vec<String> = crate::steps::STEPS
+        .iter()
+        .map(|d| {
+            let cur = crate::steps::current(&st2, d.id, &h, &today);
+            let raw = crate::steps::get(&st2, d.id);
+            let state = match (&cur, &raw) {
+                (Some(c), _) => c.status.clone(),
+                (None, Some(r)) if r.status == "partial" => "partial".to_string(),
+                _ => "todo".to_string(),
+            };
+            let (note, date) = cur.as_ref().or(raw.as_ref()).map(|x| (x.note.clone(), x.date.clone())).unwrap_or_default();
+            format!("    {}: {{\"title\": {}, \"state\": {}, \"version\": {}, \"date\": {}, \"note\": {}}}", json_str(d.id), json_str(d.title), json_str(&state), d.version, json_str(&date), json_str(&note))
+        })
+        .collect();
+    s.push_str(&format!("  \"steps\": {{\n{}\n  }},\n", steps_json.join(",\n")));
     s.push_str("  \"files\": {\"case\": \"case.rs\", \"reduced\": \"reduced.rs\", \"issue\": \"ISSUE.md\", \"status\": \"STATUS.md\", \"report\": \"report.md\"}\n}\n");
     let _ = std::fs::write(dir.join("finding.json"), s);
 }
@@ -202,10 +221,14 @@ pub fn run(pkg: &Path, adds: &[PathBuf], toolchain: &str, contains: Option<&Path
                 // a fresher triage result (reduced program, status) replaces a stale one
                 let new_st = read_cfg(&d.join("status.cfg"));
                 let have_reduced = dest.join("reduced.rs").exists();
-                let id = |c: &Cfg| c.get("fuzzer_id").and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
-                // a result from a newer version of the triage logic replaces an older one
-                if d.join("reduced.rs").exists() && (id(&new_st) > id(&st) || (!have_reduced && id(&new_st) == id(&st))) {
-                    for f in ["reduced.rs", "STATUS.md", "ISSUE.md", "ISSUE_TITLE.txt", "report.md", "signature.txt", "known-issues.txt"] {
+                let mut a = st.clone();
+                let mut b = new_st.clone();
+                crate::steps::backfill(&mut a, &dest);
+                crate::steps::backfill(&mut b, &d);
+                // the result with more finished checklist steps (then more minimisation runs) wins
+                let better = crate::steps::score(&b, &date) > crate::steps::score(&a, &date);
+                if d.join("reduced.rs").exists() && (better || (!have_reduced && crate::steps::score(&b, &date) == crate::steps::score(&a, &date))) {
+                    for f in ["reduced.rs", "STATUS.md", "ISSUE.md", "ISSUE_TITLE.txt", "report.md", "signature.txt", "known-issues.txt", "bisect.txt", "search.txt"] {
                         if d.join(f).exists() {
                             let _ = std::fs::copy(d.join(f), dest.join(f));
                         }
@@ -264,20 +287,28 @@ pub fn write_index(pkg: &Path) {
         .filter(|e| e.path().join("case.rs").exists())
         .map(|e| (e.file_name().to_string_lossy().to_string(), read_cfg(&e.path().join("status.cfg"))))
         .collect();
-    let rank = |c: &Cfg| match (c.get("state").map(String::as_str), c.get("verdict").map(String::as_str)) {
-        (Some("fixed"), _) => 9,
-        (_, Some("READY TO REPORT")) => 0,
-        (_, Some("ALMOST READY")) => 1,
-        (_, Some("NOT READY")) => 3,
-        _ => 2,
+    let today = today();
+    let rank = |c: &Cfg, dir: &str| {
+        let mut c2 = c.clone();
+        crate::steps::backfill(&mut c2, &root.join(dir));
+        if c2.get("state").map(String::as_str) == Some("fixed") { 99 } else { 100 - crate::steps::progress(&c2, &today).0 }
     };
-    rows.sort_by(|a, b| rank(&a.1).cmp(&rank(&b.1)).then(a.0.cmp(&b.0)));
-    let mut s = String::from("# Stored findings\n\nOne row per distinct finding; every directory under `findings/` has `finding.json`, `STATUS.md` (verdict, reproduction per channel, minimisation status, UB check, upstream search) and, once triaged, `reduced.rs` + `ISSUE.md`. A finding is READY TO REPORT only after its minimisation converged (two runs agree).\n\n");
-    let _ = writeln!(s, "| verdict | state | class | finding | kind | reduced lines | minimisation | seen | last seen | upstream |\n|---|---|---|---|---|---|---|---|---|---|");
+    rows.sort_by(|a, b| rank(&a.1, &a.0).cmp(&rank(&b.1, &b.0)).then(a.0.cmp(&b.0)));
+    let mut s = String::from("# Stored findings\n\nOne row per distinct finding. Every directory under `findings/` has `finding.json` (with the checklist), `STATUS.md` (checklist, reproduction per channel, minimisation, UB check, upstream search) and, once triaged, `reduced.rs` + `ISSUE.md`. The checklist says what was done and what is still open; steps are redone when the tool gets better at them or when the reduced program changes.\n\n");
+    let _ = writeln!(s, "| steps done | open steps | state | class | finding | kind | reduced lines | minimisation | seen | last seen | upstream |\n|---|---|---|---|---|---|---|---|---|---|---|");
     for (k, c) in &rows {
+        let mut c2 = c.clone();
+        crate::steps::backfill(&mut c2, &root.join(k));
         let g = |n: &str| c.get(n).cloned().unwrap_or_else(|| "-".into());
+        let (done, total) = crate::steps::progress(&c2, &today);
+        let open = crate::steps::open_steps(&c2, &today);
+        let _ = &open;
+        let next = { let ids = crate::steps::open_ids(&c2, &today); if ids.is_empty() { "none - ready for a human to review and report".to_string() } else { ids.join(", ") } };
         let up = std::fs::read_to_string(root.join(k).join("known-issues.txt")).map(|t| linkify(&t)).unwrap_or_else(|_| linkify(&g("upstream_search")));
-        let _ = writeln!(s, "| {} | {} | {} | `{k}` | {} | {} | {} | {}x | {} | {} |", g("verdict"), g("state"), g("class"), g("kind"), g("reduced_lines"), g("min_status"), g("times_seen"), g("last_seen"), up);
+        let _ = writeln!(s, "| {done}/{total} | {} | {} | {} | `{k}` | {} | {} | {} | {}x | {} | {} |", next.replace('|', "/"), g("state"), g("class"), g("kind"), g("reduced_lines"), g("min_status"), g("times_seen"), g("last_seen"), up);
+    }
+    for (k, _) in &rows {
+        write_finding_json(&root.join(k));
     }
     let _ = writeln!(s, "\n{} findings.", rows.len());
     std::fs::write(pkg.join("INDEX.md"), s).unwrap();
