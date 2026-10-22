@@ -102,6 +102,8 @@ struct MiriResult {
     verdict: String, // "ok", "ub", "panic", "skipped", "error"
     detail: String,
     stdout: String,
+    /// what Miri printed when it did not simply run the program (for the issue, if the program has no `unsafe`)
+    report: String,
 }
 
 fn miri(src: &str, work: &Path) -> MiriResult {
@@ -111,7 +113,7 @@ fn miri(src: &str, work: &Path) -> MiriResult {
         exec(c, Duration::from_secs(60)).map(|r| r.code == Some(0)).unwrap_or(false)
     };
     if !have {
-        return MiriResult { verdict: "skipped".into(), detail: "Miri is not installed (rustup component add miri rust-src --toolchain nightly)".into(), stdout: String::new() };
+        return MiriResult { verdict: "skipped".into(), detail: "Miri is not installed (rustup component add miri rust-src --toolchain nightly)".into(), stdout: String::new(), report: String::new() };
     }
     let dir = work.join(format!("miri_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -123,15 +125,15 @@ fn miri(src: &str, work: &Path) -> MiriResult {
     let r = exec(c, Duration::from_secs(900));
     let _ = std::fs::remove_dir_all(&dir);
     match r {
-        Ok(r) if r.timed_out => MiriResult { verdict: "error".into(), detail: "Miri timed out".into(), stdout: String::new() },
-        Ok(r) if r.code == Some(0) => MiriResult { verdict: "ok".into(), detail: "Miri ran the program to completion".into(), stdout: String::from_utf8_lossy(&r.stdout).into_owned() },
+        Ok(r) if r.timed_out => MiriResult { verdict: "error".into(), detail: "Miri timed out".into(), stdout: String::new(), report: String::new() },
+        Ok(r) if r.code == Some(0) => MiriResult { verdict: "ok".into(), detail: "Miri ran the program to completion".into(), stdout: String::from_utf8_lossy(&r.stdout).into_owned(), report: String::new() },
         Ok(r) => {
             let e = r.stderr;
             let first = e.lines().find(|l| l.contains("Undefined Behavior") || l.contains("panicked") || l.starts_with("error")).unwrap_or("").trim().to_string();
             let v = if e.contains("Undefined Behavior") { "ub" } else if e.contains("panicked") || e.contains("overflow") { "panic" } else { "error" };
-            MiriResult { verdict: v.into(), detail: first, stdout: String::from_utf8_lossy(&r.stdout).into_owned() }
+            MiriResult { verdict: v.into(), detail: first, stdout: String::from_utf8_lossy(&r.stdout).into_owned(), report: e.lines().take(40).collect::<Vec<_>>().join("\n") }
         }
-        Err(e) => MiriResult { verdict: "error".into(), detail: e.to_string(), stdout: String::new() },
+        Err(e) => MiriResult { verdict: "error".into(), detail: e.to_string(), stdout: String::new(), report: String::new() },
     }
 }
 
@@ -294,17 +296,21 @@ fn variants_from_text(t: &str) -> Vec<Variant> {
         .collect()
 }
 
-/// One line of output, for the command lists in the issue.
-fn short_out(s: &str) -> String {
-    let t = s.trim();
-    let joined = t.lines().map(str::trim).collect::<Vec<_>>().join(" / ");
-    if joined.chars().count() > 70 { format!("{}...", joined.chars().take(70).collect::<String>()) } else { joined }
+/// What a run printed, as shown in the issue.
+fn show_out(o: &Outcome) -> String {
+    match o {
+        Outcome::Ran { stdout, code, .. } if stdout.trim().is_empty() => {
+            if *code == Some(0) { "(no output)".to_string() } else { format!("(no output, exit code {:?})", code) }
+        }
+        Outcome::Ran { stdout, .. } => stdout.trim().to_string(),
+        other => other.describe(),
+    }
 }
 
 fn opt_variants(rustc: &[String], src: &Path, base: &Config, bad: &Config, sig: &Option<String>, reference: &Option<Outcome>, lim: &Limits, work: &Path) -> Vec<Variant> {
     let groups = flag_groups(&bad.flags);
     let pos = groups.iter().position(|g| g.iter().any(|t| t.contains("opt-level=")));
-    let mut cfgs: Vec<Config> = Vec::new();
+    let mut cfgs: Vec<(Vec<String>, Config)> = Vec::new();
     for l in ["0", "1", "2", "3", "s", "z"] {
         let new = vec!["-C".to_string(), format!("opt-level={l}")];
         let mut g2 = groups.clone();
@@ -315,14 +321,22 @@ fn opt_variants(rustc: &[String], src: &Path, base: &Config, bad: &Config, sig: 
         let mut c = bad.clone();
         c.name = format!("opt-{l}");
         c.flags = g2.into_iter().flatten().collect();
-        cfgs.push(c);
+        cfgs.push((rustc.to_vec(), c));
     }
+    // is it the MIR optimisations? (nightly only flag: built with the nightly compiler)
+    let mut m = bad.clone();
+    m.name = "mir0".into();
+    m.flags.push("-Zmir-opt-level=0".into());
+    cfgs.push((vec!["rustc".to_string(), "+nightly".to_string()], m));
     let _ = base;
     let id = std::process::id();
-    let outs = crate::runner::par_map(&cfgs, 3, |c| build_and_run(rustc, src, &work.join(format!("var_{id}_{}", c.name)), c, lim));
+    let outs = crate::runner::par_map(&cfgs, 3, |(r, c)| build_and_run(r, src, &work.join(format!("var_{id}_{}", c.name)), c, lim));
     cfgs.iter()
         .zip(outs)
-        .map(|(c, o)| {
+        .filter_map(|((_, c), o)| {
+            if c.name == "mir0" && matches!(&o, Outcome::CompileFail(e) if e.contains("unstable") || e.contains("nightly")) {
+                return None; // no nightly installed
+            }
             let bug = match sig {
                 Some(s) => crash_signature(&o).as_deref() == Some(s.as_str()),
                 None => match (&o, reference) {
@@ -331,12 +345,11 @@ fn opt_variants(rustc: &[String], src: &Path, base: &Config, bad: &Config, sig: 
                 },
             };
             let out = match &o {
-                Outcome::Ran { stdout, .. } => short_out(stdout),
                 Outcome::CompileFail(_) if bug => "(compiler crash)".to_string(),
                 Outcome::CompileFail(_) => "(does not compile)".to_string(),
-                other => other.describe(),
+                other => show_out(other),
             };
-            Variant { flags: c.flags.join(" "), bug, out }
+            Some(Variant { flags: c.flags.join(" "), bug, out })
         })
         .collect()
 }
@@ -573,11 +586,11 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     // 5. Miri (only meaningful for wrong-code findings)
     let ub_reused = !crash && still && cur("ub_check") && old.contains_key("miri");
     let (m, miri_agrees) = if crash || !still {
-        (MiriResult { verdict: "skipped".into(), detail: if crash { "not applicable (compiler crash)".into() } else { "does not reproduce".into() }, stdout: String::new() }, String::new())
+        (MiriResult { verdict: "skipped".into(), detail: if crash { "not applicable (compiler crash)".into() } else { "does not reproduce".into() }, stdout: String::new(), report: String::new() }, String::new())
     } else if ub_reused {
         let s = old.get("miri").cloned().unwrap_or_default();
         let (v, d) = s.split_once(": ").unwrap_or((s.as_str(), ""));
-        (MiriResult { verdict: v.to_string(), detail: d.to_string(), stdout: String::new() }, old.get("miri_agrees").cloned().unwrap_or_default())
+        (MiriResult { verdict: v.to_string(), detail: d.to_string(), stdout: String::new(), report: std::fs::read_to_string(dir.join("miri.txt")).unwrap_or_default() }, old.get("miri_agrees").cloned().unwrap_or_default())
     } else {
         let m = miri(&reduced, &o.work);
         let agrees = match (&outputs, m.verdict.as_str()) {
@@ -749,6 +762,11 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     }
     put(&mut st, "issue_draft", if still { "done" } else { "todo" }, &ctx, String::new());
 
+    if m.report.is_empty() {
+        let _ = std::fs::remove_file(dir.join("miri.txt"));
+    } else {
+        let _ = std::fs::write(dir.join("miri.txt"), &m.report);
+    }
     // ---- write status files
     st.remove("verdict");
     st.remove("blockers");
@@ -850,8 +868,6 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     // issue draft: only the reduced program, the shortest commands, the output and a version table
     let mut is = String::new();
     let cmd = |c: &Config| format!("rustc reduced.rs {} {}", common_txt, c.flags.join(" ")).split_whitespace().collect::<Vec<_>>().join(" ");
-    // wrong code: compile *and run* (the bug is in what the binary prints); crashes: compiling is the whole story
-    let run_cmd = |c: &Config| format!("{}; ./reduced", cmd(c));
     let vcmd = |flags: &str| format!("rustc reduced.rs {} {}", common_txt, flags).split_whitespace().collect::<Vec<_>>().join(" ");
     let first_yes = matrix2.iter().find(|m| m.2 == Repro::Yes).map(|m| m.0.clone());
     let vv = first_yes
@@ -874,50 +890,57 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     };
     let _ = std::fs::write(dir.join("ISSUE_TITLE.txt"), format!("{title}\n"));
     let _ = writeln!(is, "I tried this code:\n\n```rust\n{}\n```\n", reduced.trim_end());
-    match &outputs {
-        Some((a, b)) if crash => {
-            let a_out = if let Outcome::Ran { stdout, .. } = a { stdout.trim().to_string() } else { String::new() };
-            let err = match b {
-                Outcome::CompileFail(e) => crate::demangle::demangle_text(e.trim()).chars().take(20000).collect::<String>(),
-                other => other.describe(),
-            };
-            let works = if a_out.is_empty() { "compiles and runs fine".to_string() } else { format!("compiles, and running the binary prints `{}`", a_out.lines().next().unwrap_or("")) };
-            let _ = writeln!(is, "This command {works}:\n```\n{}\n```\nbut this one\n```\n{}\n```\nshows an error\n```\n{err}\n```\n", run_cmd(&base), cmd(&bad));
+    // every command with what it printed: the reference build, the failing build and the sibling optimisation levels
+    struct Entry {
+        flags: String,
+        text: String,
+        fails: bool,
+    }
+    let mut entries: Vec<Entry> = Vec::new();
+    let mut crash_err = String::new();
+    if let Some((a, b)) = &outputs {
+        entries.push(Entry { flags: base.flags.join(" "), text: show_out(a), fails: false });
+        crash_err = match b {
+            Outcome::CompileFail(e) => crate::demangle::demangle_text(e.trim()).chars().take(20000).collect::<String>(),
+            other => other.describe(),
+        };
+        entries.push(Entry { flags: bad.flags.join(" "), text: if crash { crash_err.clone() } else { show_out(b) }, fails: true });
+    }
+    for v in &variants {
+        if entries.iter().any(|e| e.flags == v.flags) {
+            continue;
         }
-        Some((a, b)) => {
-            let show = |o: &Outcome| match o {
-                Outcome::Ran { stdout, code, .. } if stdout.trim().is_empty() => format!("(no output, exit code {:?})", code),
-                Outcome::Ran { stdout, .. } => stdout.trim().to_string(),
-                other => other.describe(),
-            };
-            let _ = writeln!(is, "Compiled with\n```\n{}\n```\nit prints\n```\n{}\n```\nbut compiled with\n```\n{}\n```\nit prints\n```\n{}\n```\n", run_cmd(&base), show(a), run_cmd(&bad), show(b));
-            if !miri_agrees.is_empty() {
-                let _ = writeln!(is, "{miri_agrees}; the program is free of undefined behavior according to Miri.\n");
+        entries.push(Entry { flags: v.flags.clone(), text: if crash && v.bug { crash_err.clone() } else { v.out.clone() }, fails: v.bug });
+    }
+    if entries.is_empty() {
+        let _ = writeln!(is, "Commands:\n```\n{}\n{}\n```\n(did not reproduce when this draft was written)\n", cmd(&base), cmd(&bad));
+    } else {
+        // group by result; the group of the reference build comes first
+        let mut groups: Vec<(String, bool, Vec<String>)> = Vec::new();
+        for e in &entries {
+            let key = if crash && e.fails { "\u{0}fail".to_string() } else { e.text.clone() };
+            let command = if crash && e.fails { vcmd(&e.flags) } else { format!("{}; ./reduced", vcmd(&e.flags)) };
+            match groups.iter_mut().find(|g| g.0 == key) {
+                Some(g) => g.2.push(command),
+                None => groups.push((key, crash && e.fails, vec![command])),
             }
         }
-        None => {
-            let _ = writeln!(is, "Commands:\n```\n{}\n{}\n```\n(did not reproduce when this draft was written)\n", cmd(&base), cmd(&bad));
+        for (i, (key, is_fail, cmds)) in groups.iter().enumerate() {
+            let lead = match i { 0 => "Rust compiled with", 1 => "but compiled with", _ => "and compiled with" };
+            let text = if *is_fail { crash_err.as_str() } else { key.as_str() };
+            let verb = if *is_fail { "fails with" } else if crash { "compiles and prints" } else { "prints" };
+            if crash && !*is_fail && text == "(no output)" {
+                let _ = writeln!(is, "{lead}\n```\n{}\n```\nthe program builds and runs without errors.\n", cmds.join("\n"));
+            } else {
+                let _ = writeln!(is, "{lead}\n```\n{}\n```\n{verb}\n```\n{text}\n```\n", cmds.join("\n"));
+            }
         }
     }
-    if !variants.is_empty() {
-        let line = |v: &Variant| {
-            if crash { format!("{}   # {}", vcmd(&v.flags), if v.bug { "same error" } else { v.out.as_str() }) } else { format!("{}; ./reduced   # {}", vcmd(&v.flags), v.out) }
-        };
-        let bugs: Vec<String> = variants.iter().filter(|v| v.bug).map(&line).collect();
-        let fine: Vec<String> = variants.iter().filter(|v| !v.bug).map(&line).collect();
-        let _ = writeln!(is, "The same program with other optimization levels:\n");
-        if !bugs.is_empty() {
-            let _ = writeln!(is, "{}:\n```\n{}\n```\n", if crash { "also fail" } else { "also wrong (different from the first command)" }, bugs.join("\n"));
-        }
-        if !fine.is_empty() {
-            let _ = writeln!(is, "{}:\n```\n{}\n```\n", if crash { "do not fail" } else { "same as the first command (`rustc reduced.rs`)" }, fine.join("\n"));
-        }
-    }
-    if let Some(l) = mir_opt.strip_prefix("llvm: ").or_else(|| mir_opt.strip_prefix("mir: ")) {
-        let _ = writeln!(is, "{}\n", l.replace("does not reproduce", "The difference disappears").replace("still reproduces", "The difference remains").replacen(", so", "; so", 1).replace("with -Zmir-opt-level=0", "with `-Zmir-opt-level=0` (nightly)"));
+    // Miri is a required step of every finding; its output only belongs here when the program has no `unsafe` and Miri still complains
+    if !m.report.is_empty() && !reduced.contains("unsafe") {
+        let _ = writeln!(is, "Miri reports for this program (it contains no `unsafe`):\n```\n{}\n```\n", m.report.trim());
     }
     let _ = writeln!(is, "### Meta\n\n`rustc --version --verbose`:\n```\n{vv}\n```\n");
-    let _ = writeln!(is, "Problem was found by a rust fuzzer (created by an LLM) - https://github.com/qarmin/rs-compiler-fuzzer\n");
     let _ = writeln!(is, "| channel | reproducible |\n|---|---|");
     for (ch, ver, r) in &matrix2 {
         let _ = writeln!(is, "| {ch} ({ver}) | {} |", r.word());
@@ -931,6 +954,7 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
             let _ = writeln!(is, "{l}");
         }
     }
+    let _ = writeln!(is, "\nProblem was found by a rust fuzzer (created by an LLM) - https://github.com/qarmin/rs-compiler-fuzzer");
     std::fs::write(dir.join("ISSUE.md"), is).unwrap();
 
     // put the status at the top of report.md (replace an older block)
