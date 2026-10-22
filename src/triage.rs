@@ -102,6 +102,8 @@ struct MiriResult {
     verdict: String, // "ok", "ub", "panic", "skipped", "error"
     detail: String,
     stdout: String,
+    /// what Miri printed when it did not simply run the program (for the issue, if the program has no `unsafe`)
+    report: String,
 }
 
 fn miri(src: &str, work: &Path) -> MiriResult {
@@ -111,7 +113,7 @@ fn miri(src: &str, work: &Path) -> MiriResult {
         exec(c, Duration::from_secs(60)).map(|r| r.code == Some(0)).unwrap_or(false)
     };
     if !have {
-        return MiriResult { verdict: "skipped".into(), detail: "Miri is not installed (rustup component add miri rust-src --toolchain nightly)".into(), stdout: String::new() };
+        return MiriResult { verdict: "skipped".into(), detail: "Miri is not installed (rustup component add miri rust-src --toolchain nightly)".into(), stdout: String::new(), report: String::new() };
     }
     let dir = work.join(format!("miri_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -123,15 +125,15 @@ fn miri(src: &str, work: &Path) -> MiriResult {
     let r = exec(c, Duration::from_secs(900));
     let _ = std::fs::remove_dir_all(&dir);
     match r {
-        Ok(r) if r.timed_out => MiriResult { verdict: "error".into(), detail: "Miri timed out".into(), stdout: String::new() },
-        Ok(r) if r.code == Some(0) => MiriResult { verdict: "ok".into(), detail: "Miri ran the program to completion".into(), stdout: String::from_utf8_lossy(&r.stdout).into_owned() },
+        Ok(r) if r.timed_out => MiriResult { verdict: "error".into(), detail: "Miri timed out".into(), stdout: String::new(), report: String::new() },
+        Ok(r) if r.code == Some(0) => MiriResult { verdict: "ok".into(), detail: "Miri ran the program to completion".into(), stdout: String::from_utf8_lossy(&r.stdout).into_owned(), report: String::new() },
         Ok(r) => {
             let e = r.stderr;
             let first = e.lines().find(|l| l.contains("Undefined Behavior") || l.contains("panicked") || l.starts_with("error")).unwrap_or("").trim().to_string();
             let v = if e.contains("Undefined Behavior") { "ub" } else if e.contains("panicked") || e.contains("overflow") { "panic" } else { "error" };
-            MiriResult { verdict: v.into(), detail: first, stdout: String::from_utf8_lossy(&r.stdout).into_owned() }
+            MiriResult { verdict: v.into(), detail: first, stdout: String::from_utf8_lossy(&r.stdout).into_owned(), report: e.lines().take(40).collect::<Vec<_>>().join("\n") }
         }
-        Err(e) => MiriResult { verdict: "error".into(), detail: e.to_string(), stdout: String::new() },
+        Err(e) => MiriResult { verdict: "error".into(), detail: e.to_string(), stdout: String::new(), report: String::new() },
     }
 }
 
@@ -271,6 +273,85 @@ fn flag_groups(flags: &[String]) -> Vec<Vec<String>> {
         }
     }
     out
+}
+
+/// The same program built with other optimisation levels: which ones show the bug.
+#[derive(Clone, Debug)]
+struct Variant {
+    flags: String,
+    bug: bool,
+    out: String,
+}
+
+fn variants_to_text(v: &[Variant]) -> String {
+    v.iter().map(|x| format!("{}\t{}\t{}\n", x.flags, if x.bug { "bug" } else { "ok" }, x.out.replace('\n', "\\n"))).collect()
+}
+
+fn variants_from_text(t: &str) -> Vec<Variant> {
+    t.lines()
+        .filter_map(|l| {
+            let mut p = l.splitn(3, '\t');
+            Some(Variant { flags: p.next()?.to_string(), bug: p.next()? == "bug", out: p.next().unwrap_or("").replace("\\n", "\n") })
+        })
+        .collect()
+}
+
+/// What a run printed, as shown in the issue.
+fn show_out(o: &Outcome) -> String {
+    match o {
+        Outcome::Ran { stdout, code, .. } if stdout.trim().is_empty() => {
+            if *code == Some(0) { "(no output)".to_string() } else { format!("(no output, exit code {:?})", code) }
+        }
+        Outcome::Ran { stdout, .. } => stdout.trim().to_string(),
+        other => other.describe(),
+    }
+}
+
+fn opt_variants(rustc: &[String], src: &Path, base: &Config, bad: &Config, sig: &Option<String>, reference: &Option<Outcome>, lim: &Limits, work: &Path) -> Vec<Variant> {
+    let groups = flag_groups(&bad.flags);
+    let pos = groups.iter().position(|g| g.iter().any(|t| t.contains("opt-level=")));
+    let mut cfgs: Vec<(Vec<String>, Config)> = Vec::new();
+    for l in ["0", "1", "2", "3", "s", "z"] {
+        let new = vec!["-C".to_string(), format!("opt-level={l}")];
+        let mut g2 = groups.clone();
+        match pos {
+            Some(i) => g2[i] = new,
+            None => g2.push(new),
+        }
+        let mut c = bad.clone();
+        c.name = format!("opt-{l}");
+        c.flags = g2.into_iter().flatten().collect();
+        cfgs.push((rustc.to_vec(), c));
+    }
+    // is it the MIR optimisations? (nightly only flag: built with the nightly compiler)
+    let mut m = bad.clone();
+    m.name = "mir0".into();
+    m.flags.push("-Zmir-opt-level=0".into());
+    cfgs.push((vec!["rustc".to_string(), "+nightly".to_string()], m));
+    let _ = base;
+    let id = std::process::id();
+    let outs = crate::runner::par_map(&cfgs, 3, |(r, c)| build_and_run(r, src, &work.join(format!("var_{id}_{}", c.name)), c, lim));
+    cfgs.iter()
+        .zip(outs)
+        .filter_map(|((_, c), o)| {
+            if c.name == "mir0" && matches!(&o, Outcome::CompileFail(e) if e.contains("unstable") || e.contains("nightly")) {
+                return None; // no nightly installed
+            }
+            let bug = match sig {
+                Some(s) => crash_signature(&o).as_deref() == Some(s.as_str()),
+                None => match (&o, reference) {
+                    (Outcome::Ran { .. }, Some(r)) => o.key() != r.key(),
+                    _ => false,
+                },
+            };
+            let out = match &o {
+                Outcome::CompileFail(_) if bug => "(compiler crash)".to_string(),
+                Outcome::CompileFail(_) => "(does not compile)".to_string(),
+                other => show_out(other),
+            };
+            Some(Variant { flags: c.flags.join(" "), bug, out })
+        })
+        .collect()
 }
 
 fn search_to_text(s: &Search) -> String {
@@ -487,14 +568,29 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
         "unknown: not reproduced on nightly".to_string()
     };
 
+    // 4b. the same program at the other optimisation levels (on the channel the issue shows)
+    let var_chan = matrix2.iter().find(|m| m.2 == Repro::Yes).map(|m| m.0.clone());
+    let var_reused = cur("opt_levels") && dir.join("variants.txt").exists();
+    let variants: Vec<Variant> = if var_reused {
+        variants_from_text(&std::fs::read_to_string(dir.join("variants.txt")).unwrap_or_default())
+    } else if let (true, Some(ch)) = (still, &var_chan) {
+        let rustc = vec!["rustc".to_string(), format!("+{ch}")];
+        opt_variants(&rustc, &reduced_path, &base, &bad, &sig, &outputs.as_ref().map(|o| o.0.clone()), &lim, &o.work)
+    } else {
+        Vec::new()
+    };
+    if !variants.is_empty() {
+        let _ = std::fs::write(dir.join("variants.txt"), variants_to_text(&variants));
+    }
+
     // 5. Miri (only meaningful for wrong-code findings)
     let ub_reused = !crash && still && cur("ub_check") && old.contains_key("miri");
     let (m, miri_agrees) = if crash || !still {
-        (MiriResult { verdict: "skipped".into(), detail: if crash { "not applicable (compiler crash)".into() } else { "does not reproduce".into() }, stdout: String::new() }, String::new())
+        (MiriResult { verdict: "skipped".into(), detail: if crash { "not applicable (compiler crash)".into() } else { "does not reproduce".into() }, stdout: String::new(), report: String::new() }, String::new())
     } else if ub_reused {
         let s = old.get("miri").cloned().unwrap_or_default();
         let (v, d) = s.split_once(": ").unwrap_or((s.as_str(), ""));
-        (MiriResult { verdict: v.to_string(), detail: d.to_string(), stdout: String::new() }, old.get("miri_agrees").cloned().unwrap_or_default())
+        (MiriResult { verdict: v.to_string(), detail: d.to_string(), stdout: String::new(), report: std::fs::read_to_string(dir.join("miri.txt")).unwrap_or_default() }, old.get("miri_agrees").cloned().unwrap_or_default())
     } else {
         let m = miri(&reduced, &o.work);
         let agrees = match (&outputs, m.verdict.as_str()) {
@@ -588,6 +684,14 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     } else {
         put(&mut st, "flags", "todo", &ctx, "needs a reproducing program first".into());
     }
+    if var_reused {
+        keep(&mut st, "opt_levels");
+    } else if variants.is_empty() {
+        put(&mut st, "opt_levels", "todo", &ctx, "needs a reproducing program first".into());
+    } else {
+        let list = |bug: bool| variants.iter().filter(|v| v.bug == bug).map(|v| v.flags.clone()).collect::<Vec<_>>().join(", ");
+        put(&mut st, "opt_levels", "done", &ctx, format!("{} levels tried; bug with: {}; not with: {}", variants.len(), list(true), list(false)));
+    }
     if ub_reused {
         keep(&mut st, "ub_check");
     } else {
@@ -608,6 +712,29 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
         put(&mut st, "mir_llvm", "n/a", &ctx, "does not reproduce on nightly".into());
     } else {
         put(&mut st, "mir_llvm", "todo", &ctx, mir_opt.clone());
+    }
+    // the batch: is a single case enough?
+    {
+        let n = reduced.matches("mod case_").count();
+        if n <= 1 {
+            put(&mut st, "minimize_cases", "done", "", if n == 0 { "reduced to a plain program".into() } else { "a single case is enough".into() });
+        } else {
+            put(&mut st, "minimize_cases", "partial", "", format!("{n} cases of the batch are still needed together (the bug depends on the size/shape of the whole program)"));
+        }
+    }
+    // regression or long-standing? decides whether the bisection applies at all
+    {
+        let reg = |p: &crate::bisect::Part| p.summary.contains("first bad");
+        let old_bug = |p: &crate::bisect::Part| p.summary.contains("since <=");
+        if reg(&bis.stable) || reg(&bis.nightly) {
+            put(&mut st, "regression", "done", &ctx, format!("a regression ({})", [bis.stable.summary.as_str(), bis.nightly.summary.as_str()].iter().filter(|x| !x.is_empty()).cloned().collect::<Vec<_>>().join("; ")));
+        } else if old_bug(&bis.stable) || old_bug(&bis.nightly) {
+            put(&mut st, "regression", "done", &ctx, "long-standing: present in the oldest release that can compile it - not a regression, so the bisection steps are skipped".into());
+        } else if bis.stable.na && bis.nightly.na {
+            put(&mut st, "regression", "n/a", &ctx, "does not reproduce on the current stable or nightly".into());
+        } else {
+            put(&mut st, "regression", "todo", &ctx, "needs the stable/nightly search first".into());
+        }
     }
     for (id, part) in [("bisect_stable", &bis.stable), ("bisect_nightly", &bis.nightly), ("bisect_pr", &bis.pr)] {
         let ran_here = !o.bisect.is_zero() && still && m.verdict != "ub";
@@ -635,6 +762,11 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     }
     put(&mut st, "issue_draft", if still { "done" } else { "todo" }, &ctx, String::new());
 
+    if m.report.is_empty() {
+        let _ = std::fs::remove_file(dir.join("miri.txt"));
+    } else {
+        let _ = std::fs::write(dir.join("miri.txt"), &m.report);
+    }
     // ---- write status files
     st.remove("verdict");
     st.remove("blockers");
@@ -736,6 +868,7 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     // issue draft: only the reduced program, the shortest commands, the output and a version table
     let mut is = String::new();
     let cmd = |c: &Config| format!("rustc reduced.rs {} {}", common_txt, c.flags.join(" ")).split_whitespace().collect::<Vec<_>>().join(" ");
+    let vcmd = |flags: &str| format!("rustc reduced.rs {} {}", common_txt, flags).split_whitespace().collect::<Vec<_>>().join(" ");
     let first_yes = matrix2.iter().find(|m| m.2 == Repro::Yes).map(|m| m.0.clone());
     let vv = first_yes
         .as_ref()
@@ -757,36 +890,57 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     };
     let _ = std::fs::write(dir.join("ISSUE_TITLE.txt"), format!("{title}\n"));
     let _ = writeln!(is, "I tried this code:\n\n```rust\n{}\n```\n", reduced.trim_end());
-    match &outputs {
-        Some((a, b)) if crash => {
-            let a_out = if let Outcome::Ran { stdout, .. } = a { stdout.trim().to_string() } else { String::new() };
-            let err = match b {
-                Outcome::CompileFail(e) => crate::demangle::demangle_text(e.trim()).chars().take(20000).collect::<String>(),
-                other => other.describe(),
-            };
-            let works = if a_out.is_empty() { "compiles and runs fine".to_string() } else { format!("compiles, and running the binary prints `{}`", a_out.lines().next().unwrap_or("")) };
-            let _ = writeln!(is, "This command {works}:\n```\n{}\n```\nbut this one\n```\n{}\n```\nshows an error\n```\n{err}\n```\n", cmd(&base), cmd(&bad));
+    // every command with what it printed: the reference build, the failing build and the sibling optimisation levels
+    struct Entry {
+        flags: String,
+        text: String,
+        fails: bool,
+    }
+    let mut entries: Vec<Entry> = Vec::new();
+    let mut crash_err = String::new();
+    if let Some((a, b)) = &outputs {
+        entries.push(Entry { flags: base.flags.join(" "), text: show_out(a), fails: false });
+        crash_err = match b {
+            Outcome::CompileFail(e) => crate::demangle::demangle_text(e.trim()).chars().take(20000).collect::<String>(),
+            other => other.describe(),
+        };
+        entries.push(Entry { flags: bad.flags.join(" "), text: if crash { crash_err.clone() } else { show_out(b) }, fails: true });
+    }
+    for v in &variants {
+        if entries.iter().any(|e| e.flags == v.flags) {
+            continue;
         }
-        Some((a, b)) => {
-            let show = |o: &Outcome| match o {
-                Outcome::Ran { stdout, code, .. } if stdout.trim().is_empty() => format!("(no output, exit code {:?})", code),
-                Outcome::Ran { stdout, .. } => stdout.trim().to_string(),
-                other => other.describe(),
-            };
-            let _ = writeln!(is, "Compiled with\n```\n{}\n```\nit prints\n```\n{}\n```\nbut compiled with\n```\n{}\n```\nit prints\n```\n{}\n```\n", cmd(&base), show(a), cmd(&bad), show(b));
-            if !miri_agrees.is_empty() {
-                let _ = writeln!(is, "{miri_agrees}; the program is free of undefined behavior according to Miri.\n");
+        entries.push(Entry { flags: v.flags.clone(), text: if crash && v.bug { crash_err.clone() } else { v.out.clone() }, fails: v.bug });
+    }
+    if entries.is_empty() {
+        let _ = writeln!(is, "Commands:\n```\n{}\n{}\n```\n(did not reproduce when this draft was written)\n", cmd(&base), cmd(&bad));
+    } else {
+        // group by result; the group of the reference build comes first
+        let mut groups: Vec<(String, bool, Vec<String>)> = Vec::new();
+        for e in &entries {
+            let key = if crash && e.fails { "\u{0}fail".to_string() } else { e.text.clone() };
+            let command = if crash && e.fails { vcmd(&e.flags) } else { format!("{}; ./reduced", vcmd(&e.flags)) };
+            match groups.iter_mut().find(|g| g.0 == key) {
+                Some(g) => g.2.push(command),
+                None => groups.push((key, crash && e.fails, vec![command])),
             }
         }
-        None => {
-            let _ = writeln!(is, "Commands:\n```\n{}\n{}\n```\n(did not reproduce when this draft was written)\n", cmd(&base), cmd(&bad));
+        for (i, (key, is_fail, cmds)) in groups.iter().enumerate() {
+            let lead = match i { 0 => "Rust compiled with", 1 => "but compiled with", _ => "and compiled with" };
+            let text = if *is_fail { crash_err.as_str() } else { key.as_str() };
+            let verb = if *is_fail { "fails with" } else if crash { "compiles and prints" } else { "prints" };
+            if crash && !*is_fail && text == "(no output)" {
+                let _ = writeln!(is, "{lead}\n```\n{}\n```\nthe program builds and runs without errors.\n", cmds.join("\n"));
+            } else {
+                let _ = writeln!(is, "{lead}\n```\n{}\n```\n{verb}\n```\n{text}\n```\n", cmds.join("\n"));
+            }
         }
     }
-    if let Some(l) = mir_opt.strip_prefix("llvm: ").or_else(|| mir_opt.strip_prefix("mir: ")) {
-        let _ = writeln!(is, "{}\n", l.replace("does not reproduce", "The difference disappears").replace("still reproduces", "The difference remains").replacen(", so", "; so", 1).replace("with -Zmir-opt-level=0", "with `-Zmir-opt-level=0` (nightly)"));
+    // Miri is a required step of every finding; its output only belongs here when the program has no `unsafe` and Miri still complains
+    if !m.report.is_empty() && !reduced.contains("unsafe") {
+        let _ = writeln!(is, "Miri reports for this program (it contains no `unsafe`):\n```\n{}\n```\n", m.report.trim());
     }
     let _ = writeln!(is, "### Meta\n\n`rustc --version --verbose`:\n```\n{vv}\n```\n");
-    let _ = writeln!(is, "Problem was found by a rust fuzzer (created by an LLM) - https://github.com/qarmin/rs-compiler-fuzzer\n");
     let _ = writeln!(is, "| channel | reproducible |\n|---|---|");
     for (ch, ver, r) in &matrix2 {
         let _ = writeln!(is, "| {ch} ({ver}) | {} |", r.word());
@@ -794,12 +948,13 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     for (label, yes) in bis.edges() {
         let _ = writeln!(is, "| {label} | {} |", if yes { "yes" } else { "no" });
     }
-    if !bis.pr.lines.is_empty() {
+    if bis.pr.lines.iter().any(|l| l.contains("rust-lang/rust")) {
         let _ = writeln!(is, "\nBisected with `cargo bisect-rustc`:\n");
         for l in &bis.pr.lines {
             let _ = writeln!(is, "{l}");
         }
     }
+    let _ = writeln!(is, "\nProblem was found by a rust fuzzer (created by an LLM) - https://github.com/qarmin/rs-compiler-fuzzer");
     std::fs::write(dir.join("ISSUE.md"), is).unwrap();
 
     // put the status at the top of report.md (replace an older block)

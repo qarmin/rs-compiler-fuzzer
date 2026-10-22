@@ -80,11 +80,11 @@ impl Bisect {
             if let Some(rest) = piece.strip_prefix("stable:") {
                 b.stable.summary = piece.to_string();
                 b.stable.lines.push(format!("stable:{rest}"));
-                b.stable.done = rest.contains("first bad") || rest.contains("since");
+                b.stable.done = rest.contains("first bad");
             } else if let Some(rest) = piece.strip_prefix("nightly:") {
                 b.nightly.summary = piece.to_string();
                 b.nightly.lines.push(format!("nightly:{rest}"));
-                b.nightly.done = rest.contains("first bad") || rest.contains("older than a year");
+                b.nightly.done = rest.contains("first bad");
                 if let Some(d) = rest.trim().strip_prefix("first bad nightly-") {
                     b.nightly.range = Some((date_add(d, -1), d.to_string()));
                 }
@@ -171,10 +171,17 @@ impl Bisect {
     }
 }
 
-const OLDEST_STABLE_MINOR: u32 = 80;
-const NIGHTLY_DAYS: i64 = 365;
+/// The search goes back as far as the program can be compiled at all: the generated programs are edition 2021, which
+/// needs rustc 1.56 (nightlies from mid 2021). There is no other limit on how old a regression may be.
+const OLDEST_STABLE_MINOR: i64 = 56;
+const OLDEST_NIGHTLY: &str = "2021-06-01";
 /// Extra time for `cargo bisect-rustc` once the nightly range is a single day.
-const PR_SECONDS: u64 = 420;
+const PR_SECONDS: u64 = 900;
+
+fn days_between(from: &str, to: &str) -> i64 {
+    let ts = |d: &str| Command::new("date").args(["-u", "-d", d, "+%s"]).output().ok().and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<i64>().ok()).unwrap_or(0);
+    (ts(to) - ts(from)) / 86400
+}
 
 fn rustup(args: &[&str], secs: u64) -> bool {
     let mut c = Command::new("rustup");
@@ -210,7 +217,7 @@ struct Ctx<'a> {
     deadline: Instant,
     notes: Vec<String>,
     /// requested toolchain -> (toolchain actually used, `rustc -V`, reproduces)
-    results: std::collections::HashMap<String, (String, String, bool)>,
+    results: std::collections::HashMap<String, (String, String, bool, bool)>,
 }
 
 impl Ctx<'_> {
@@ -243,10 +250,12 @@ impl Ctx<'_> {
         let lim = Limits { compile: Duration::from_secs(300), run: Duration::from_secs(20) };
         let (r, a, b) = reproduces(&rustc, self.src, self.base, self.bad, self.sig, &lim, self.work);
         uninstall(tc_used);
+        let mut ref_ok = true;
         let res = match r {
             Repro::Yes => true,
             Repro::No => {
                 if let Outcome::CompileFail(e) = &a {
+                    ref_ok = false;
                     self.notes.push(format!("{tc}: reference config `{}` does not compile ({})", self.base.name, e.lines().find(|l| l.starts_with("error")).unwrap_or("").chars().take(100).collect::<String>()));
                 }
                 let _ = &b;
@@ -254,15 +263,20 @@ impl Ctx<'_> {
             }
             Repro::NotApplicable => false,
         };
-        self.results.insert(tc.to_string(), (used, version, res));
+        self.results.insert(tc.to_string(), (used, version, res, ref_ok));
         Some(res)
+    }
+
+    /// The probe could run the reference configuration (an older compiler that cannot compile the program says nothing).
+    fn ref_ok(&self, tc: &str) -> bool {
+        self.results.get(tc).map(|r| r.3).unwrap_or(true)
     }
 
     /// `name (rustc -V)` of a probed toolchain, for the version table.
     fn label(&self, tc: &str) -> String {
         match self.results.get(tc) {
-            Some((used, ver, _)) if used.starts_with(|c: char| c.is_ascii_digit()) => format!("stable {used} ({ver})"),
-            Some((used, ver, _)) => format!("{used} ({ver})"),
+            Some((used, ver, _, ok)) if used.starts_with(|c: char| c.is_ascii_digit()) => format!("stable {used} ({ver}){}", if *ok { "" } else { " [reference build does not compile]" }),
+            Some((used, ver, _, ok)) => format!("{used} ({ver}){}", if *ok { "" } else { " [reference build does not compile]" }),
             None => tc.to_string(),
         }
     }
@@ -314,7 +328,7 @@ pub fn bisect(src: &Path, base: &Config, bad: &Config, sig: &Option<String>, wor
             }
             None if out.nightly.done => {
                 out.pr.na = true;
-                out.pr.note = "the bug is older than the nightly search window".into();
+                out.pr.note = "long-standing bug (present in the oldest nightly that can compile it): not a regression".into();
             }
             None => out.pr.note = "the nightly range is not narrowed to one day yet".into(),
         }
@@ -327,16 +341,16 @@ pub fn bisect(src: &Path, base: &Config, bad: &Config, sig: &Option<String>, wor
 
 fn stable_search(cx: &mut Ctx, part: &mut Part) {
     let latest: i64 = rustc_version("stable").split_whitespace().nth(1).and_then(|v| v.split('.').nth(1)).and_then(|m| m.parse().ok()).unwrap_or(0);
-    if latest <= OLDEST_STABLE_MINOR as i64 {
+    if latest <= OLDEST_STABLE_MINOR {
         part.note = "cannot determine the latest stable release".into();
         return;
     }
     let tc = |m: i64| format!("1.{m}.0");
-    let lo = OLDEST_STABLE_MINOR as i64;
+    let lo = OLDEST_STABLE_MINOR;
     match cx.probe(&tc(lo)) {
         Some(true) => {
             part.edges.push((cx.label(&tc(lo)), true));
-            part.lines.push(format!("stable: already present in {} (oldest version tested)", tc(lo)));
+            part.lines.push(format!("stable: already present in {} (the oldest release that can compile the program: not a regression)", tc(lo)));
             part.summary = format!("stable: since <= {}", tc(lo));
             part.done = true;
         }
@@ -351,6 +365,9 @@ fn stable_search(cx: &mut Ctx, part: &mut Part) {
             part.edges.push((cx.label(&tc(b)), true));
             if b - g == 1 {
                 part.lines.push(format!("stable: **first affected release is {}** (last good: {})", tc(b), tc(g)));
+                if !cx.ref_ok(&tc(g)) {
+                    part.lines.push(format!("stable: caveat - {} cannot compile the program at all, so the bug may be older than it looks", tc(g)));
+                }
                 part.summary = format!("stable: first bad {}", tc(b));
                 part.done = true;
             } else {
@@ -373,22 +390,27 @@ fn nightly_search(cx: &mut Ctx, part: &mut Part) {
     }
     // rustc reports the commit date, the `nightly-D` toolchain published the day after
     let day = |i: i64| format!("nightly-{}", date_add(&hi_date, 1 - i));
-    let lo = NIGHTLY_DAYS;
+    // as far back as the program can be compiled (see OLDEST_NIGHTLY)
+    let nightly_days = days_between(OLDEST_NIGHTLY, &hi_date).max(2);
+    let lo = nightly_days;
     match cx.probe(&day(lo)) {
         Some(true) => {
             part.edges.push((cx.label(&day(lo)), true));
-            part.lines.push(format!("nightly: already present in {} (a year back, oldest tested)", day(lo)));
-            part.summary = "nightly: older than a year".into();
+            part.lines.push(format!("nightly: already present in {} (the oldest nightly that can compile the program: not a regression)", day(lo)));
+            part.summary = format!("nightly: since <= {}", day(lo));
             part.done = true;
         }
         Some(false) => {
-            // j = NIGHTLY_DAYS - days back: 0 = oldest (good) .. NIGHTLY_DAYS = newest (bad)
-            let (g, b) = search(0, NIGHTLY_DAYS, |j| cx.probe(&day(NIGHTLY_DAYS - j)));
-            let (gt, bt) = (day(NIGHTLY_DAYS - g), day(NIGHTLY_DAYS - b));
+            // j = nightly_days - days back: 0 = oldest (good) .. nightly_days = newest (bad)
+            let (g, b) = search(0, nightly_days, |j| cx.probe(&day(nightly_days - j)));
+            let (gt, bt) = (day(nightly_days - g), day(nightly_days - b));
             part.edges.push((cx.label(&gt), false));
-            part.edges.push((if b == NIGHTLY_DAYS { format!("{bt} ({v})") } else { cx.label(&bt) }, true));
+            part.edges.push((if b == nightly_days { format!("{bt} ({v})") } else { cx.label(&bt) }, true));
             if b - g == 1 {
                 part.lines.push(format!("nightly: **first affected: {bt}** (last good: {gt})"));
+                if !cx.ref_ok(&gt) {
+                    part.lines.push(format!("nightly: caveat - {gt} cannot compile the program at all, so the bug may be older than it looks"));
+                }
                 part.summary = format!("nightly: first bad {bt}");
                 part.range = Some((gt[8..].to_string(), bt[8..].to_string()));
                 part.done = true;
@@ -398,7 +420,7 @@ fn nightly_search(cx: &mut Ctx, part: &mut Part) {
                 part.note = format!("range ({gt}, {bt}] not narrowed to one day (time budget used up)");
             }
         }
-        None => part.note = "could not test a year-old nightly".into(),
+        None => part.note = format!("could not test the oldest nightly ({})", day(lo)),
     }
 }
 
@@ -430,8 +452,8 @@ fn pr_search(src: &Path, base: &Config, bad: &Config, sig: &Option<String>, work
     c.args(["--timeout", "300"]);
     let out = exec(c, budget);
     let _ = std::fs::remove_dir_all(&dir);
-    let text = match out {
-        Ok(r) => format!("{}\n{}", String::from_utf8_lossy(&r.stdout), r.stderr),
+    let (text, timed_out) = match out {
+        Ok(r) => (format!("{}\n{}", String::from_utf8_lossy(&r.stdout), r.stderr), r.timed_out),
         Err(e) => {
             part.note = format!("cannot run cargo-bisect-rustc ({e})");
             return;
@@ -450,7 +472,16 @@ fn pr_search(src: &Path, base: &Config, bad: &Config, sig: &Option<String>, work
     res.dedup();
     if res.is_empty() {
         let tail: Vec<&str> = text.lines().rev().filter(|l| !l.trim().is_empty()).take(2).collect();
-        part.note = format!("no PR within {}s ({})", budget.as_secs(), tail.into_iter().rev().collect::<Vec<_>>().join(" / ").chars().take(200).collect::<String>());
+        let why = tail.into_iter().rev().collect::<Vec<_>>().join(" / ").chars().take(200).collect::<String>();
+        if timed_out {
+            // not an answer yet: a later run tries again
+            part.note = format!("cargo-bisect-rustc ran out of time after {}s ({why}); it is tried again", budget.as_secs());
+        } else {
+            // it was tried and finished without naming a commit: that is a result too
+            part.lines = vec![format!("- regressed commit not found (cargo-bisect-rustc finished without naming one: {why})")];
+            part.summary = "pr: regressed commit not found".into();
+            part.done = true;
+        }
         return;
     }
     res.truncate(8);

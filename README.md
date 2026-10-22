@@ -190,3 +190,16 @@ atomics, `Mutex`/`RwLock`/`OnceLock`/channels/threads used deterministically, `C
   (by name; the output lists what is missing). Currently ~98 % of the in-scope names.
 - `tools/stdlib_selfcheck.sh [table ...]` compiles and runs each table on stable and nightly (`RSFUZZ_STDLIB_TABLE=<name>` forces one
   table); `rs-compiler-fuzzer list` prints the table names. Run by the `stdlib` CI job.
+
+## Regression search and issue draft details
+
+- **No arbitrary search limits**: the stable search goes back to 1.56 and the nightly search to 2021-06-01 - the oldest compilers that can
+  compile the (edition 2021) programs at all, not a chosen window. If the bug is already there, the finding is classified as
+  *long-standing* (step "Regression or long-standing bug?") and the bisection steps are skipped; if the oldest compiler cannot
+  compile the program, the table says so ("reference build does not compile") and a caveat is added.
+- **The offending commit** (`cargo bisect-rustc`) is only searched for regressions. Not finding it is a result too: "regressed commit
+  not found" (a timeout is not: that one is tried again).
+- **Code minimisation and case reduction are separate steps** ("Batch reduced to the cases that matter", "Code minimised"); the reduced
+  program uses `println!` (one value per line).
+- **`ISSUE.md`** shows `rustc reduced.rs <flags>; ./reduced` and lists the same program at `-C opt-level=0/1/2/3/s/z`: which levels show
+  the bug and which do not (step "Other optimisation levels tried").

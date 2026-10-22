@@ -22,17 +22,21 @@ pub struct Step {
 
 /// Version of the minimiser: bump it when a pass is added or improved. The step `minimized` is then open again and the
 /// convergence count starts from zero (the next runs continue from the previous result).
-pub const REDUCE_VERSION: u32 = 1;
+/// 2: `print!` is turned back into `println!` at the end
+pub const REDUCE_VERSION: u32 = 2;
 
 pub const STEPS: &[Step] = &[
     Step { id: "reproduced", title: "Reproduced on stable, beta and nightly (reduced program)", version: 1, code: true, max_age_days: 0 },
-    Step { id: "minimized", title: "Fully minimised (every pass finished, a second run changed nothing)", version: REDUCE_VERSION, code: false, max_age_days: 0 },
+    Step { id: "minimize_cases", title: "Batch reduced to the cases that matter (a single case if one is enough)", version: 1, code: false, max_age_days: 0 },
+    Step { id: "minimized", title: "Code minimised (every pass finished, a second run changed nothing)", version: REDUCE_VERSION, code: false, max_age_days: 0 },
     Step { id: "flags", title: "Shortest command line (fewest flags that still show it)", version: 1, code: true, max_age_days: 0 },
+    Step { id: "opt_levels", title: "Other optimisation levels (and -Zmir-opt-level=0) tried, results grouped in the issue", version: 2, code: true, max_age_days: 0 },
     Step { id: "ub_check", title: "Checked for undefined behaviour (Miri)", version: 2, code: true, max_age_days: 0 },
     Step { id: "mir_llvm", title: "MIR optimisations or LLVM? (-Zmir-opt-level=0)", version: 1, code: true, max_age_days: 0 },
-    Step { id: "bisect_stable", title: "Regression range among stable releases", version: 1, code: true, max_age_days: 0 },
-    Step { id: "bisect_nightly", title: "Regression range among nightlies", version: 1, code: true, max_age_days: 0 },
-    Step { id: "bisect_pr", title: "Offending PR found (cargo bisect-rustc)", version: 1, code: true, max_age_days: 0 },
+    Step { id: "regression", title: "Regression or long-standing bug? (decides whether the bisection below applies)", version: 1, code: true, max_age_days: 0 },
+    Step { id: "bisect_stable", title: "Regression: first stable release that has it", version: 2, code: true, max_age_days: 0 },
+    Step { id: "bisect_nightly", title: "Regression: first nightly that has it", version: 2, code: true, max_age_days: 0 },
+    Step { id: "bisect_pr", title: "Regression: offending commit/PR (cargo bisect-rustc; \"not found\" is a result too)", version: 2, code: true, max_age_days: 0 },
     Step { id: "upstream", title: "Searched upstream for duplicates", version: 1, code: true, max_age_days: 14 },
     Step { id: "issue_draft", title: "ISSUE.md draft written", version: 1, code: true, max_age_days: 0 },
 ];
@@ -219,6 +223,7 @@ pub fn backfill(st: &mut Cfg, dir: &Path) {
     if !repro_yes.is_empty() {
         put(st, "reproduced", "done", format!("reproduces on {}", repro_yes.join(", ")));
     }
+    let reg = g(st, "regression");
     let ms = g(st, "min_status");
     if ms.starts_with("converged") {
         put(st, "minimized", "done", ms.clone());
@@ -236,15 +241,26 @@ pub fn backfill(st: &mut Cfg, dir: &Path) {
     } else if miri.starts_with("skipped: not applicable") {
         put(st, "ub_check", "n/a", "compiler crash".into());
     }
+    if let Ok(r) = std::fs::read_to_string(dir.join("reduced.rs")) {
+        let n = r.matches("mod case_").count();
+        if n <= 1 {
+            put(st, "minimize_cases", "done", if n == 0 { "reduced to a plain program".into() } else { "a single case".into() });
+        } else {
+            put(st, "minimize_cases", "partial", format!("{n} cases of the batch are still needed together"));
+        }
+    }
+    if reg.contains("first bad") {
+        put(st, "regression", "done", "regression".into());
+    }
     let mo = g(st, "mir_opt");
     if mo.starts_with("llvm") || mo.starts_with("mir") {
         put(st, "mir_llvm", "done", mo.clone());
     }
-    let reg = g(st, "regression");
-    if reg.contains("stable:") {
+    // results that stopped at the old search windows (1.80 / one year) are not final answers
+    if reg.contains("stable:") && !reg.contains("since <= 1.80.0") {
         put(st, "bisect_stable", "done", reg.split("; ").find(|p| p.starts_with("stable:")).unwrap_or("").to_string());
     }
-    if reg.contains("nightly:") {
+    if reg.contains("nightly:") && !reg.contains("older than a year") {
         put(st, "bisect_nightly", "done", reg.split("; ").find(|p| p.starts_with("nightly:")).unwrap_or("").to_string());
     }
     if st.contains_key("regression_pr") {
@@ -285,7 +301,7 @@ mod tests {
     #[test]
     fn a_new_tool_version_reopens_the_step() {
         let mut st = cfg_with("bisect_pr", "done", "aaa", "2026-10-01");
-        let old = st.get("step.bisect_pr").unwrap().replace("v=1", "v=0");
+        let old = st.get("step.bisect_pr").unwrap().replace("v=2", "v=0");
         st.insert("step.bisect_pr".into(), old);
         assert!(current(&st, "bisect_pr", "aaa", "2026-10-02").is_none());
         let open = open_steps(&st, "2026-10-02");

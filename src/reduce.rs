@@ -604,6 +604,16 @@ pub fn flatten(src: &str) -> Option<String> {
 
 /// Remove redundant parentheses around plain identifiers / literals (all at once; kept only if the
 /// result is still interesting).
+/// The reducers turn `println!("{:?}", x)` into `print!("{}", x)`; an issue reads better with one line per value, so put the
+/// newlines back (kept only if the program is still interesting).
+pub fn prefer_println(it: &Interest, src: &str) -> String {
+    if !src.contains("print!(") {
+        return src.to_string();
+    }
+    let cand = src.replace("print!(", "println!(");
+    if it.check(&cand) { cand } else { src.to_string() }
+}
+
 pub fn strip_parens(it: &Interest, src: &str) -> String {
     let b = src.as_bytes();
     let mut drop: Vec<usize> = Vec::new();
@@ -904,6 +914,7 @@ pub fn reduce_all(it: &Interest, src: &str, budget: Duration, log: &mut ReduceLo
     }
     cur = unalias_black_box(it, &cur);
     cur = strip_parens(it, &cur);
+    cur = prefer_println(it, &cur);
     cur = format_if_interesting(it, &cur);
     note(log, "final (rustfmt)", &cur);
     cur
