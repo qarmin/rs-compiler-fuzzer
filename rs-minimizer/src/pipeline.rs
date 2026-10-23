@@ -344,6 +344,10 @@ pub fn minimize(it: &dyn Oracle, src: &str, opts: &Options, log: &mut ReduceLog,
     }
 
     pr.step("items, calls, expressions, peephole and tokens on the flattened program");
+    if !interrupted() && !opts.rustc.is_empty() && cur.lines().count() <= BIG_LINES {
+        // what Shrink Ray removed can make a call inlinable that was not before (a function that was still needed elsewhere)
+        cur = flatten_and_clean(it, cur, opts, &mut pr, log, at(18, 20));
+    }
     cur = expensive_own_passes(it, cur, &mut pr, log, at(18, 20));
 
     if !interrupted() && opts.use_treereduce {
