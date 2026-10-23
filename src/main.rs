@@ -109,6 +109,7 @@ fn main() {
     let mut toolchain_name = String::from("unknown");
     let mut contains: Option<PathBuf> = None;
     let mut skip_file: Option<PathBuf> = None;
+    let mut budget_max = 0u64;
     let mut minimize_secs = 1500u64;
     let mut strategy: Option<String> = None;
     let mut case_seed: Option<u64> = None;
@@ -162,6 +163,7 @@ fn main() {
             "--toolchain" => toolchain_name = val(),
             "--contains" => contains = Some(PathBuf::from(val())),
             "--skip" => skip_file = Some(PathBuf::from(val())),
+            "--budget-max" => budget_max = num(val()),
             "--minimize-secs" => minimize_secs = num(val()),
             "--strategy" => strategy = Some(val()),
             "--case-seed" => case_seed = Some(num(val())),
@@ -235,15 +237,31 @@ fn main() {
             let skip: std::collections::HashSet<String> = skip_file.as_ref().and_then(|f| std::fs::read_to_string(f).ok()).map(|t| t.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect()).unwrap_or_default();
             let stale: Vec<PathBuf> = triage::stale_findings(&pkg, &skip).into_iter().filter(|p| pack::name_hash(&p.file_name().unwrap().to_string_lossy()) % sn as u64 == si as u64).collect();
             eprintln!("retriage: {} stored finding(s) with open checklist steps in shard {shard}", stale.len());
-            let o = triage::TriageOpts { budget: Duration::from_secs(budget), search: !no_search, work: out.join("work"), no_reduce, bisect: Duration::from_secs(bisect_secs) };
+            let mut o = triage::TriageOpts { budget: Duration::from_secs(budget), search: !no_search, work: out.join("work"), no_reduce, bisect: Duration::from_secs(bisect_secs) };
             let start = std::time::Instant::now();
-            let per = Duration::from_secs(budget + bisect_secs + 240);
+            let max_budget = budget_max.max(budget);
             let mut done = 0;
             for d in stale.iter().take(limit) {
-                if deadline_secs > 0 && start.elapsed() + per > Duration::from_secs(deadline_secs) {
+                // Minimisation gets the time the other waiting findings do not need: the smaller the queue, the longer a finding
+                // may be minimised (between --budget and --budget-max); what a finding does not use stays for the next one.
+                let remaining = if deadline_secs > 0 { deadline_secs.saturating_sub(start.elapsed().as_secs()) } else { 0 };
+                let (mut other, mut mins) = (0u64, 0u64);
+                for p in &stale {
+                    let ids = triage::open_ids_of(p);
+                    if ids.iter().any(|i| *i == "minimized" || *i == "minimize_cases") {
+                        mins += 1;
+                    }
+                    other += 300 + if ids.iter().any(|i| i.starts_with("bisect") || *i == "pass_bisect") { bisect_secs + 600 } else { 0 };
+                }
+                let this_min = triage::open_ids_of(d).iter().any(|i| *i == "minimized" || *i == "minimize_cases");
+                let b = if deadline_secs > 0 && this_min { (remaining.saturating_sub(other) / mins.max(1)).clamp(budget, max_budget) } else { budget };
+                o.budget = Duration::from_secs(b);
+                let bis_needed = triage::open_ids_of(d).iter().any(|i| i.starts_with("bisect") || *i == "pass_bisect");
+                if deadline_secs > 0 && start.elapsed() + Duration::from_secs(budget.min(b) + if bis_needed { bisect_secs + 600 } else { 0 } + 240) > Duration::from_secs(deadline_secs) {
                     eprintln!("retriage: not enough time left for another finding");
                     break;
                 }
+                eprintln!("retriage: minimisation budget for this finding: {b}s");
                 eprintln!("retriage {}", d.display());
                 match triage::triage(&o, d) {
                     Ok(s) => {

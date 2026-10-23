@@ -1163,12 +1163,19 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     Ok(format!("{done_n}/{total_n} steps done{}", if open.is_empty() { String::new() } else { format!("; open: {summary}") }))
 }
 
+/// The checklist steps of a stored finding that are still open (ids).
+pub fn open_ids_of(dir: &Path) -> Vec<&'static str> {
+    let mut st = read_cfg(&dir.join("status.cfg"));
+    steps::backfill(&mut st, dir);
+    steps::open_ids(&st, &today())
+}
+
 /// Stored findings (in an unpacked package) with open checklist steps, closest to completion first. `skip` = keys already handled by
 /// this job. A finding whose only open step is the (long) minimisation is not started again on the day it was last triaged.
 pub fn stale_findings(pkg: &Path, skip: &std::collections::HashSet<String>) -> Vec<PathBuf> {
     let root = pkg.join("findings");
     let today = today();
-    let mut v: Vec<(usize, String, PathBuf)> = std::fs::read_dir(&root)
+    let mut v: Vec<(usize, usize, String, PathBuf)> = std::fs::read_dir(&root)
         .into_iter()
         .flatten()
         .flatten()
@@ -1191,9 +1198,10 @@ pub fn stale_findings(pkg: &Path, skip: &std::collections::HashSet<String>) -> V
             if only_min && st.get("triaged_at").map(|d| *d == today).unwrap_or(false) {
                 return None;
             }
-            Some((open.len(), name, p))
+            let lines = st.get("reduced_lines").and_then(|v| v.parse::<usize>().ok()).unwrap_or(usize::MAX);
+            Some((open.len(), lines, name, p))
         })
         .collect();
     v.sort();
-    v.into_iter().map(|x| x.2).collect()
+    v.into_iter().map(|x| x.3).collect()
 }

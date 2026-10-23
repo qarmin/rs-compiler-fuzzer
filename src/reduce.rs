@@ -757,6 +757,14 @@ pub fn shrinkray(it: &Interest, src: &str, deadline: Instant, log: &mut ReduceLo
     let _ = child.kill();
     let _ = child.wait();
     log.0.push(format!("shrinkray {how} after {}s", sr_start.elapsed().as_secs()));
+    if how.starts_with("exited by itself") {
+        // an early exit usually means the tool gave up: keep its last words
+        let text = format!("{}{}", std::fs::read_to_string(dir.join("sr.out")).unwrap_or_default(), std::fs::read_to_string(dir.join("sr.err")).unwrap_or_default());
+        let tail: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).rev().take(4).collect();
+        if !tail.is_empty() {
+            log.0.push(format!("shrinkray said: {}", tail.into_iter().rev().collect::<Vec<_>>().join(" | ").chars().take(400).collect::<String>()));
+        }
+    }
     let res = std::fs::read_to_string(&case).unwrap_or_else(|_| src.to_string());
     if res == src {
         // nothing happened: keep the tool's last words, otherwise a broken setup is invisible

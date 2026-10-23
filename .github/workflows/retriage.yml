@@ -24,6 +24,9 @@ on:
       reduce_seconds:
         description: "Reduction time per finding"
         default: "600"
+      reduce_max_seconds:
+        description: "Longest minimisation of one finding (it gets what the others in the queue do not need)"
+        default: "6000"
       bisect_seconds:
         description: "Regression-range time per finding"
         default: "1500"
@@ -45,7 +48,7 @@ jobs:
   retriage:
     name: retriage (shard ${{ matrix.shard }})
     runs-on: ubuntu-26.04
-    timeout-minutes: 115
+    timeout-minutes: 130
     strategy:
       fail-fast: false
       matrix:
@@ -100,14 +103,16 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           LIMIT: ${{ inputs.limit || '6' }}
           REDUCE: ${{ inputs.reduce_seconds || '600' }}
+          REDUCE_MAX: ${{ inputs.reduce_max_seconds || '6000' }}
           BISECT: ${{ inputs.bisect_seconds || '1500' }}
         run: |
           export BIN=$PWD/target/release/rs-compiler-fuzzer KEYS_FILE=$PWD/stored-keys.txt TOOLCHAIN=retriage
-          end=$((SECONDS + 98 * 60)); n=0; : > retriaged-keys.txt
+          # about 1:50 per job in total (the setup before this step takes ~7 minutes): minimisation may use nearly all of it
+          end=$((SECONDS + 103 * 60)); n=0; : > retriaged-keys.txt
           for i in $(seq 1 "$LIMIT"); do
             # not enough time for another finding (reduction + regression range + reproduction matrix)
-            [ $((end - SECONDS)) -lt $((REDUCE + BISECT + 420)) ] && { echo "no time left for another finding"; break; }
-            "$BIN" retriage --pkg pkg --shard "${{ matrix.shard }}" --limit 1 --skip retriaged-keys.txt --budget "$REDUCE" --bisect "$BISECT" --out retriage-out | tee one.txt
+            [ $((end - SECONDS)) -lt 900 ] && { echo "no time left for another finding"; break; }
+            "$BIN" retriage --pkg pkg --shard "${{ matrix.shard }}" --limit 1 --skip retriaged-keys.txt --budget "$REDUCE" --budget-max "$REDUCE_MAX" --deadline $((end - SECONDS)) --bisect "$BISECT" --out retriage-out | tee one.txt
             k=$(sed -n 's/^RETRIAGED //p' one.txt | head -n1)
             [ -z "$k" ] && { echo "nothing (more) to re-triage in this shard"; break; }
             rm -rf upd && mkdir -p "upd/$k" && cp -r "pkg/findings/$k/." "upd/$k/"
