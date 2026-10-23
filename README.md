@@ -124,14 +124,14 @@ cargo build --release
 ./target/release/rs-compiler-fuzzer fuzz --rustc "rustc +nightly" --duration 1800 --profile fast
 
 # one round, selected strategies and configs
-./target/release/rs-compiler-fuzzer fuzz --rounds 1 --strategies loops,memory --configs O0,O3,O3-lto-fat
+./target/release/rs-compiler-fuzzer fuzz --lto --rounds 1 --strategies loops,memory --configs O0,O3,O3-lto-fat
 
 # reproduce a batch from the logs ("seed N" in the output), or a single case
 ./target/release/rs-compiler-fuzzer fuzz --batch-seed 13888278117878060724 --strategies arith --target-lines 12000 --rounds 1
 ./target/release/rs-compiler-fuzzer gen --strategy arith --case-seed 123 --out one.rs
 
 # prove the detector works on known miscompilations (canaries/)
-./target/release/rs-compiler-fuzzer canary --rustc "rustc +nightly" --configs O0,O3,O3-lto-fat
+./target/release/rs-compiler-fuzzer canary --lto --rustc "rustc +nightly" --configs O0,O3,O3-lto-fat
 
 # re-run stored findings (dirs with case.rs + repro.cfg) on this toolchain
 ./target/release/rs-compiler-fuzzer verify --dir unzipped-findings/ --out verify-out
@@ -268,3 +268,26 @@ the reproduction on the toolchains and the flag search still run, which can take
 once - `reduced.rs` is still the best program, and `just triage` or the next `just minimize` rewrites the documents. Running `minimize` again
 continues from `reduced.rs`. Steps that depend on the program (flags, opt levels, Miri, bisection) are reset automatically when it changed.
 The result is not uploaded: copy the directory into the release package (or open the issue from `ISSUE.md`).
+
+## Differences that are not bugs, `shapes`, `--lto`
+
+- A divergence between two configurations that only differ in `overflow-checks` / `debug-assertions` is ignored when the checking
+  side panics with an overflow (or an `unsafe` precondition / `debug_assert`) message: `i8::MAX + 1` is `0` without the checks and a
+  panic with them, by definition. The reducer used to produce such "findings" by itself. (`runner::differs`, used by the fuzzer, the
+  reducer's oracle, triage and verify.)
+- Strategy `shapes` follows specific recent reports: shadowed 128-bit `let` chains through `black_box` (#164667) and chains of
+  `static mut` raw pointers (#164137). At the end of a run the fuzzer prints per strategy how many cases were dropped as invalid
+  (compile errors of the generator) and flags strategies above 5 %; the table also goes to the job summary.
+- LTO configurations (`O3-lto-thin`, `O3-lto-thin-checks`, `O3-lto-fat`) exist only with `--lto` (too heavy for the CI jobs).
+
+### Local fuzzing with `just` (LTO and other heavy runs)
+
+```
+just fuzz-lto                         # every strategy, with the LTO configurations CI never runs
+just fuzz-lto-only memory,shapes 5    # O0 vs O3 vs thin / thin+checks / fat LTO, 5 rounds
+just fuzz-full arith,loops --duration 3600   # all configs incl. slow ones (cgu1)
+just fuzz-one shapes 42               # one strategy, repeatable seed
+just canary                           # known bugs reproduce on this toolchain? (with LTO)
+just miri | just stdlib-selfcheck     # Miri over generated programs / generator self-check
+just fuzz-minimize                    # minimise everything found into fuzz-out/
+```

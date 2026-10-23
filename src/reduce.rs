@@ -107,7 +107,7 @@ impl Interest {
             let second = run(&self.b);
             match &self.crash_sig {
                 Some(sig) => crate::runner::crash_signature(&second).as_deref() == Some(sig.as_str()),
-                None => matches!(second, Outcome::Ran { .. }) && first.key() != second.key(),
+                None => matches!(second, Outcome::Ran { .. }) && crate::runner::differs(&first, &second, &self.a, &self.b),
             }
         };
         let _ = std::fs::remove_dir_all(&dir);

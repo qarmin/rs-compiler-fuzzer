@@ -52,6 +52,7 @@ OPTIONS:
   --out DIR             output directory for findings (default fuzz-out)
   --jobs N              configurations compiled in parallel (default: cores/2)
   --rustc \"CMD\"         rustc command, e.g. \"rustc +nightly\" (default: rustc)
+  --lto                 also compare thin/fat LTO builds (off by default: too heavy for CI)
   --profile fast|full   fast = skip the slowest configs (fat/thin LTO, one codegen unit); default full
   --configs a,b,c       use only these named configurations (first = baseline)
   --config NAME=FLAGS   add a custom configuration (repeatable)
@@ -182,6 +183,7 @@ fn main() {
             "--batch-seed" => batch_seed = Some(num(val())),
             "--profile" => profile = val(),
             "--budget" => budget = num(val()),
+            "--lto" => fuzz::set_lto(true),
             "--no-search" => no_search = true,
             "--search" | "--no-force" if cmd == "minimize" => {}
             "--no-reduce" => no_reduce = true,

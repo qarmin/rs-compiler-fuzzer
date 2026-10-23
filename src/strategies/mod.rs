@@ -25,6 +25,7 @@ mod loops;
 mod memory;
 mod recursion;
 mod select;
+mod shapes;
 mod simd;
 mod stdlib;
 mod stdlib_coll;
@@ -65,6 +66,7 @@ pub const ALL: &[Strategy] = &[
     Strategy { name: "borrows", lines: 18000, about: "lifetimes, reborrow chains, split borrows, closures, cursors, interior mutability", generate: borrows::generate },
     Strategy { name: "memory", lines: 15000, about: "unions, repr(packed), MaybeUninit, raw pointers, niches, provenance round-trips", generate: memory::generate },
     Strategy { name: "stdlib", lines: 12000, about: "calls to (nearly) every safe std function: integer/float/char/str methods, slices, iterators, Option/Result, cmp, mem, cells, collections (cmp::max was enough for a miscompilation)", generate: stdlib::generate },
+    Strategy { name: "shapes", lines: 9000, about: "shapes of recent rustc reports: shadowed 128-bit let chains through black_box (#164667), chains of static mut raw pointers (#164137)", generate: shapes::generate },
     Strategy { name: "traits", lines: 11000, about: "dyn/generic dispatch, default-vs-override methods, const eval vs runtime, drop order", generate: traits::generate },
 ];
 

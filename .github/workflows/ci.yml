@@ -30,7 +30,7 @@ jobs:
           rustup toolchain install nightly --profile minimal
       - run: cargo +stable build --release
       - name: Canaries (known miscompilations must still be detected)
-        run: ./target/release/rs-compiler-fuzzer canary --rustc "rustc +nightly" --configs O0,O3,O3-lto-fat --out fuzz-out
+        run: ./target/release/rs-compiler-fuzzer canary --lto --rustc "rustc +nightly" --configs O0,O3,O3-lto-fat --out fuzz-out
       - name: Fuzz (small batches)
         run: ./target/release/rs-compiler-fuzzer fuzz --rustc "rustc +nightly" --rounds 1 --scale 10 --profile fast --out fuzz-out
       - name: Print findings into the log

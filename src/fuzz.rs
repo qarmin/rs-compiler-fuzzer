@@ -64,6 +64,13 @@ fn cpu_level() -> u8 {
     1
 }
 
+static LTO: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// LTO configurations are far too heavy for the CI jobs: only with `--lto`.
+pub fn set_lto(on: bool) {
+    LTO.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Configurations that must agree for any UB-free program. The first one is the baseline.
 /// `slow` ones are skipped by `--profile fast`.
 pub fn default_configs(nightly: bool) -> Vec<Config> {
@@ -93,8 +100,12 @@ pub fn default_configs(nightly: bool) -> Vec<Config> {
     }
     v.push(Config::new("O2-cgu1", "-C opt-level=2 -C codegen-units=1").slow());
     v.push(Config::new("O3-cgu1", "-C opt-level=3 -C codegen-units=1").slow());
-    v.push(Config::new("O3-lto-thin", "-C opt-level=3 -C lto=thin").slow());
-    v.push(Config::new("O3-lto-fat", "-C opt-level=3 -C lto=fat -C codegen-units=1").slow());
+    if LTO.load(std::sync::atomic::Ordering::Relaxed) {
+        v.push(Config::new("O3-lto-thin", "-C opt-level=3 -C lto=thin").slow());
+        // rust-lang/rust#164536: thin LTO together with overflow checks broke a round trip
+        v.push(Config::new("O3-lto-thin-checks", "-C opt-level=3 -C lto=thin -C overflow-checks=on -C debug-assertions=on").slow());
+        v.push(Config::new("O3-lto-fat", "-C opt-level=3 -C lto=fat -C codegen-units=1").slow());
+    }
     if nightly {
         v.push(Config::new("O3-mir0", "-C opt-level=3 -Z mir-opt-level=0"));
         v.push(Config::new("O3-mir3", "-C opt-level=3 -Z mir-opt-level=3"));
@@ -137,6 +148,8 @@ struct Fuzzer<'a> {
     /// No new work (batches, shrinking) is started after this instant.
     hard_deadline: Option<Instant>,
     seen_crashes: BTreeSet<(String, String)>,
+    /// per strategy: (batches, cases that compiled, cases dropped as invalid, lines, seconds)
+    stats: std::collections::BTreeMap<String, (usize, usize, usize, usize, f32)>,
 }
 
 pub fn generate_batch(s: &Strategy, batch_seed: u64, target_lines: usize) -> Vec<Case> {
@@ -283,7 +296,7 @@ impl Fuzzer<'_> {
         let refs: Vec<&Case> = cases.iter().collect();
         let a = assemble(&refs);
         let r = par_map(&[base, bad], 2, |c| self.eval(&a, c));
-        if r[0].key() != r[1].key() {
+        if crate::runner::differs(&r[0], &r[1], base, bad) {
             Some((r[0].clone(), r[1].clone()))
         } else {
             None
@@ -517,6 +530,8 @@ impl Fuzzer<'_> {
             diverging.iter().map(|&i| self.o.configs[i].name.as_str()).collect::<Vec<_>>().join(",")
         );
         let _ = total_cases;
+        let e = self.stats.entry(s.name.to_string()).or_default();
+        *e = (e.0 + 1, e.1 + cases.len(), e.2 + dropped, e.3 + lines, e.4 + t0.elapsed().as_secs_f32());
 
         if diverging.is_empty() {
             let all_same = keys.iter().all(|k| *k == keys[0]);
@@ -582,7 +597,7 @@ pub fn run(o: &Opts) -> i32 {
     info!("configs: {}", o.configs.iter().map(|c| c.name.as_str()).collect::<Vec<_>>().join(", "));
     let work = o.out.join("work");
     std::fs::create_dir_all(&work).unwrap();
-    let mut f = Fuzzer { o, version, work, findings: 0, known: 0, triaged: 0, hard_deadline: o.duration.map(|d| Instant::now() + d + Duration::from_secs(30 * 60)), seen_crashes: BTreeSet::new() };
+    let mut f = Fuzzer { o, version, work, findings: 0, known: 0, triaged: 0, hard_deadline: o.duration.map(|d| Instant::now() + d + Duration::from_secs(30 * 60)), seen_crashes: BTreeSet::new(), stats: Default::default() };
     let start = Instant::now();
     let mut round = 0u64;
     let mut max_batch = Duration::ZERO;
@@ -618,6 +633,21 @@ pub fn run(o: &Opts) -> i32 {
         }
     }
     info!("done: {round} rounds in {:.0}s, {} new findings, {} matching known issues, {} triaged-unreported", start.elapsed().as_secs_f32(), f.findings, f.known, f.triaged);
+    if !f.stats.is_empty() {
+        // a strategy that loses many cases to compile errors wastes its batches: the generator needs fixing
+        let mut table = String::from("strategy      batches   cases  dropped(invalid)  lines/s\n");
+        for (name, (b, c, d, l, t)) in &f.stats {
+            let pct = if c + d > 0 { *d as f32 * 100.0 / (c + d) as f32 } else { 0.0 };
+            table += &format!("{name:<12} {b:>8} {c:>7} {d:>8} ({pct:>4.1}%) {:>8.0}{}\n", *l as f32 / t.max(0.1), if pct > 5.0 { "   <- generator produces too many invalid programs" } else { "" });
+        }
+        info!("generator statistics:\n{table}");
+        if let Ok(path) = std::env::var("GITHUB_STEP_SUMMARY") {
+            use std::io::Write as _;
+            if let Ok(mut fh) = std::fs::OpenOptions::new().append(true).create(true).open(path) {
+                let _ = writeln!(fh, "\n```\n{table}```");
+            }
+        }
+    }
     let _ = std::fs::remove_dir_all(&f.work);
     if f.findings > 0 || (o.fail_on_known && f.known > 0) { 2 } else { 0 }
 }
@@ -628,6 +658,8 @@ const CANARIES: &[(&str, &str)] = &[
     ("rust-lang/rust#164297 (lto=fat)", include_str!("../canaries/case_164297.rs")),
     ("rust-lang/rust#164295 (-O, LLVM 23)", include_str!("../canaries/case_164295.rs")),
     ("rust-lang/rust#163311 (-O2/-O3)", include_str!("../canaries/case_163311.rs")),
+    ("rust-lang/rust#164667 (-O1, stack colouring)", include_str!("../canaries/case_164667.rs")),
+    ("rust-lang/rust#164137 (-O1, early-cse)", include_str!("../canaries/case_164137.rs")),
 ];
 
 pub fn canary(o: &Opts) -> i32 {
@@ -701,7 +733,7 @@ pub fn verify(o: &Opts, root: &Path, report_dir: &Path, label: &str) -> i32 {
             .enumerate()
             .map(|(i, c)| build_and_run(&o.rustc, &src, &work.join(format!("v{}_{n}_{i}", std::process::id())), c, &o.limits))
             .collect();
-        (r[0].key() != r[1].key(), r[0].describe(), r[1].describe(), get("bad_name"))
+        (crate::runner::differs(&r[0], &r[1], &base, &bad), r[0].describe(), r[1].describe(), get("bad_name"))
     });
     for (d, (diverges, b, x, badname)) in dirs.iter().zip(results) {
         let name = d.file_name().unwrap().to_string_lossy().to_string();
