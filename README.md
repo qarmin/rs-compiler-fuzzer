@@ -279,3 +279,15 @@ The result is not uploaded: copy the directory into the release package (or open
   `static mut` raw pointers (#164137). At the end of a run the fuzzer prints per strategy how many cases were dropped as invalid
   (compile errors of the generator) and flags strategies above 5 %; the table also goes to the job summary.
 - LTO configurations (`O3-lto-thin`, `O3-lto-thin-checks`, `O3-lto-fat`) exist only with `--lto` (too heavy for the CI jobs).
+
+### Local fuzzing with `just` (LTO and other heavy runs)
+
+```
+just fuzz-lto                         # every strategy, with the LTO configurations CI never runs
+just fuzz-lto-only memory,shapes 5    # O0 vs O3 vs thin / thin+checks / fat LTO, 5 rounds
+just fuzz-full arith,loops --duration 3600   # all configs incl. slow ones (cgu1)
+just fuzz-one shapes 42               # one strategy, repeatable seed
+just canary                           # known bugs reproduce on this toolchain? (with LTO)
+just miri | just stdlib-selfcheck     # Miri over generated programs / generator self-check
+just fuzz-minimize                    # minimise everything found into fuzz-out/
+```

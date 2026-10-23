@@ -135,6 +135,63 @@ index: build
 open:
     @grep -l "=todo\|=partial" findings/*/status.cfg 2>/dev/null | xargs -n1 dirname | sort || true
 
+## local fuzzing (heavier than CI: all configurations, LTO, more cores)
+# Examples:
+#   just fuzz-lto                              # every strategy once, with the LTO configs CI never runs
+#   just fuzz-lto memory,shapes 5              # chosen strategies, 5 rounds
+#   just fuzz-full arith,loops --duration 3600 # all configs incl. the slow ones, for an hour
+# Findings land in ./fuzz-out; `just fuzz-minimize` turns the stored ones into reduced reproducers.
+
+# all configurations except LTO, slow ones (cgu1) included
+[group('fuzz')]
+fuzz-full strategies="all" *args: doctor-quick build
+    {{bin}} fuzz --strategies {{strategies}} --profile full --jobs {{jobs}} --out fuzz-out {{args}}
+
+# the LTO configurations (thin, thin+overflow checks, fat), normally off because they are too heavy for CI
+[group('fuzz')]
+fuzz-lto strategies="all" rounds="1" *args: doctor-quick build
+    {{bin}} fuzz --lto --strategies {{strategies}} --rounds {{rounds}} --profile full --jobs {{jobs}} --out fuzz-out {{args}}
+
+# only the LTO-related comparison: O0 against thin / thin+checks / fat (faster than all configs)
+[group('fuzz')]
+fuzz-lto-only strategies="memory,shapes,loops,arith" rounds="3" *args: doctor-quick build
+    {{bin}} fuzz --lto --strategies {{strategies}} --rounds {{rounds}} --configs O0,O3,O3-lto-thin,O3-lto-thin-checks,O3-lto-fat --jobs {{jobs}} --out fuzz-out {{args}}
+
+# known miscompilations (canaries/): proves the detector fires on this toolchain; --lto includes #164297
+[group('fuzz')]
+canary toolchain="nightly": build
+    {{bin}} canary --lto --rustc "rustc +{{toolchain}}" --out fuzz-out
+
+# list strategies and configurations (with --lto the LTO ones too)
+[group('fuzz')]
+configs *args: build
+    {{bin}} list {{args}} --lto
+
+# one strategy on the nightly, with a seed to repeat a run: just fuzz-one shapes 42
+[group('fuzz')]
+fuzz-one strategy seed="" *args: build
+    {{bin}} fuzz --strategies {{strategy}} {{ if seed != "" { "--seed " + seed } else { "" } }} --rounds 1 --jobs {{jobs}} --out fuzz-out --rustc "rustc +nightly" {{args}}
+
+# Miri over the generated programs (needs nightly + miri)
+[group('fuzz')]
+miri strategies="all" *args: build
+    {{bin}} miri --strategies {{strategies}} --rounds 1 --out fuzz-out {{args}}
+
+# compile+run every stdlib table on stable and nightly (generator self-check)
+[group('fuzz')]
+stdlib-selfcheck:
+    bash tools/stdlib_selfcheck.sh
+
+# minimise everything the local fuzzing found (fuzz-out/<finding>/), one after another
+[group('fuzz')]
+fuzz-minimize *args: doctor-quick build
+    #!/usr/bin/env bash
+    set -u
+    for d in fuzz-out/*/; do
+        [ -f "$d/case.rs" ] && [ -f "$d/repro.cfg" ] || continue
+        {{bin}} minimize "$d" --jobs {{jobs}} {{args}} || break
+    done
+
 ## profiling
 # perf permissions (one-time):
 #   echo '-1' | sudo tee /proc/sys/kernel/perf_event_paranoid
