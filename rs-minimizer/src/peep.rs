@@ -184,8 +184,9 @@ fn calls_to_values(src: &str) -> Vec<Edit> {
             continue;
         }
         if let Some(close) = matching(b, e) {
-            for value in ["0", "Default::default()"] {
-                out.push((s, close + 1, value.to_string()));
+            let values: &[&str] = if crate::control::effort() > 0 { &["0", "Default::default()", "1", "false", "()"] } else { &["0", "Default::default()"] };
+            for value in values {
+                out.push((s, close + 1, (*value).to_string()));
             }
         }
     }

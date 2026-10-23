@@ -79,7 +79,8 @@ pub fn shrink_tokens(it: &dyn Oracle, src: &str, deadline: Instant) -> String {
     if toks.len() > 4000 {
         return cur;
     }
-    for n in [8usize, 4, 2, 1] {
+    let windows: &[usize] = if crate::control::effort() > 0 { &[64, 32, 16, 8, 4, 2, 1] } else { &[8, 4, 2, 1] };
+    for &n in windows {
         // every window position on small programs, every other one on bigger ones
         let step = if toks.len() <= 1500 { 1 } else { (n / 2).max(1) } as isize;
         let mut i = toks.len().saturating_sub(n) as isize;

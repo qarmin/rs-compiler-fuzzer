@@ -44,7 +44,7 @@ pub fn shrinkray(it: &dyn Oracle, src: &str, deadline: Instant, log: &mut Reduce
     // has not changed for a while. A stall counts as "finished"; hitting the deadline does not.
     let stall = Duration::from_secs((deadline.saturating_duration_since(sr_start).as_secs() / 5).clamp(45, 150) + (src.len() as u64 / 2000).min(240));
     let mut child = match Command::new(&exe)
-        .args(["--ui", "basic", "--input-type", "arg", "--parallelism", &par().to_string(), "--volume", "quiet", "--timeout", "300", "--memory-limit", "0", "--exit-on-completion"])
+        .args(["--ui", "basic", "--input-type", "arg", "--parallelism", &par().to_string(), "--volume", "quiet", "--timeout", "300", "--memory-limit", "0", "--exit-on-completion", "--seed", &crate::control::effort().to_string()])
         .arg(&test)
         .arg(&case)
         .current_dir(&dir)

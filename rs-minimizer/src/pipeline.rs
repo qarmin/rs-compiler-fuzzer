@@ -6,7 +6,7 @@ use crate::exprs::{drop_calls, drop_let_bindings, flatten_blocks, simplify_exprs
 use crate::external::{shrinkray, shrinkray_available, treereduce};
 use crate::format::format_if_interesting;
 use crate::inline::{inline_calls, substitute_lets};
-use crate::items::{shrink_items, shrink_items_with_users, shrink_siblings_step, shrink_statements};
+use crate::items::{shrink_items, shrink_items_with_users, shrink_pairs, shrink_siblings_step, shrink_statements};
 use crate::lines::{shrink_lines, strip_comments};
 use crate::modules::hoist_modules;
 use crate::oracle::Oracle;
@@ -61,9 +61,12 @@ impl Options {
     }
 }
 
-fn stage(hook: Hook, st: Stage, cur: &mut String, deadline: Instant, log: &mut ReduceLog) {
+fn stage(it: &dyn Oracle, hook: Hook, st: Stage, cur: &mut String, deadline: Instant, log: &mut ReduceLog) {
     if let Some(next) = hook(st, cur, deadline) {
-        if next != *cur {
+        // what a hook builds is checked like everything else: a rebuilt program that lost the bug would poison every later step
+        if next != *cur && !it.check(&next) {
+            log.push(format!("{st:?}: the hook's program ({} lines) is not interesting - discarded", next.lines().count()));
+        } else if next != *cur {
             log.push(format!("{st:?}: the hook changed the program ({} -> {} lines)", cur.lines().count(), next.lines().count()));
             *cur = next;
         }
@@ -222,7 +225,7 @@ fn cheap_phase(it: &dyn Oracle, mut cur: String, opts: &Options, pr: &mut Progre
     for round in 1..=4 {
         let before = cur.len();
         if round == 1 {
-            stage(hook, Stage::BeforeLines, &mut cur, until, log);
+            stage(it, hook, Stage::BeforeLines, &mut cur, until, log);
             pr.result(log, "caller's batch step", &cur);
         }
         pr.pass("comments");
@@ -307,8 +310,8 @@ pub fn minimize(it: &dyn Oracle, src: &str, opts: &Options, log: &mut ReduceLog,
     pr.pass("hoist modules");
     cur = hoist_modules(it, &cur, &*opts.keep_module, &opts.rustc);
     pr.result(log, "hoist modules", &cur);
-    stage(hook, Stage::Unrolled, &mut cur, at(1, 4), log);
-    stage(hook, Stage::AfterLines, &mut cur, at(2, 5), log);
+    stage(it, hook, Stage::Unrolled, &mut cur, at(1, 4), log);
+    stage(it, hook, Stage::AfterLines, &mut cur, at(2, 5), log);
     pr.result(log, "caller's flatten step", &cur);
 
     pr.step("structure: newtypes, function bodies, parameters, fields, variants");
@@ -337,7 +340,7 @@ pub fn minimize(it: &dyn Oracle, src: &str, opts: &Options, log: &mut ReduceLog,
         pr.pass("hoist modules");
         cur = hoist_modules(it, &cur, &*opts.keep_module, &opts.rustc);
         pr.result(log, "unroll and hoist modules", &cur);
-        stage(hook, Stage::AfterExternal, &mut cur, at(13, 20), log);
+        stage(it, hook, Stage::AfterExternal, &mut cur, at(13, 20), log);
         pr.result(log, "caller's flatten step", &cur);
     }
     if cur.lines().count() > BIG_LINES {
@@ -380,7 +383,7 @@ pub fn minimize(it: &dyn Oracle, src: &str, opts: &Options, log: &mut ReduceLog,
     pr.step("final polish: parentheses, caller's cosmetics, rustfmt");
     pr.pass("parentheses");
     cur = strip_parens(it, &cur);
-    stage(hook, Stage::Polish, &mut cur, start + budget, log);
+    stage(it, hook, Stage::Polish, &mut cur, start + budget, log);
     pr.pass("rustfmt");
     cur = format_if_interesting(it, &cur);
     pr.result(log, "polish", &cur);
@@ -399,6 +402,11 @@ fn expensive_own_passes(it: &dyn Oracle, mut cur: String, pr: &mut Progress, log
     pr.pass("lines");
     cur = shrink_lines(it, &cur, until);
     pr.result(log, "calls, expressions, lines", &cur);
+    if crate::control::effort() > 0 && cur.lines().count() <= 400 {
+        pr.pass("pairs");
+        cur = shrink_pairs(it, &cur, until);
+        pr.result(log, "pairs of statements", &cur);
+    }
     if cur.lines().count() > PEEP_LINES {
         log.push(format!("peephole and token passes skipped: {} lines (they run below {PEEP_LINES})", cur.lines().count()));
         return cur;

@@ -205,3 +205,46 @@ fn dead_code_is_found_even_when_the_crate_allows_it() {
     assert!(!out.contains("never") && !out.contains("HashMap"), "{out}");
     assert_prints(&out, "7\n");
 }
+
+#[test]
+fn a_hook_that_loses_the_bug_is_discarded() {
+    let src = "fn main() {\n    let v = 6u32 * 7;\n    println!(\"{}\", v);\n}\n";
+    let o = prints("42\n");
+    check_oracle(&o, src);
+    rs_minimizer::control::set_parallel(8);
+    let mut opts = Options::new(Duration::from_secs(60));
+    opts.use_shrinkray = false;
+    opts.use_treereduce = false;
+    let mut log = ReduceLog::default();
+    // a hook that "rebuilds" the program and breaks it
+    let out = minimize(&o, src, &opts, &mut log, &mut |stage, cur, _| (stage == rs_minimizer::Stage::BeforeLines).then(|| cur.replace("42", "43").replace("6u32 * 7", "6u32 * 8")));
+    assert_prints(&out, "42\n");
+    assert!(log.0.iter().any(|l| l.contains("not interesting - discarded")), "{:?}", log.0);
+}
+
+#[test]
+fn the_effort_shuffle_is_deterministic_and_a_permutation() {
+    let mut a: Vec<u32> = (0..20).collect();
+    let mut b = a.clone();
+    rs_minimizer::control::shuffled(&mut a, 3);
+    rs_minimizer::control::shuffled(&mut b, 3);
+    assert_eq!(a, b);
+    let mut sorted = a.clone();
+    sorted.sort();
+    assert_eq!(sorted, (0..20).collect::<Vec<u32>>());
+    assert_ne!(a, (0..20).collect::<Vec<u32>>());
+}
+
+#[test]
+fn pairs_and_random_subsets_run_at_a_higher_effort() {
+    let src = "fn main() {\n    let mut c = 0u32;\n    c += 1;\n    c += 2;\n    let d = c * 0;\n    let _ = d;\n    println!(\"ok\");\n}\n";
+    let o = prints("ok\n");
+    check_oracle(&o, src);
+    rs_minimizer::control::set_parallel(8);
+    rs_minimizer::control::set_effort(2);
+    let out = rs_minimizer::items::shrink_pairs(&o, src, far());
+    let out = rs_minimizer::items::shrink_siblings(&o, &out, far());
+    rs_minimizer::control::set_effort(0);
+    assert!(!out.contains("c += 2"), "{out}");
+    assert_prints(&out, "ok\n");
+}

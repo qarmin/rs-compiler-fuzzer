@@ -174,7 +174,7 @@ fn feed(var: &str) -> String {
 pub fn generate(rng: &mut Rng) -> String {
     let mut s = String::new();
     let types = all_ints();
-    let nfn = rng.range(2, 5);
+    let nfn = rng.range(2, 4);
     let mut calls = String::new();
     for f in 0..nfn {
         let nparams = rng.range(1, 4);
@@ -184,14 +184,14 @@ pub fn generate(rng: &mut Rng) -> String {
         let sig: Vec<String> = params.iter().map(|p| format!("{}: {}", p.name, p.ty)).collect();
         let mut locals: Vec<Var> = params.iter().map(|p| Var { name: p.name.clone(), ty: p.ty }).collect();
         let mut body = String::new();
-        for l in 0..rng.range(1, 4) {
+        for l in 0..rng.range(1, 3) {
             let ty = *rng.pick(&types);
-            let depth_ = rng.range(2, 5) as u32;
+            let depth_ = rng.range(2, 4) as u32;
             let e = expr(rng, &Ctx { vars: &locals }, ty, depth_);
             w!(body, "        let l{l}: {ty} = {e};");
             locals.push(Var { name: format!("l{l}"), ty });
         }
-        let depth_ = rng.range(2, 5) as u32;
+        let depth_ = rng.range(2, 4) as u32;
         let tail = expr(rng, &Ctx { vars: &locals }, ret, depth_);
         w!(s, "    {attr}\n    fn f{f}({}) -> {ret} {{\n{body}        {tail}\n    }}", sig.join(", "));
         for _ in 0..rng.range(1, 3) {
@@ -202,16 +202,16 @@ pub fn generate(rng: &mut Rng) -> String {
 
     w!(s, "    pub fn run(h: &mut H) {{");
     // plain straight-line section
-    let nin = rng.range(2, 5);
+    let nin = rng.range(2, 4);
     let mut vars: Vec<Var> = Vec::new();
     for i in 0..nin {
         let ty = *rng.pick(&types);
         w!(s, "        let v{i}: {ty} = bb({});", lit(rng, ty));
         vars.push(Var { name: format!("v{i}"), ty });
     }
-    for i in 0..rng.range(2, 6) {
+    for i in 0..rng.range(2, 4) {
         let ty = *rng.pick(&types);
-        let depth_ = rng.range(2, 6) as u32;
+        let depth_ = rng.range(2, 5) as u32;
         let e = expr(rng, &Ctx { vars: &vars }, ty, depth_);
         w!(s, "        let t{i}: {ty} = {e};");
         s.push_str(&feed(&format!("t{i}")));
@@ -229,7 +229,7 @@ pub fn generate(rng: &mut Rng) -> String {
         for v in vars.iter().take(3) {
             lv.push(Var { name: v.name.clone(), ty: v.ty });
         }
-        let depth_ = rng.range(2, 5) as u32;
+        let depth_ = rng.range(2, 4) as u32;
         let step = expr(rng, &Ctx { vars: &lv }, ty, depth_);
         w!(s, "        let mut acc{k}: {ty} = bb({});", lit(rng, ty));
         let step = step.replace("acc", &format!("acc{k}"));

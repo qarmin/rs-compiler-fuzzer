@@ -568,7 +568,12 @@ fn ddmin_siblings(it: &dyn Oracle, cur: &mut String, mut list: Vec<(usize, usize
     // the statements that used them, see `cascade`)
     let units_of = |cur: &str, list: &[(usize, usize)]| -> Vec<usize> {
         let roots: Vec<usize> = (0..list.len()).filter(|&j| let_name(&cur[list[j].0..list[j].1]).is_none()).collect();
-        if with_cascade && roots.len() >= 2 { roots } else { (0..list.len()).collect() }
+        let mut units = if with_cascade && roots.len() >= 2 { roots } else { (0..list.len()).collect() };
+        // a higher effort deletes random subsets instead of neighbours: what is needed is often scattered
+        if crate::control::effort() > 0 {
+            crate::control::shuffled(&mut units, crate::control::effort() as u64);
+        }
+        units
     };
     let mut units = units_of(cur, &list);
     let mut n = (units.len() / 2).max(1);
@@ -674,4 +679,34 @@ pub fn shrink_siblings_step(it: &dyn Oracle, src: &str, deadline: Instant, max_l
         }
     }
     (cur, false)
+}
+
+/// Pairs of statements near each other, deleted together: what neither can go without the other (a call and the `if` that guards
+/// it, a `let` and its only reader) is invisible to one-at-a-time and chunk deletion. Slow, so only for a higher effort.
+pub fn shrink_pairs(it: &dyn Oracle, src: &str, deadline: Instant) -> String {
+    let mut cur = src.to_string();
+    for _ in 0..3 {
+        let mut groups: Vec<Vec<(usize, usize)>> = Vec::new();
+        for (prio, list) in sibling_lists(&cur) {
+            if prio != 0 || list.len() > 120 {
+                continue;
+            }
+            for i in 0..list.len() {
+                for j in i + 1..list.len().min(i + 7) {
+                    groups.push(vec![list[i], list[j]]);
+                }
+            }
+        }
+        if groups.is_empty() || groups.len() > 6000 {
+            break;
+        }
+        let next = delete_groups(it, &cur, groups, deadline);
+        if next.len() == cur.len() || expired(deadline) {
+            cur = next;
+            break;
+        }
+        info!("pairs of statements: {} -> {} bytes", cur.len(), next.len());
+        cur = next;
+    }
+    cur
 }

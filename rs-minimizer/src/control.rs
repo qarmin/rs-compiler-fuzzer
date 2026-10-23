@@ -13,6 +13,30 @@ static DEADLINE_HIT: AtomicBool = AtomicBool::new(false);
 /// Set by Ctrl+C (see `install_ctrlc`): every pass stops at its next deadline check.
 pub static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 
+static EFFORT: AtomicUsize = AtomicUsize::new(0);
+
+/// How hard the passes try: 0 is the normal run, every further level adds slower and less obvious variants (random subsets instead
+/// of neighbours, bigger token windows, pairs of statements, more replacement values). A caller with time left raises it instead of
+/// giving up.
+pub fn set_effort(level: usize) {
+    EFFORT.store(level, Ordering::Relaxed);
+}
+
+pub fn effort() -> usize {
+    EFFORT.load(Ordering::Relaxed)
+}
+
+/// Deterministic shuffle (the same level always gives the same order): xorshift on the seed.
+pub fn shuffled<T>(items: &mut [T], seed: u64) {
+    let mut x = seed.wrapping_mul(0x9e3779b97f4a7c15) | 1;
+    for i in (1..items.len()).rev() {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        items.swap(i, (x % (i as u64 + 1)) as usize);
+    }
+}
+
 static PARALLEL: AtomicUsize = AtomicUsize::new(4);
 
 /// Parallel oracle calls of the passes (and Shrink Ray's workers).

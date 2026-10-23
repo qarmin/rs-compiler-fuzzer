@@ -616,21 +616,45 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
                             crate::reduce::set_checkpoint(Some(dir.join("reduced.rs")));
                         }
                         info!("step 2: reduction from {} lines, {}s budget{}", start_src.lines().count(), o.budget.as_secs(), if o.checkpoint { ", checkpointed to reduced.rs" } else { "" });
-                        // Rounds: a round that changed the program is followed by another one on its result while time is left (the
-                        // confirmation run that used to wait for the next day happens here), a round that changed nothing ends it.
+                        // Rounds until the time is used: a round that changed the program is followed by another one on its result; one that
+                        // changed nothing is followed by a harder one (random subsets, pairs, bigger token windows, other seeds, a fresh start
+                        // from the original) instead of giving up. Only a round at the highest effort that changes nothing ends it early.
                         let t0 = std::time::Instant::now();
                         let mut round_src = start_src.clone();
                         let mut last_unchanged = false;
-                        for round in 1..=4 {
-                            let out = reduce_all(&it, &round_src, o.budget.saturating_sub(t0.elapsed()), &mut reduce_log);
-                            last_unchanged = out == round_src;
+                        let mut effort = 0usize;
+                        for round in 1..=12 {
+                            rs_minimizer::control::set_effort(effort);
+                            let left = o.budget.saturating_sub(t0.elapsed());
+                            let mut out = reduce_all(&it, &round_src, left, &mut reduce_log);
+                            if effort == 2 && out.lines().count() > 60 && !crate::reduce::INTERRUPTED.load(std::sync::atomic::Ordering::Relaxed) {
+                                // the stored program may be a dead end: the same pipeline from the original, the smaller result wins
+                                info!("round {round}: a fresh start from the original program ({} lines) for comparison", case.lines().count());
+                                let fresh = reduce_all(&it, &case, o.budget.saturating_sub(t0.elapsed()) / 2, &mut reduce_log);
+                                if fresh.len() < out.len() {
+                                    reduce_log.push(format!("the fresh start got smaller: {} lines instead of {}", fresh.lines().count(), out.lines().count()));
+                                    out = fresh;
+                                }
+                            }
+                            let changed = out != round_src;
                             round_src = out;
-                            let more = !last_unchanged && crate::reduce::last_run_complete() && !crate::reduce::INTERRUPTED.load(std::sync::atomic::Ordering::Relaxed) && t0.elapsed() * 4 < o.budget * 3 && round < 4;
-                            if !more {
+                            let interrupted = crate::reduce::INTERRUPTED.load(std::sync::atomic::Ordering::Relaxed);
+                            let time_left = t0.elapsed() * 4 < o.budget * 3;
+                            if interrupted || !time_left {
+                                last_unchanged = false;
                                 break;
                             }
-                            info!("round {round} changed the program to {} lines; another round on it ({}s of {}s used)", round_src.lines().count(), t0.elapsed().as_secs(), o.budget.as_secs());
+                            if changed {
+                                info!("round {round} (effort {effort}) changed the program to {} lines; another round on it ({}s of {}s used)", round_src.lines().count(), t0.elapsed().as_secs(), o.budget.as_secs());
+                            } else if effort < 3 {
+                                effort += 1;
+                                info!("round {round} changed nothing; trying harder (effort {effort}, {}s of {}s used)", t0.elapsed().as_secs(), o.budget.as_secs());
+                            } else {
+                                last_unchanged = true;
+                                break;
+                            }
                         }
+                        rs_minimizer::control::set_effort(0);
                         reduced = round_src;
                         if last_unchanged {
                             continued_from = Some(crate::pack::text_hash(&reduced));
