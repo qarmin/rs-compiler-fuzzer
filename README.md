@@ -204,3 +204,24 @@ atomics, `Mutex`/`RwLock`/`OnceLock`/channels/threads used deterministically, `C
   program uses `println!` (one value per line).
 - **`ISSUE.md`** shows `rustc reduced.rs <flags>; ./reduced` and lists the same program at `-C opt-level=0/1/2/3/s/z`: which levels show
   the bug and which do not (step "Other optimisation levels tried").
+
+## Minimising by hand on a strong machine (`just`)
+
+```
+just download                                   # findings.zip from the Nightly release -> ./findings, ./INDEX.md, ./fixed.txt
+just open                                       # findings that still have open checklist steps
+just minimize findings/arith__Oz__4a1a1f9e41    # all cores, up to 4 h per pass, repeated until two runs agree (max 12 h / 8 runs)
+just minimize findings/X --jobs 20 --budget 7200 --bisect 3000 --search
+just triage findings/X                          # the whole checklist again (short reduction, bisection, upstream search)
+just bisect findings/X                          # regression search only
+just issue findings/X                           # print ISSUE.md
+just index                                      # rebuild INDEX.md
+```
+
+`minimize` reduces even a finding that already "converged" (a longer run on more cores may get further; `--no-force` skips those). The
+smallest program that still shows the bug is written to `reduced.rs` the moment it is found, also while Shrink Ray works. **Ctrl+C once**
+stops the reduction and writes everything up for what was reached (`reduced.rs`, `ISSUE.md`, `STATUS.md`, `status.cfg`, `finding.json`, `INDEX.md`;
+the reproduction on the toolchains and the flag search still run, which can take a few minutes for big programs); **Ctrl+C twice** leaves at
+once - `reduced.rs` is still the best program, and `just triage` or the next `just minimize` rewrites the documents. Running `minimize` again
+continues from `reduced.rs`. Steps that depend on the program (flags, opt levels, Miri, bisection) are reset automatically when it changed.
+The result is not uploaded: copy the directory into the release package (or open the issue from `ISSUE.md`).

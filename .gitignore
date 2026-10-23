@@ -1,2 +1,6 @@
 /target
 /fuzz-out
+/findings
+/findings.zip
+/INDEX.md
+/fixed.txt

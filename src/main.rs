@@ -31,6 +31,8 @@ USAGE:
   rs-compiler-fuzzer miri               run generated programs under Miri (UB reports = generator/Miri/std bugs; Miri-vs-native differences); same options as fuzz
   rs-compiler-fuzzer triage --dir DIR   reproduce on all channels, reduce, Miri-check, search GitHub, write STATUS.md/ISSUE.md/verdict
                             (--bisect SECS: find the first stable release / nightly that has the bug; --dirs ROOT: every finding below ROOT; --budget SECS reduction time per finding; --no-search; --no-reduce; --limit N)
+  rs-compiler-fuzzer minimize DIR       local, long minimisation of one stored finding on all cores (--jobs N, --budget SECS per run, --deadline SECS overall,
+                            --bisect SECS, --search, --no-force = skip a finding that already converged); Ctrl+C keeps the best program and rewrites ISSUE.md/STATUS.md/finding.json; run it again to continue
   rs-compiler-fuzzer retriage --pkg DIR  triage again (in place) every stored finding with an older fuzzer_id (--shard I/N, --limit N, --deadline SECS, --budget, --bisect)
   rs-compiler-fuzzer pack --pkg DIR     merge finding directories (--add DIR, repeatable) into an unpacked package, rebuild INDEX.md
                             (--toolchain NAME records where they were found; --contains KEYS_FILE checks that keys are present)
@@ -150,6 +152,7 @@ fn main() {
             "--profile" => profile = val(),
             "--budget" => budget = num(val()),
             "--no-search" => no_search = true,
+            "--search" | "--no-force" if cmd == "minimize" => {}
             "--no-reduce" => no_reduce = true,
             "--bisect" => bisect_secs = num(val()),
             "--shard" => shard = val(),
@@ -171,6 +174,7 @@ fn main() {
                 print!("{HELP}");
                 return;
             }
+            other if cmd == "minimize" && !other.starts_with('-') && dir_arg.is_none() => dir_arg = Some(PathBuf::from(other)),
             other => die(&format!("unknown option `{other}`")),
         }
     }
@@ -215,7 +219,7 @@ fn main() {
             if targets.is_empty() {
                 die("triage needs --dir DIR or --dirs ROOT");
             }
-            let o = triage::TriageOpts { budget: Duration::from_secs(budget), search: !no_search, work: out.join("work"), no_reduce, bisect: Duration::from_secs(bisect_secs) };
+            let o = triage::TriageOpts { budget: Duration::from_secs(budget), search: !no_search, work: out.join("work"), no_reduce, bisect: Duration::from_secs(bisect_secs), checkpoint: false, force_reduce: false };
             let mut worst = 0;
             for (i, d) in targets.iter().take(limit).enumerate() {
                 eprintln!("[{}/{}] triage {}", i + 1, targets.len().min(limit), d.display());
@@ -230,6 +234,57 @@ fn main() {
             let _ = std::fs::remove_dir_all(out.join("work"));
             std::process::exit(worst);
         }
+        "minimize" => {
+            // local, interactive minimisation of one stored finding: all cores, hours of time, Ctrl+C keeps what was reached
+            let dir = dir_arg.unwrap_or_else(|| die("minimize needs the finding directory, e.g. `minimize findings/arith__Oz__4a1a1f9e41`"));
+            if !dir.join("case.rs").exists() || !dir.join("repro.cfg").exists() {
+                die(&format!("{} is not a finding directory (case.rs / repro.cfg missing)", dir.display()));
+            }
+            let flag_given = |f: &str| args.iter().any(|a| a == f);
+            let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+            let par = if flag_given("--jobs") { jobs } else { cores };
+            reduce::set_parallel(par);
+            reduce::install_sigint();
+            let per_run = if flag_given("--budget") { budget } else { 4 * 3600 };
+            let total = if deadline_secs > 0 { deadline_secs } else { 12 * 3600 };
+            let o = triage::TriageOpts { budget: Duration::from_secs(per_run), search: !no_search && flag_given("--search"), work: out.join("work"), no_reduce, bisect: Duration::from_secs(bisect_secs), checkpoint: true, force_reduce: !flag_given("--no-force") };
+            let start = std::time::Instant::now();
+            let status_of = |d: &PathBuf| std::fs::read_to_string(d.join("status.cfg")).unwrap_or_default().lines().find_map(|l| l.strip_prefix("min_status=").map(String::from)).unwrap_or_default();
+            let lines_now = |d: &PathBuf| std::fs::read_to_string(d.join("reduced.rs")).map(|t| t.lines().count()).unwrap_or(0);
+            eprintln!("minimize {}: {par} parallel jobs, up to {per_run}s per pass over everything, {total}s overall; Ctrl+C once = stop and write everything up, twice = leave at once (reduced.rs is saved on every improvement)", dir.display());
+            let mut runs = 0;
+            loop {
+                runs += 1;
+                let left = total.saturating_sub(start.elapsed().as_secs());
+                let mut o2 = o.clone_opts();
+                o2.budget = Duration::from_secs(per_run.min(left));
+                eprintln!("--- minimisation run {runs} (reduced.rs now {} lines) ---", lines_now(&dir));
+                match triage::triage(&o2, &dir) {
+                    Ok(s) => eprintln!("    {s}"),
+                    Err(e) => {
+                        eprintln!("    triage failed: {e}");
+                        break;
+                    }
+                }
+                let st = status_of(&dir);
+                eprintln!("    minimisation status: {st}; reduced.rs {} lines", lines_now(&dir));
+                if reduce::INTERRUPTED.load(std::sync::atomic::Ordering::Relaxed) {
+                    eprintln!("interrupted - STATUS.md, ISSUE.md, status.cfg and finding.json are written for what was reached");
+                    break;
+                }
+                if st.starts_with("converged") || start.elapsed().as_secs() >= total || runs >= 8 {
+                    break;
+                }
+            }
+            if let Some(root) = dir.canonicalize().ok().and_then(|d| d.parent().map(|p| p.to_path_buf())).filter(|p| p.file_name().map(|n| n == "findings").unwrap_or(false)) {
+                if let Some(pkg) = root.parent() {
+                    pack::write_index(pkg);
+                }
+            }
+            let _ = std::fs::remove_dir_all(out.join("work"));
+            eprintln!("done: {}/reduced.rs, ISSUE.md, STATUS.md", dir.display());
+            std::process::exit(0);
+        }
         "retriage" => {
             // triage again every stored finding that was last triaged by an older `fuzzer_id`, in place
             let pkg = pkg.unwrap_or_else(|| die("retriage needs --pkg DIR (an unpacked findings.zip)"));
@@ -237,7 +292,7 @@ fn main() {
             let skip: std::collections::HashSet<String> = skip_file.as_ref().and_then(|f| std::fs::read_to_string(f).ok()).map(|t| t.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect()).unwrap_or_default();
             let stale: Vec<PathBuf> = triage::stale_findings(&pkg, &skip).into_iter().filter(|p| pack::name_hash(&p.file_name().unwrap().to_string_lossy()) % sn as u64 == si as u64).collect();
             eprintln!("retriage: {} stored finding(s) with open checklist steps in shard {shard}", stale.len());
-            let mut o = triage::TriageOpts { budget: Duration::from_secs(budget), search: !no_search, work: out.join("work"), no_reduce, bisect: Duration::from_secs(bisect_secs) };
+            let mut o = triage::TriageOpts { budget: Duration::from_secs(budget), search: !no_search, work: out.join("work"), no_reduce, bisect: Duration::from_secs(bisect_secs), checkpoint: false, force_reduce: false };
             let start = std::time::Instant::now();
             let max_budget = budget_max.max(budget);
             let mut done = 0;

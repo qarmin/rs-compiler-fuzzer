@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
+#[derive(Clone)]
 pub struct TriageOpts {
     pub budget: Duration,
     pub search: bool,
@@ -24,6 +25,16 @@ pub struct TriageOpts {
     pub no_reduce: bool,
     /// time for the regression-range search (0 = off)
     pub bisect: Duration,
+    /// keep the best reduced program on disk while reducing (and use it when interrupted): for local, interactive runs
+    pub checkpoint: bool,
+    /// reduce again even when an earlier run converged (a stronger machine / longer time may get further)
+    pub force_reduce: bool,
+}
+
+impl TriageOpts {
+    pub fn clone_opts(&self) -> TriageOpts {
+        self.clone()
+    }
 }
 
 /// Version of the triage / minimisation logic. Bump it by hand whenever the results of `triage` get
@@ -570,7 +581,7 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     let mut did_reduce = false;
     let mut continued_from: Option<String> = None;
     let reduce_started = std::time::Instant::now();
-    let min_done = steps::current(&old, "minimized", "", &date).filter(|m| m.status == "done").is_some();
+    let min_done = !o.force_reduce && steps::current(&old, "minimized", "", &date).filter(|m| m.status == "done").is_some();
     let min_version_ok = steps::get(&old, "minimized").map(|m| m.version == steps::REDUCE_VERSION).unwrap_or(true);
     let prev_runs: u32 = if min_version_ok { old.get("min_runs").and_then(|v| v.parse().ok()).unwrap_or(0) } else { 0 };
     let mut reduction_kept = false;
@@ -594,7 +605,23 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
                         _ => case.clone(),
                     };
                     if it.check(&start_src) {
+                        if o.checkpoint {
+                            // the checkpoint overwrites reduced.rs: an earlier result that the reducer could not use is kept aside
+                            if let (Some(prev), None) = (&prev_reduced, &continued_from) {
+                                let _ = std::fs::write(dir.join("reduced.rs.bak"), prev);
+                                reduce_log.0.push("the earlier reduced.rs was not interesting under the reducer's limits: saved as reduced.rs.bak".into());
+                            }
+                            crate::reduce::set_checkpoint(Some(dir.join("reduced.rs")));
+                        }
                         reduced = reduce_all(&it, &start_src, o.budget, &mut reduce_log);
+                        if o.checkpoint {
+                            // an interrupted run may hold a smaller program than the pass that was cut short returned
+                            if let Some(best) = crate::reduce::best_so_far().filter(|b| b.len() < reduced.len() && it.check(b)) {
+                                reduce_log.0.push(format!("kept the smallest program seen: {} lines", best.lines().count()));
+                                reduced = best;
+                            }
+                            crate::reduce::set_checkpoint(None);
+                        }
                         did_reduce = true;
                     } else {
                         reduce_log.0.push("original no longer interesting under the reducer's stricter limits - not reduced".into());
@@ -744,7 +771,7 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     let cul_reused = cur("pass_bisect") && dir.join("culprit.txt").exists();
     let culprit: Option<Culprit> = if cul_reused {
         Some(culprit_from_text(&std::fs::read_to_string(dir.join("culprit.txt")).unwrap_or_default()))
-    } else if let (true, Some(k)) = (still, culprit_kind) {
+    } else if let (true, Some(k), false) = (still, culprit_kind, crate::reduce::INTERRUPTED.load(std::sync::atomic::Ordering::Relaxed)) {
         Some(pass_bisect(k, &reduced_path, &base, &bad, &sig, &lim, &o.work))
     } else {
         None
@@ -797,7 +824,7 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     let prior = std::fs::read_to_string(dir.join("bisect.txt")).ok().map(|t| crate::bisect::Bisect::from_text(&t)).or_else(|| crate::bisect::Bisect::from_legacy(&old));
     let prior_known = prior.is_some();
     let mut bis = prior.unwrap_or_default();
-    if !o.bisect.is_zero() && still && m.verdict != "ub" {
+    if !o.bisect.is_zero() && still && m.verdict != "ub" && !crate::reduce::INTERRUPTED.load(std::sync::atomic::Ordering::Relaxed) {
         let yes = |ch: &str| matrix2.iter().any(|m| m.0 == ch && m.2 == Repro::Yes);
         let want = crate::bisect::Want { stable: !prior_known || !cur("bisect_stable"), nightly: !prior_known || !cur("bisect_nightly"), pr: !prior_known || !cur("bisect_pr") };
         if want.stable || want.nightly || want.pr {
