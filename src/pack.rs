@@ -322,6 +322,39 @@ pub fn write_index(pkg: &Path) {
         write_finding_json(&root.join(k));
     }
     let _ = writeln!(s, "\n{} findings.", rows.len());
+    // what to report together: findings grouped by the commit that regressed them
+    {
+        let mut by_commit: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+        let (mut not_found, mut old_bug, mut todo) = (Vec::new(), Vec::new(), Vec::new());
+        for (k, c) in &rows {
+            let mut c2 = c.clone();
+            crate::steps::backfill(&mut c2, &root.join(k));
+            let pr = c.get("regression_pr").cloned().unwrap_or_default();
+            let commit = pr.split_whitespace().find(|w| w.starts_with("https://github.com/rust-lang/rust/commit/")).map(|u| u.trim_end_matches(|c: char| !c.is_ascii_hexdigit()).to_string());
+            let reg = crate::steps::get(&c2, "regression").map(|x| x.note).unwrap_or_default();
+            match commit {
+                Some(u) => by_commit.entry(u).or_default().push(k.clone()),
+                None if reg.starts_with("long-standing") => old_bug.push(k.clone()),
+                None if pr.contains("not found") => not_found.push(k.clone()),
+                None => todo.push(k.clone()),
+            }
+        }
+        let list = |v: &[String]| v.iter().map(|k| format!("`{k}`")).collect::<Vec<_>>().join(", ");
+        let _ = writeln!(s, "\n## Grouped by the commit that caused the regression\n\nFindings with the same commit are most likely one bug: report them together.\n");
+        for (u, ks) in by_commit.iter_mut().map(|(u, ks)| { ks.sort(); (u, &*ks) }).collect::<Vec<_>>() {
+            let short = u.rsplit('/').next().unwrap_or("").chars().take(10).collect::<String>();
+            let _ = writeln!(s, "- [{short}]({u}) ({}): {}", ks.len(), list(ks));
+        }
+        if !not_found.is_empty() {
+            let _ = writeln!(s, "- regressed commit not found ({}): {}", not_found.len(), list(&not_found));
+        }
+        if !old_bug.is_empty() {
+            let _ = writeln!(s, "- long-standing, not a regression ({}): {}", old_bug.len(), list(&old_bug));
+        }
+        if !todo.is_empty() {
+            let _ = writeln!(s, "- not bisected yet ({}): {}", todo.len(), list(&todo));
+        }
+    }
     let gone = std::fs::read_to_string(pkg.join("fixed.txt")).unwrap_or_default();
     if !gone.trim().is_empty() {
         let _ = writeln!(s, "\n## Removed: no longer reproduce on the newest nightly\n\n| finding | removed | checked with | first seen |\n|---|---|---|---|");

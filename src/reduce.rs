@@ -49,6 +49,9 @@ impl Interest {
         }
         let r = self.check_uncached(src);
         self.cache.lock().unwrap().insert(key, r);
+        if r {
+            note_interesting(src);
+        }
         r
     }
 
@@ -104,8 +107,71 @@ impl Interest {
 
 static DEADLINE_HIT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Set by Ctrl+C (see `install_sigint`): every pass stops at its next deadline check.
+pub static INTERRUPTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Parallel oracle calls of the reduction passes (and Shrink Ray's workers); `--jobs` raises it for local runs.
+static PARALLEL: AtomicUsize = AtomicUsize::new(4);
+
+pub fn set_parallel(n: usize) {
+    PARALLEL.store(n.max(1), Ordering::Relaxed);
+}
+
+fn par() -> usize {
+    PARALLEL.load(Ordering::Relaxed)
+}
+
+/// The smallest program seen so far that still shows the bug, and where to keep a copy of it on disk.
+static BEST: Mutex<Option<String>> = Mutex::new(None);
+static CHECKPOINT: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+/// Every time the oracle accepts a program that is smaller than the best one so far it is written to `path`
+/// (atomically), so that a killed run loses nothing. `None` switches this off.
+pub fn set_checkpoint(path: Option<PathBuf>) {
+    *BEST.lock().unwrap() = None;
+    *CHECKPOINT.lock().unwrap() = path;
+}
+
+/// The best (smallest) interesting program recorded since `set_checkpoint`.
+pub fn best_so_far() -> Option<String> {
+    BEST.lock().unwrap().clone()
+}
+
+fn note_interesting(src: &str) {
+    let path = match CHECKPOINT.lock().unwrap().clone() {
+        Some(p) => p,
+        None => return,
+    };
+    let mut best = BEST.lock().unwrap();
+    if best.as_ref().map(|b| src.len() < b.len()).unwrap_or(true) {
+        let tmp = path.with_extension("rs.tmp");
+        if std::fs::write(&tmp, src).is_ok() {
+            let _ = std::fs::rename(&tmp, &path);
+        }
+        *best = Some(src.to_string());
+    }
+}
+
+unsafe extern "C" {
+    fn signal(signum: i32, handler: usize) -> usize;
+    fn _exit(code: i32) -> !;
+}
+
+extern "C" fn on_sigint(_: i32) {
+    // first Ctrl+C: stop reducing and write everything up; second Ctrl+C: leave at once (the checkpoint is on disk)
+    if INTERRUPTED.swap(true, Ordering::SeqCst) {
+        unsafe { _exit(130) }
+    }
+}
+
+pub fn install_sigint() {
+    unsafe {
+        signal(2, on_sigint as extern "C" fn(i32) as usize);
+    }
+}
+
 fn expired(deadline: Instant) -> bool {
-    let e = Instant::now() >= deadline;
+    let e = INTERRUPTED.load(Ordering::Relaxed) || Instant::now() >= deadline;
     if e {
         DEADLINE_HIT.store(true, Ordering::Relaxed);
     }
@@ -565,7 +631,7 @@ pub fn simplify_exprs(it: &Interest, src: &str, deadline: Instant) -> String {
             let lo = cands.len().saturating_sub(4);
             let batch: Vec<(usize, usize, String)> = cands[lo..].iter().rev().cloned().collect();
             let texts: Vec<String> = batch.iter().map(|e| apply(&cur, e)).collect();
-            let res = par_map(&texts, 4, |c| (c.len() < cur.len() || (c.len() == cur.len() && c.as_str() < cur.as_str())) && it.check(c));
+            let res = par_map(&texts, par(), |c| (c.len() < cur.len() || (c.len() == cur.len() && c.as_str() < cur.as_str())) && it.check(c));
             match res.iter().position(|&ok| ok) {
                 Some(p) => {
                     let pos = batch[p].0;
@@ -704,7 +770,7 @@ pub fn shrinkray(it: &Interest, src: &str, deadline: Instant, log: &mut ReduceLo
     // has not changed for a while. A stall counts as "finished"; hitting the deadline does not.
     let stall = Duration::from_secs((deadline.saturating_duration_since(sr_start).as_secs() / 5).clamp(45, 150) + (src.len() as u64 / 2000).min(240));
     let mut child = match Command::new(&exe)
-        .args(["--ui", "basic", "--input-type", "arg", "--parallelism", "4", "--volume", "quiet", "--timeout", "300", "--memory-limit", "0", "--exit-on-completion"])
+        .args(["--ui", "basic", "--input-type", "arg", "--parallelism", &par().to_string(), "--volume", "quiet", "--timeout", "300", "--memory-limit", "0", "--exit-on-completion"])
         .arg(&test)
         .arg(&case)
         .current_dir(&dir)
@@ -730,7 +796,7 @@ pub fn shrinkray(it: &Interest, src: &str, deadline: Instant, log: &mut ReduceLo
                 break;
             }
         }
-        if Instant::now() >= deadline {
+        if Instant::now() >= deadline || INTERRUPTED.load(Ordering::Relaxed) {
             DEADLINE_HIT.store(true, Ordering::Relaxed);
             how = "stopped at the deadline".to_string();
             let _ = Command::new("kill").args(["-INT", &child.id().to_string()]).status();
@@ -738,6 +804,9 @@ pub fn shrinkray(it: &Interest, src: &str, deadline: Instant, log: &mut ReduceLo
         }
         let now_text = std::fs::read_to_string(&case).unwrap_or_default();
         if now_text != last_text {
+            if !now_text.trim().is_empty() {
+                note_interesting(&now_text);
+            }
             last_text = now_text;
             last_change = Instant::now();
         } else if last_change.elapsed() > stall {
@@ -757,6 +826,14 @@ pub fn shrinkray(it: &Interest, src: &str, deadline: Instant, log: &mut ReduceLo
     let _ = child.kill();
     let _ = child.wait();
     log.0.push(format!("shrinkray {how} after {}s", sr_start.elapsed().as_secs()));
+    if how.starts_with("exited by itself") {
+        // an early exit usually means the tool gave up: keep its last words
+        let text = format!("{}{}", std::fs::read_to_string(dir.join("sr.out")).unwrap_or_default(), std::fs::read_to_string(dir.join("sr.err")).unwrap_or_default());
+        let tail: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).rev().take(4).collect();
+        if !tail.is_empty() {
+            log.0.push(format!("shrinkray said: {}", tail.into_iter().rev().collect::<Vec<_>>().join(" | ").chars().take(400).collect::<String>()));
+        }
+    }
     let res = std::fs::read_to_string(&case).unwrap_or_else(|_| src.to_string());
     if res == src {
         // nothing happened: keep the tool's last words, otherwise a broken setup is invisible
@@ -827,7 +904,7 @@ pub fn shrink_cases(it: &Interest, src: &str, deadline: Instant) -> String {
         if expired(deadline) {
             break;
         }
-        let res = par_map(chunk, 4, |c| it.check(c));
+        let res = par_map(chunk, par(), |c| it.check(c));
         if let Some(p) = res.iter().position(|&ok| ok) {
             return chunk[p].clone();
         }
