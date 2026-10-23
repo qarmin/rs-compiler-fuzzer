@@ -1,7 +1,7 @@
 name: minimize-long
 
 # One finding, minimised for hours (a GitHub-hosted job may run for 6 hours). For findings the daily retriage cannot get small in
-# its 100 minutes: Shrink Ray, treereduce-rust and rs-minimizer take turns, the program is stored after the run and the next
+# its 100 minutes: Shrink Ray and rs-minimizer take turns, the program is stored after the run and the next
 # retriage continues from it. Start it by hand: `gh workflow run minimize-long -f finding=arith__Oz__19f07f8eea -f hours=5`.
 on:
   workflow_dispatch:
@@ -35,12 +35,11 @@ jobs:
     timeout-minutes: 360
     steps:
       - uses: actions/checkout@v6
-      - name: Cache the reducers (Shrink Ray, treereduce-rust, cargo-bisect-rustc)
+      - name: Cache the reducers (Shrink Ray, cargo-bisect-rustc)
         uses: actions/cache@v6
         with:
           path: |
             ~/sr
-            ~/.cargo/bin/treereduce-rust
             ~/.cargo/bin/cargo-bisect-rustc
           key: reducers-${{ runner.os }}-v1
       - name: Toolchains and reducers
@@ -49,7 +48,6 @@ jobs:
           rustup component add miri rust-src --toolchain nightly || echo "miri unavailable on this nightly"
           [ -d "$HOME/sr" ] || { python3 -m venv "$HOME/sr" && "$HOME/sr/bin/pip" install -q shrinkray || echo "shrinkray unavailable"; }
           echo "$HOME/sr/bin" >> "$GITHUB_PATH"
-          [ -x "$HOME/.cargo/bin/treereduce-rust" ] || cargo +stable install treereduce-rust --locked || echo "treereduce-rust unavailable"
           [ -x "$HOME/.cargo/bin/cargo-bisect-rustc" ] || cargo +stable install cargo-bisect-rustc --locked || echo "cargo-bisect-rustc unavailable"
       - run: cargo +stable build --release
 
@@ -94,5 +92,6 @@ jobs:
           path: |
             upd
             one.txt
+            tmp/*.log
           if-no-files-found: ignore
           retention-days: 14

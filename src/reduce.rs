@@ -1,10 +1,10 @@
 //! Reduction of fuzzer findings: the oracle (two configurations still disagree, or the compiler still crashes the same way) and
-//! the steps that depend on how batches are generated (`mod case_N`, `go!`). The generic passes live in `rs-minimizer`.
+//! the steps that depend on how batches are generated (a single `mod case_N` left becomes a plain `fn main`). Dropping cases is left
+//! to the generic passes: items together with the code that mentions them did better than a case-aware ddmin. The generic passes live in `rs-minimizer`.
 
-use crate::runner::{build_and_run, par_map, Config, Limits, Outcome};
+use crate::runner::{build_and_run, Config, Limits, Outcome};
 use log::info;
 use rs_minimizer::{Oracle, Options, Stage};
-use rs_minimizer::control::{expired, par_checks};
 use rs_minimizer::scan::matching;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -150,103 +150,6 @@ impl Interest {
 
 
 
-/// A batch file (many `mod case_N`) -> only the case modules (and their `go!` calls) that are needed.
-/// Line-wise ddmin on a 400 KB batch is hopeless; modules are the natural unit.
-pub fn shrink_cases(it: &dyn Oracle, src: &str, deadline: Instant) -> String {
-    let lines: Vec<&str> = src.lines().collect();
-    // (first line, last line, id) of every top-level `mod case_N { ... }`
-    let mut mods: Vec<(usize, usize, String)> = Vec::new();
-    let mut i = 0;
-    while i < lines.len() {
-        if let Some(rest) = lines[i].strip_prefix("mod case_") {
-            let id: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-            let mut j = i + 1;
-            while j < lines.len() && lines[j] != "}" {
-                j += 1;
-            }
-            if !id.is_empty() && j < lines.len() {
-                mods.push((i, j, id));
-                i = j;
-            }
-        }
-        i += 1;
-    }
-    if mods.len() < 2 {
-        return src.to_string();
-    }
-    let build = |keep: &[usize]| -> String {
-        let ids: Vec<&str> = keep.iter().map(|&k| mods[k].2.as_str()).collect();
-        let mut out: Vec<&str> = Vec::new();
-        let mut skip_until = 0usize;
-        for (n, l) in lines.iter().enumerate() {
-            if n < skip_until {
-                continue;
-            }
-            if let Some(k) = mods.iter().position(|m| m.0 == n) {
-                if keep.contains(&k) {
-                    out.extend(&lines[mods[k].0..=mods[k].1]);
-                }
-                skip_until = mods[k].1 + 1;
-                continue;
-            }
-            // `    go!(ID, case_ID);`, or the same call after macro expansion (`... case_ID::run(&mut h) ...`)
-            let t = l.trim_start();
-            let id = if let Some(rest) = t.strip_prefix("go!(") {
-                Some(rest.chars().take_while(|c| c.is_ascii_digit()).collect::<String>())
-            } else if !t.starts_with("mod ") && t.contains("::run(&mut h)") {
-                t.find("case_").map(|p| t[p + 5..].chars().take_while(|c| c.is_ascii_digit()).collect::<String>())
-            } else {
-                None
-            };
-            if id.is_some_and(|id| !ids.contains(&id.as_str())) {
-                continue;
-            }
-            out.push(l);
-        }
-        out.join("\n") + "\n"
-    };
-    // cases are independent modules: first look for ONE case that shows the bug on its own (a few seconds per try instead of
-    // minutes for the whole batch), smallest first
-    let mut order: Vec<usize> = (0..mods.len()).collect();
-    order.sort_by_key(|&k| mods[k].1 - mods[k].0);
-    let singles: Vec<String> = order.iter().map(|&k| build(&[k])).collect();
-    for chunk in singles.chunks(par_checks()) {
-        if expired(deadline) {
-            break;
-        }
-        let res = par_map(chunk, par_checks(), |c| it.check(c));
-        if let Some(p) = res.iter().position(|&ok| ok) {
-            return chunk[p].clone();
-        }
-    }
-    let mut keep: Vec<usize> = (0..mods.len()).collect();
-    let mut n = keep.len().div_ceil(2);
-    let width = par_checks();
-    while n >= 1 {
-        let mut i = 0;
-        while i < keep.len() && keep.len() > 1 {
-            if expired(deadline) {
-                return build(&keep);
-            }
-            // chunks i, i+n, i+2n, ... are tried at the same time; the first one that works is dropped
-            let starts: Vec<usize> = (0..width).map(|k| i + k * n).take_while(|&s| s < keep.len()).collect();
-            let cands: Vec<Vec<usize>> = starts.iter().map(|&s| keep[..s].iter().chain(keep[(s + n).min(keep.len())..].iter()).copied().collect()).collect();
-            let res = par_map(&cands, width, |c| !c.is_empty() && it.check(&build(c)));
-            match res.iter().position(|&ok| ok) {
-                Some(p) => {
-                    keep = cands[p].clone();
-                    i = starts[p];
-                }
-                None => i += width * n,
-            }
-        }
-        if n == 1 {
-            break;
-        }
-        n = n.div_ceil(2);
-    }
-    build(&keep)
-}
 
 /// Turn the generator's harness into a plain program: the single remaining `mod case_N` becomes the
 /// crate root, `fn run(h: &mut H)` becomes `fn main()`, `h.put(&x)` becomes `println!("{:?}", x)`,
@@ -311,9 +214,8 @@ pub fn reduce_all(it: &Interest, src: &str, budget: Duration, log: &mut ReduceLo
     let mut opts = Options::new(budget);
     opts.rustc = it.rustc.clone();
     opts.keep_module = Box::new(|name| name.starts_with("case_"));
-    let mut hook = |stage: Stage, cur: &str, deadline: Instant| -> Option<String> {
+    let mut hook = |stage: Stage, cur: &str, _deadline: Instant| -> Option<String> {
         match stage {
-            Stage::BeforeLines => Some(shrink_cases(it, cur, deadline)),
             // a single case left: drop the harness, a plain `fn main` is what a human would post
             Stage::AfterLines | Stage::AfterExternal => match flatten(cur) {
                 Some(flat) if flat != cur && it.check(&flat) => {
@@ -327,7 +229,7 @@ pub fn reduce_all(it: &Interest, src: &str, budget: Duration, log: &mut ReduceLo
                 _ => None,
             },
             Stage::Polish => Some(prefer_println(it, &unalias_black_box(it, cur))),
-            Stage::Unrolled => None,
+            Stage::Unrolled | Stage::BeforeLines => None,
         }
     };
     rs_minimizer::minimize(it, src, &opts, log, &mut hook)

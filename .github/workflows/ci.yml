@@ -50,7 +50,7 @@ jobs:
             fuzz-out/generator-bugs
           if-no-files-found: ignore
 
-  # End-to-end test of triage + reduction (shrinkray, treereduce-rust, Miri, bisect off): a known crash must shrink a lot.
+  # End-to-end test of triage + reduction (shrinkray, Miri, bisect off): a known crash must shrink a lot.
   reduce:
     runs-on: ubuntu-26.04
     timeout-minutes: 30
@@ -64,7 +64,6 @@ jobs:
         run: |
           python3 -m venv "$HOME/sr" && "$HOME/sr/bin/pip" install -q shrinkray
           echo "$HOME/sr/bin" >> "$GITHUB_PATH"
-          cargo +stable install treereduce-rust --locked || true
       - name: Triage the checked-in LLVM EFLAGS crash
         run: |
           mkdir -p tri/f && cp reports/llvm-eflags-o0-crash.rs tri/f/case.rs

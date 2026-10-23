@@ -185,6 +185,8 @@ fn note_interesting(src: &str) {
     let Some(path) = CHECKPOINT.lock().unwrap().clone() else { return };
     let mut best = BEST.lock().unwrap();
     if best.as_ref().map(|b| src.len() < b.len()).unwrap_or(true) {
+        // every improvement goes to the debug log (the file, not the terminal)
+        log::debug!("[{}] {} -> {} bytes ({})", stage(), best.as_ref().map(|b| b.len()).unwrap_or(0), src.len(), attempts());
         // a pass that finds many tiny improvements would flood the log: a line when it matters (1% of the program) or every 3 seconds
         let mut last = LAST_LOG.lock().unwrap();
         let big = best.as_ref().is_none_or(|b| (b.len() - src.len()) * 100 >= b.len());

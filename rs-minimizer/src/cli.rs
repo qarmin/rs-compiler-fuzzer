@@ -32,7 +32,7 @@ OPTIONS:
   --budget SECS      time limit (default 600)
   --jobs N           parallel runs (default: number of cores)
   --no-shrinkray     do not use Shrink Ray (`pip install shrinkray`; used when installed)
-  --no-treereduce    do not use treereduce-rust (`cargo install treereduce-rust`; used when installed)
+  --treereduce       also use treereduce-rust (`cargo install treereduce-rust`; off by default, it rarely finds anything more)
   --log FILE         also write the log to FILE
 
 Ctrl+C once stops and keeps the best program found so far, twice leaves at once.
@@ -65,7 +65,7 @@ pub fn run(args: Vec<String>) -> i32 {
     let mut rustc = "rustc".to_string();
     let mut flags = String::new();
     let (mut compile_secs, mut run_secs) = (120u64, 20u64);
-    let (mut shrinkray, mut treereduce) = (true, true);
+    let (mut shrinkray, mut treereduce) = (true, false);
     // explicit modes: (name, optional argument)
     let mut wanted: Option<(String, Option<String>)> = None;
     let mut it = args.iter().peekable();
@@ -87,6 +87,7 @@ pub fn run(args: Vec<String>) -> i32 {
             "--log" => log_file = Some(PathBuf::from(val())),
             "--no-shrinkray" => shrinkray = false,
             "--no-treereduce" => treereduce = false,
+            "--treereduce" => treereduce = true,
             "--ice" => wanted = Some(("ice".into(), None)),
             "--auto" => wanted = None,
             "--error" | "--hang" => {

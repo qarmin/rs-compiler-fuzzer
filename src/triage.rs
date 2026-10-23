@@ -546,6 +546,9 @@ fn search_from_text(t: &str) -> Search {
     s
 }
 
+/// A stored reduced program of up to this many lines is the start of the next run; a bigger one is a dead end.
+const STORED_LIMIT_LINES: usize = 100;
+
 pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     let meta = read_cfg(&dir.join("repro.cfg"));
     let case = std::fs::read_to_string(dir.join("case.rs")).map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -599,10 +602,16 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
                     let it = Interest { rustc: vec!["rustc".into(), format!("+{pc}")], a: base.clone(), b: bad.clone(), crash_sig: sig.clone(), limits: Limits { compile: Duration::from_secs(120), run: Duration::from_secs(10) }, work: o.work.clone(), cache: Default::default() };
                     // a finding that is triaged again continues from its earlier (already small) result when that still shows the bug
                     let start_src = match &prev_reduced {
-                        Some(prev) if it.check(prev) => {
+                        Some(prev) if prev.lines().count() <= STORED_LIMIT_LINES && it.check(prev) => {
                             reduce_log.push(format!("continuing from the previously reduced program ({} lines)", prev.lines().count()));
                             continued_from = Some(crate::pack::text_hash(prev));
                             prev.clone()
+                        }
+                        Some(prev) => {
+                            // a stored result that is still big is a dead end of an earlier, weaker run: start again from the original, the
+                            // stored one stays as the fallback
+                            reduce_log.push(format!("the stored reduced program has {} lines (more than {STORED_LIMIT_LINES}): starting again from the original ({} lines)", prev.lines().count(), case.lines().count()));
+                            case.clone()
                         }
                         _ => case.clone(),
                     };
@@ -658,6 +667,10 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
                         }
                         rs_minimizer::control::set_effort(0);
                         reduced = round_src;
+                        if let Some(prev) = prev_reduced.as_ref().filter(|p| p.len() < reduced.len() && it.check(p)) {
+                            reduce_log.push(format!("the stored program ({} lines) is smaller than what this run found ({} lines): kept", prev.lines().count(), reduced.lines().count()));
+                            reduced = prev.clone();
+                        }
                         let describe = |t: &str| format!("{} lines / {} bytes", t.lines().count(), t.len());
                         let line = format!(
                             "REDUCTION of {}: original {} -> {}{} -> now {} ({:.1}% fewer bytes than the original), {} rounds, {}s of {}s",
@@ -672,6 +685,9 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
                             o.budget.as_secs()
                         );
                         reduce_log.push(line);
+                        if reduced.lines().count() > STORED_LIMIT_LINES {
+                            log::warn!("the reduced program has {} lines: more than the {STORED_LIMIT_LINES} that fit an issue without an attachment", reduced.lines().count());
+                        }
                         if last_unchanged {
                             continued_from = Some(crate::pack::text_hash(&reduced));
                         }

@@ -207,15 +207,100 @@ fn keyword_weakening(src: &str) -> Vec<Edit> {
     out
 }
 
+fn int_literals(src: &str) -> Vec<(usize, usize, u128, String)> {
+    let b = src.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'"' {
+            i += 1;
+            while i < b.len() && b[i] != b'"' {
+                if b[i] == b'\\' {
+                    i += 1;
+                }
+                i += 1;
+            }
+        } else if b[i].is_ascii_digit() && (i == 0 || !(is_ident(b[i - 1]) || b[i - 1] == b'.')) {
+            let s = i;
+            while i < b.len() && (b[i].is_ascii_digit() || b[i] == b'_') {
+                i += 1;
+            }
+            let digits: String = src[s..i].chars().filter(|c| *c != '_').collect();
+            let hex = digits == "0" && matches!(b.get(i), Some(b'x' | b'b' | b'o'));
+            let float = b.get(i) == Some(&b'.') && b.get(i + 1).is_some_and(|c| c.is_ascii_digit()) || matches!(b.get(i), Some(b'e' | b'E'));
+            let mut e = i;
+            while e < b.len() && is_ident(b[e]) {
+                e += 1;
+            }
+            let suffix = &src[i..e];
+            if !hex && !float && (suffix.is_empty() || suffix.starts_with('u') || suffix.starts_with('i')) {
+                if let Ok(v) = digits.parse::<u128>() {
+                    out.push((s, e, v, suffix.to_string()));
+                }
+            }
+            i = e.max(i + 1);
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Integer literals made smaller: halved, divided by ten, one less (Shrink Ray's integer reduction; 0 and 1 are tried elsewhere).
+fn smaller_integers(src: &str) -> Vec<Edit> {
+    let mut out = Vec::new();
+    for (s, e, v, suffix) in int_literals(src) {
+        for cand in [v / 2, v / 10, v.saturating_sub(1)] {
+            if cand > 1 && cand < v {
+                out.push((s, e, format!("{cand}{suffix}")));
+            }
+        }
+    }
+    out
+}
+
+/// `2 + 3` -> `5`: arithmetic on two literals of the same type is evaluated (Shrink Ray's `combine_expressions`).
+fn folded_constants(src: &str) -> Vec<Edit> {
+    let lits = int_literals(src);
+    let mut out = Vec::new();
+    for w in lits.windows(2) {
+        let (a, b) = (&w[0], &w[1]);
+        if a.3 != b.3 && !(a.3.is_empty() || b.3.is_empty()) {
+            continue;
+        }
+        let between = src[a.1..b.0].trim();
+        let value = match between {
+            "+" => a.2.checked_add(b.2),
+            "-" => a.2.checked_sub(b.2),
+            "*" => a.2.checked_mul(b.2),
+            "/" if b.2 != 0 => Some(a.2 / b.2),
+            "%" if b.2 != 0 => Some(a.2 % b.2),
+            "&" => Some(a.2 & b.2),
+            "|" => Some(a.2 | b.2),
+            "^" => Some(a.2 ^ b.2),
+            "<<" if b.2 < 128 => a.2.checked_shl(b.2 as u32),
+            ">>" if b.2 < 128 => Some(a.2 >> b.2),
+            _ => None,
+        };
+        if let Some(v) = value {
+            let suffix = if a.3.is_empty() { &b.3 } else { &a.3 };
+            out.push((a.0, b.1, format!("{v}{suffix}")));
+        }
+    }
+    out
+}
+
 /// The whole set, one category after the other.
 pub fn peep(it: &dyn Oracle, src: &str, deadline: Instant) -> String {
     let mut cur = src.to_string();
-    let passes: [(&str, fn(&str) -> Vec<Edit>); 5] = [
+    let passes: [(&str, fn(&str) -> Vec<Edit>); 7] = [
         ("keywords and compound assignments weakened", keyword_weakening),
         ("binary operators: one operand kept", binary_operands),
         ("parenthesised groups and blocks replaced by 0", groups_to_zero),
         ("calls replaced by values", calls_to_values),
         ("identifiers replaced by 0", idents_to_zero),
+        ("constant arithmetic folded", folded_constants),
+        ("integer literals made smaller", smaller_integers),
     ];
     for (what, make) in passes {
         let before = cur.len();

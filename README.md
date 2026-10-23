@@ -41,8 +41,8 @@ rs-compiler-fuzzer reduce bug.rs --test ./check.sh                              
 ```
 
 It uses every core (`--jobs`), stops after `--budget` seconds (default 600), writes the best program found so far to the output
-file on every improvement, and Ctrl+C keeps it. [Shrink Ray](https://github.com/DRMacIver/shrinkray) (`pip install shrinkray`) and
-[treereduce-rust](https://github.com/langston-barrett/treereduce) (`cargo install treereduce-rust`) are used when installed.
+file on every improvement, and Ctrl+C keeps it. [Shrink Ray](https://github.com/DRMacIver/shrinkray) (`pip install shrinkray`) is used when installed, and
+[treereduce-rust](https://github.com/langston-barrett/treereduce) can be added with `--treereduce` (off by default: it rarely finds anything the built-in passes miss).
 Before it touches anything it checks that the file shows the problem, so a wrong flag shows up at once. A project with several
 files has to be put into one (`cargo expand`, or `rustc -Z unpretty=expanded`) first.
 

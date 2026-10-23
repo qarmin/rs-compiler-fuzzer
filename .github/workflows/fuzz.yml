@@ -112,21 +112,19 @@ jobs:
 
       - run: cargo +stable build --release
 
-      - name: Cache the reducers (Shrink Ray, treereduce-rust, cargo-bisect-rustc)
+      - name: Cache the reducers (Shrink Ray, cargo-bisect-rustc)
         uses: actions/cache@v6
         with:
           path: |
             ~/sr
-            ~/.cargo/bin/treereduce-rust
             ~/.cargo/bin/cargo-bisect-rustc
           key: reducers-${{ runner.os }}-v1
-      - name: Install triage tools (other channels, Miri, Shrink Ray, treereduce-rust)
+      - name: Install triage tools (other channels, Miri, Shrink Ray)
         run: |
           for c in stable beta nightly; do rustup toolchain install $c --profile minimal; done
           rustup component add miri rust-src --toolchain nightly || echo "miri unavailable on this nightly"
           [ -d "$HOME/sr" ] || { python3 -m venv "$HOME/sr" && "$HOME/sr/bin/pip" install -q shrinkray || echo "shrinkray unavailable"; }
           echo "$HOME/sr/bin" >> "$GITHUB_PATH"
-          [ -x "$HOME/.cargo/bin/treereduce-rust" ] || cargo +stable install treereduce-rust --locked || echo "treereduce-rust unavailable"
           [ -x "$HOME/.cargo/bin/cargo-bisect-rustc" ] || cargo +stable install cargo-bisect-rustc --locked || echo "cargo-bisect-rustc unavailable"
 
       - name: Canaries
@@ -233,5 +231,6 @@ jobs:
             fuzz-out/known
             fuzz-out/generator-bugs
             stored-keys.txt
+            tmp/*.log
           if-no-files-found: ignore
           retention-days: 14

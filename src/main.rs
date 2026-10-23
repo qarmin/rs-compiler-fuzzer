@@ -70,13 +70,15 @@ gen only:
 
 /// Terminal logger; the long-running local commands also write to `tmp/<command>.log` (appended, no colours).
 fn init_logging(cmd: &str) {
-    use handsome_logger::{ColorChoice, CombinedLogger, Config, TermLogger, TerminalMode, WriteLogger};
+    use handsome_logger::{ColorChoice, CombinedLogger, Config, ConfigBuilder, LevelFilter, TermLogger, TerminalMode, WriteLogger};
     let mut loggers: Vec<Box<dyn handsome_logger::SharedLogger>> = vec![TermLogger::new(Config::default(), TerminalMode::Mixed, ColorChoice::Auto)];
-    if matches!(cmd, "minimize" | "triage") {
+    // the long-running commands also write a much more detailed log to a file (debug level: every improvement, every pass start), which
+    // the CI jobs keep as an artifact
+    if matches!(cmd, "minimize" | "triage" | "retriage") {
         let path = PathBuf::from("tmp").join(format!("{cmd}.log"));
         let file = std::fs::create_dir_all("tmp").and_then(|_| std::fs::OpenOptions::new().create(true).append(true).open(&path));
         match file {
-            Ok(f) => loggers.push(WriteLogger::new(Config::default(), f)),
+            Ok(f) => loggers.push(WriteLogger::new(ConfigBuilder::default().set_level(LevelFilter::Debug).build(), f)),
             Err(e) => eprintln!("cannot write the log file {}: {e}", path.display()),
         }
     }

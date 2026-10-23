@@ -5,7 +5,7 @@ use crate::deadcode::remove_dead_code;
 use crate::exprs::{drop_calls, drop_let_bindings, flatten_blocks, simplify_exprs, simplify_let_tuples, simplify_lets, strip_parens};
 use crate::external::{shrinkray, shrinkray_available, treereduce};
 use crate::format::format_if_interesting;
-use crate::inline::{inline_calls, substitute_lets};
+use crate::inline::{inline_calls, shorten_names, substitute_lets};
 use crate::items::{shrink_items, shrink_items_with_users, shrink_pairs, shrink_siblings_step, shrink_statements};
 use crate::lines::{shrink_lines, strip_comments};
 use crate::modules::hoist_modules;
@@ -57,7 +57,7 @@ pub struct Options {
 
 impl Options {
     pub fn new(budget: Duration) -> Self {
-        Options { budget, rustc: vec!["rustc".into()], use_shrinkray: true, use_treereduce: true, keep_module: Box::new(|_| false) }
+        Options { budget, rustc: vec!["rustc".into()], use_shrinkray: true, use_treereduce: false, keep_module: Box::new(|_| false) }
     }
 }
 
@@ -92,6 +92,7 @@ struct Progress {
     last_runs: usize,
     last_at: Instant,
     initial: (usize, usize),
+    runs0: usize,
     /// what each pass removed (bytes, may be negative for passes that grow the program), summed over the run
     gains: Vec<(String, i64, usize)>,
 }
@@ -108,6 +109,7 @@ impl Progress {
     }
 
     fn pass(&self, name: &str) {
+        log::debug!("pass `{name}` starts at {:.0}s, {} lines / {} bytes, {} oracle calls so far", self.start.elapsed().as_secs_f32(), self.lines, self.bytes, oracle_runs());
         set_stage(&Self::label(name));
     }
 
@@ -147,7 +149,7 @@ impl Progress {
         let (l0, b0) = self.initial;
         let pct = |a: usize, b: usize| if a == 0 { 0.0 } else { 100.0 * (a as f64 - b as f64) / a as f64 };
         let secs = self.start.elapsed().as_secs_f64().max(0.001);
-        let runs = oracle_runs();
+        let runs = oracle_runs() - self.runs0;
         log.push(format!(
             "SUMMARY{}: {l0} lines / {b0} bytes -> {} lines / {} bytes ({:.1}% fewer lines, {:.1}% fewer bytes) in {:.0}s; {runs} oracle calls ({:.1}/s)",
             if finished { "" } else { " (interrupted)" },
@@ -295,9 +297,14 @@ fn cheap_phase(it: &dyn Oracle, mut cur: String, opts: &Options, pr: &mut Progre
         pr.pass("items");
         cur = shrink_items(it, &cur, until);
         pr.result(log, "items", &cur);
-        pr.pass("lines");
-        cur = shrink_lines(it, &cur, until);
-        pr.result(log, "lines", &cur);
+        // the siblings pass has done what deleting single lines could: on a big program the line pass costs minutes for a few bytes
+        if cur.lines().count() <= 600 {
+            pr.pass("lines");
+            cur = shrink_lines(it, &cur, until.min(Instant::now() + Duration::from_secs(90)));
+            pr.result(log, "lines", &cur);
+        } else {
+            log.push(format!("line pass skipped for now: {} lines (it runs below 600)", cur.lines().count()));
+        }
         let gain = before.saturating_sub(cur.len());
         let small = cur.lines().count() <= BIG_LINES;
         info!("cheap round {round}: removed {:.0}% of the bytes, {} lines left{}", 100.0 * gain as f64 / before.max(1) as f64, cur.lines().count(), if small { " (small enough for the other passes)" } else { "" });
@@ -308,6 +315,20 @@ fn cheap_phase(it: &dyn Oracle, mut cur: String, opts: &Options, pr: &mut Progre
     cur
 }
 
+/// The program that came out of the last step must still show the problem. If a step lost it (a buggy pass, a hook, a flaky
+/// oracle), the run goes back to the last program that did, instead of reducing something that is no test case any more.
+fn guard(it: &dyn Oracle, cur: &mut String, good: &mut String, log: &mut ReduceLog, after: &str) {
+    if *cur == *good {
+        return;
+    }
+    if it.recheck(cur) {
+        *good = cur.clone();
+    } else {
+        log.push(format!("GUARD: after `{after}` the program ({} lines) no longer shows the problem - going back to the last good one ({} lines)", cur.lines().count(), good.lines().count()));
+        *cur = good.clone();
+    }
+}
+
 pub fn minimize(it: &dyn Oracle, src: &str, opts: &Options, log: &mut ReduceLog, hook: Hook) -> String {
     reset_deadline_flag();
     crate::control::start_clock();
@@ -315,12 +336,13 @@ pub fn minimize(it: &dyn Oracle, src: &str, opts: &Options, log: &mut ReduceLog,
     let budget = opts.budget;
     let at = |num: u32, den: u32| start + budget * num / den;
     let mut cur = src.to_string();
-    let mut pr = Progress { start, lines: cur.lines().count(), bytes: cur.len(), n: 0, last_runs: oracle_runs(), last_at: start, initial: (cur.lines().count(), cur.len()), gains: Vec::new() };
+    let mut good = src.to_string();
+    let mut pr = Progress { start, lines: cur.lines().count(), bytes: cur.len(), n: 0, last_runs: oracle_runs(), last_at: start, initial: (cur.lines().count(), cur.len()), runs0: oracle_runs(), gains: Vec::new() };
     info!("system: {}", crate::control::describe_system());
     info!(
         "tools: shrinkray {}, treereduce-rust {}, compiler for the passes: {}",
         if opts.use_shrinkray && shrinkray_available() { "used" } else { "not used" },
-        if opts.use_treereduce { "used when installed" } else { "off" },
+        if opts.use_treereduce { "used when installed" } else { "off (it rarely found anything the other passes missed)" },
         if opts.rustc.is_empty() { "none (the passes that compile are off)".to_string() } else { opts.rustc.join(" ") }
     );
     info!("reduction starts: {} lines, {} bytes, budget {}s, {} oracle calls at once", pr.lines, pr.bytes, budget.as_secs(), par_checks());
@@ -334,10 +356,12 @@ pub fn minimize(it: &dyn Oracle, src: &str, opts: &Options, log: &mut ReduceLog,
     }
     info!("plan: cheap deletions first, the passes that grow or probe the program only once it has fewer than {BIG_LINES} lines (or {CHEAP_SECS}s have passed)");
 
+    guard(it, &mut cur, &mut good, log, &format!("step {}", pr.n));
     pr.step("cheap deletions: comments, items, lines (nothing is expanded or inlined yet)");
     let soft = start + Duration::from_secs(CHEAP_SECS).min(budget / 8);
     cur = cheap_phase(it, cur, opts, &mut pr, log, hook, at(2, 5), soft);
 
+    guard(it, &mut cur, &mut good, log, &format!("step {}", pr.n));
     pr.step("dead code reported by the compiler");
     if !opts.rustc.is_empty() && !interrupted() {
         pr.pass("dead code");
@@ -345,6 +369,7 @@ pub fn minimize(it: &dyn Oracle, src: &str, opts: &Options, log: &mut ReduceLog,
     }
     pr.result(log, "dead code", &cur);
 
+    guard(it, &mut cur, &mut good, log, &format!("step {}", pr.n));
     pr.step("unroll: expand macros, remove catch_unwind, hoist modules (the program may grow here, so it comes after the cheap deletions)");
     pr.pass("unroll");
     cur = unroll(it, &cur);
@@ -356,6 +381,7 @@ pub fn minimize(it: &dyn Oracle, src: &str, opts: &Options, log: &mut ReduceLog,
     stage(it, hook, Stage::AfterLines, &mut cur, at(2, 5), log);
     pr.result(log, "caller's flatten step", &cur);
 
+    guard(it, &mut cur, &mut good, log, &format!("step {}", pr.n));
     pr.step("structure: newtypes, function bodies, parameters, fields, variants");
     if cur.lines().count() > BIG_LINES {
         log.push(format!("structure passes skipped: {} lines, they wait for fewer than {BIG_LINES}", cur.lines().count()));
@@ -366,14 +392,17 @@ pub fn minimize(it: &dyn Oracle, src: &str, opts: &Options, log: &mut ReduceLog,
     if !interrupted() {
         // what Shrink Ray is bad at (statements, items, calls, operands) is what these passes were made for: a few minutes of them
         // first leave it a program it can handle
+        guard(it, &mut cur, &mut good, log, &format!("step {}", pr.n));
         pr.step("our own expression passes first, time-boxed (Shrink Ray is slow on big programs and blind to this structure)");
         let slice = (budget / 6).min(Duration::from_secs(300));
         cur = expensive_own_passes(it, cur, &mut pr, log, (Instant::now() + slice).min(at(9, 20)));
     }
 
+    guard(it, &mut cur, &mut good, log, &format!("step {}", pr.n));
     pr.step("shrinkray (or the built-in expression passes without it)");
     cur = external_round(it, cur, opts, &mut pr, log, (at(9, 20), at(9, 20)));
 
+    guard(it, &mut cur, &mut good, log, &format!("step {}", pr.n));
     pr.step("flatten again, inline calls and clean up (the program may grow here, size is checked only by the passes after it)");
     if !interrupted() {
         // external reducers rename and merge: what is left is often one case, or has modules again
@@ -392,10 +421,12 @@ pub fn minimize(it: &dyn Oracle, src: &str, opts: &Options, log: &mut ReduceLog,
     }
 
     if !interrupted() {
+        guard(it, &mut cur, &mut good, log, &format!("step {}", pr.n));
         pr.step("shrinkray again, on the flattened program");
         cur = external_round(it, cur, opts, &mut pr, log, (at(16, 20), at(16, 20)));
     }
 
+    guard(it, &mut cur, &mut good, log, &format!("step {}", pr.n));
     pr.step("items, calls, expressions, peephole and tokens on the flattened program");
     if !interrupted() && !opts.rustc.is_empty() && cur.lines().count() <= BIG_LINES {
         // what Shrink Ray removed can make a call inlinable that was not before (a function that was still needed elsewhere)
@@ -404,6 +435,7 @@ pub fn minimize(it: &dyn Oracle, src: &str, opts: &Options, log: &mut ReduceLog,
     cur = expensive_own_passes(it, cur, &mut pr, log, at(18, 20));
 
     if !interrupted() && opts.use_treereduce {
+        guard(it, &mut cur, &mut good, log, &format!("step {}", pr.n));
         pr.step("treereduce-rust, then our own passes once more (they have the last word)");
         pr.pass("treereduce-rust");
         let before = cur.clone();
@@ -423,13 +455,34 @@ pub fn minimize(it: &dyn Oracle, src: &str, opts: &Options, log: &mut ReduceLog,
         pr.summary(log, false);
         return cur;
     }
-    pr.step("final polish: parentheses, caller's cosmetics, rustfmt");
+    guard(it, &mut cur, &mut good, log, &format!("step {}", pr.n));
+    pr.step("final polish: parentheses, caller's cosmetics, short names, rustfmt");
+    guard(it, &mut cur, &mut good, log, &format!("step {}", pr.n));
     pr.pass("parentheses");
     cur = strip_parens(it, &cur);
     stage(it, hook, Stage::Polish, &mut cur, start + budget, log);
+    // a run that found nothing smaller than the input hands the input back (formatting or growing passes must not make it worse)
+    if (cur.lines().count(), cur.len()) >= (src.lines().count(), src.len()) && it.recheck(src) {
+        log.push("nothing smaller than the input was found: the input is kept as it is");
+        cur = src.to_string();
+        pr.result(log, "polish", &cur);
+        pr.summary(log, true);
+        return cur;
+    }
+    if cur.lines().count() <= 200 {
+        pr.pass("short names");
+        cur = shorten_names(it, &cur, start + budget);
+        pr.result(log, "declared names replaced by single letters", &cur);
+    }
     pr.pass("rustfmt");
+    let plain = cur.clone();
     cur = format_if_interesting(it, &cur);
+    // rustfmt spreads long lines: fine for a short program, not for one that is still big
+    if cur.lines().count() > 60 && cur.lines().count() > plain.lines().count() * 2 {
+        cur = plain;
+    }
     pr.result(log, "polish", &cur);
+    guard(it, &mut cur, &mut good, log, "the final polish");
     pr.summary(log, true);
     cur
 }

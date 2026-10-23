@@ -400,7 +400,7 @@ fn uniquify_names(it: &dyn Oracle, src: &str, rustc: &[String]) -> String {
     }
 }
 
-const KEYWORDS: [&str; 6] = ["mut", "ref", "box", "true", "false", "_"];
+const KEYWORDS: [&str; 37] = ["mut", "ref", "box", "true", "false", "_", "as", "break", "const", "continue", "crate", "dyn", "else", "enum", "extern", "fn", "for", "if", "impl", "in", "let", "loop", "match", "mod", "move", "pub", "return", "self", "Self", "static", "struct", "super", "trait", "type", "unsafe", "use", "where"];
 
 /// Names bound by `let` patterns in `body` (absolute positions: `base` is where `body` starts in the program).
 fn let_bindings(body: &str, base: usize) -> Vec<(usize, String)> {
@@ -495,7 +495,7 @@ fn let_stmt_end(src: &str, pos: usize) -> Option<usize> {
 }
 
 /// `src` with every occurrence of the local `name` in `scope` renamed; format strings may mention it as `{name}`.
-fn rename_in_scope(src: &str, scope: (usize, usize), skip: Option<usize>, name: &str, new: &str) -> String {
+pub(crate) fn rename_in_scope(src: &str, scope: (usize, usize), skip: Option<usize>, name: &str, new: &str) -> String {
     let b = src.as_bytes();
     let mut out = String::with_capacity(src.len() + 16);
     out.push_str(&src[..scope.0]);
@@ -786,4 +786,89 @@ fn substitute_one(src: &str, let_pos: usize) -> Option<String> {
     let replaced = marked.replace(marker, &text);
     // drop the let statement itself
     Some(format!("{}{}", &replaced[..let_pos], &replaced[end..]))
+}
+
+/// Names the program declares (`fn`, `let`, `struct`, `enum`, `trait`, `mod`, `type`, `const`, `static`, parameters).
+fn declared_names(src: &str) -> Vec<String> {
+    let toks = crate::tokens::tokenize(src);
+    let word = |k: usize| &src[toks[k].0..toks[k].1];
+    let mut names: Vec<String> = Vec::new();
+    let mut k = 0;
+    while k < toks.len() {
+        match word(k) {
+            "fn" | "struct" | "enum" | "trait" | "mod" | "type" | "const" | "static" | "union" | "let" if k + 1 < toks.len() => {
+                let mut n = k + 1;
+                if word(n) == "mut" && n + 1 < toks.len() {
+                    n += 1;
+                }
+                let w = word(n);
+                if w.bytes().next().is_some_and(|c| c.is_ascii_alphabetic() || c == b'_') && !KEYWORDS.contains(&w) {
+                    names.push(w.to_string());
+                }
+                // parameters: `name:` inside the parentheses of a fn header
+                if word(k) == "fn" {
+                    if let Some(open) = (n..toks.len().min(n + 12)).find(|&j| word(j) == "(") {
+                        let mut depth = 0;
+                        for j in open..toks.len() {
+                            match word(j) {
+                                "(" => depth += 1,
+                                ")" => {
+                                    depth -= 1;
+                                    if depth == 0 {
+                                        break;
+                                    }
+                                }
+                                ":" if depth == 1 && j > 0 => {
+                                    let p = word(j - 1);
+                                    if p.bytes().next().is_some_and(|c| c.is_ascii_alphabetic() || c == b'_') && p != "self" {
+                                        names.push(p.to_string());
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        k += 1;
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// Declared names replaced by single letters, one name at a time (Shrink Ray's `normalize_identifiers`): shorter reproducers read
+/// better in an issue. Only what the oracle still accepts is kept.
+pub fn shorten_names(it: &dyn Oracle, src: &str, deadline: Instant) -> String {
+    let width = par_checks();
+    let mut cur = src.to_string();
+    let mut tried: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for _ in 0..60 {
+        if expired(deadline) {
+            break;
+        }
+        let words: std::collections::HashSet<&str> = cur.split(|c: char| !(c.is_alphanumeric() || c == '_')).filter(|w| !w.is_empty()).collect();
+        let mut free = ('a'..='z').chain('A'..='Z').map(|c| c.to_string()).filter(|c| !words.contains(c.as_str()));
+        let mut names: Vec<String> = declared_names(&cur).into_iter().filter(|n| n.len() > 1 && n != "main" && !tried.contains(n)).collect();
+        names.sort_by_key(|n| std::cmp::Reverse(n.len()));
+        let batch: Vec<(String, String)> = names.into_iter().take(width).filter_map(|n| free.next().map(|f| (n, f))).collect();
+        if batch.is_empty() {
+            break;
+        }
+        let cands: Vec<String> = batch.iter().map(|(n, f)| rename_in_scope(&cur, (0, cur.len()), None, n, f)).collect();
+        let res = par_map(&cands, width, |c| it.check(c));
+        for (n, _) in &batch {
+            tried.insert(n.clone());
+        }
+        // letters of a rejected candidate are free again next round; of an accepted one the first success counts, the others retry
+        if let Some(p) = res.iter().position(|&ok| ok) {
+            cur = cands[p].clone();
+            for (n, _) in batch.iter().skip(p + 1) {
+                tried.remove(n);
+            }
+        }
+    }
+    cur
 }

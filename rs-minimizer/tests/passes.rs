@@ -248,3 +248,38 @@ fn pairs_and_random_subsets_run_at_a_higher_effort() {
     assert!(!out.contains("c += 2"), "{out}");
     assert_prints(&out, "ok\n");
 }
+
+#[test]
+fn constants_are_folded_and_integers_made_smaller() {
+    let src = "fn main() {\n    let a = 1000u32 + 234u32;\n    let b = 64 / 8;\n    println!(\"{}\", (a > 5) as u32 + b - 8 + 3);\n}\n";
+    let o = prints("4\n");
+    check_oracle(&o, src);
+    rs_minimizer::control::set_parallel(8);
+    let out = rs_minimizer::peep::peep(&o, src, far());
+    assert!(!out.contains("1000u32 + 234u32") && !out.contains("64 / 8"), "{out}");
+    assert_prints(&out, "4\n");
+}
+
+#[test]
+fn declared_names_get_single_letters() {
+    let src = "fn compute_value(first_input: u32) -> u32 {\n    let doubled = first_input * 2;\n    doubled + 1\n}\nfn main() {\n    let result_total = compute_value(20);\n    println!(\"{}\", result_total);\n}\n";
+    let o = prints("41\n");
+    check_oracle(&o, src);
+    rs_minimizer::control::set_parallel(8);
+    let out = rs_minimizer::inline::shorten_names(&o, src, far());
+    assert!(!out.contains("compute_value") && !out.contains("first_input") && !out.contains("result_total") && out.contains("fn main"), "{out}");
+    assert_prints(&out, "41\n");
+}
+
+#[test]
+fn a_run_that_finds_nothing_hands_the_input_back_unchanged() {
+    let src = "fn main() {\n    println!(\"{}\", 6 * 7);\n}\n";
+    let o = prints("42\n");
+    rs_minimizer::control::set_parallel(8);
+    let mut opts = Options::new(Duration::from_secs(40));
+    opts.use_shrinkray = false;
+    let mut log = ReduceLog::default();
+    let out = minimize(&o, src, &opts, &mut log, &mut |_, _, _| None);
+    assert_prints(&out, "42\n");
+    assert!(out.lines().count() <= src.lines().count(), "never bigger than what it was given:\n{out}");
+}
