@@ -95,6 +95,9 @@ impl Interest {
         // the reference build first: a candidate that does not even compile and run there is not interesting, and the (usually much
         // slower) second build is skipped. Most candidates of a reduction are such.
         let first = run(&self.a);
+        if matches!(first, Outcome::CompileFail(_)) {
+            rs_minimizer::control::note_invalid();
+        }
         let interesting = if !matches!(first, Outcome::Ran { .. }) {
             false
         } else {

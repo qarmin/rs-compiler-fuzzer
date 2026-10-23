@@ -201,16 +201,27 @@ impl Spec {
             }
             Mode::Crash { signature } => {
                 let b = self.compile(path, dir, &self.flags, "a", None)?;
-                Ok(!b.compile.timed_out && crash_signature(&b.compile.stderr, b.compile.signal).as_deref() == Some(signature.as_str()))
+                let hit = !b.compile.timed_out && crash_signature(&b.compile.stderr, b.compile.signal).as_deref() == Some(signature.as_str());
+                if !hit && b.compile.code != Some(0) && !b.compile.timed_out && crash_signature(&b.compile.stderr, b.compile.signal).is_none() {
+                    crate::control::note_invalid();
+                }
+                Ok(hit)
             }
             Mode::Error { needle } => {
                 let b = self.compile(path, dir, &self.flags, "a", None)?;
                 let failed = b.compile.code != Some(0) && !b.compile.timed_out;
-                Ok(failed && crash_signature(&b.compile.stderr, b.compile.signal).is_none() && first_error_line(&b.compile.stderr).is_some_and(|l| normalise(l).contains(needle.as_str()) || l.contains(needle.as_str())))
+                let hit = failed && crash_signature(&b.compile.stderr, b.compile.signal).is_none() && first_error_line(&b.compile.stderr).is_some_and(|l| normalise(l).contains(needle.as_str()) || l.contains(needle.as_str()));
+                if !hit && failed && b.compile.stderr.lines().any(|l| l.starts_with("error: expected") || l.starts_with("error: unexpected") || l.contains("this file contains an unclosed delimiter")) {
+                    crate::control::note_invalid();
+                }
+                Ok(hit)
             }
             Mode::Output { stdout, needle } => {
                 let b = self.compile(path, dir, &self.flags, "a", None)?;
                 if b.compile.code != Some(0) {
+                    if !b.compile.timed_out {
+                        crate::control::note_invalid();
+                    }
                     return Ok(false);
                 }
                 let r = self.run(&b.bin)?;
@@ -219,6 +230,9 @@ impl Spec {
             Mode::Differ { other_flags } => {
                 let a = self.compile(path, dir, &self.flags, "a", None)?;
                 if a.compile.code != Some(0) || a.compile.timed_out {
+                    if !a.compile.timed_out {
+                        crate::control::note_invalid();
+                    }
                     return Ok(false);
                 }
                 let ra = self.run(&a.bin)?;

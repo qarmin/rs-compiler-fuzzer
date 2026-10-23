@@ -236,10 +236,20 @@ fn note_interesting(src: &str) {
 
 static ORACLE_RUNS: AtomicUsize = AtomicUsize::new(0);
 static ORACLE_HITS: AtomicUsize = AtomicUsize::new(0);
+static ORACLE_INVALID: AtomicUsize = AtomicUsize::new(0);
 static ORACLE_ACTIVE: AtomicUsize = AtomicUsize::new(0);
 /// Oracle calls that really compiled something so far.
 pub fn oracle_runs() -> usize {
     ORACLE_RUNS.load(Ordering::Relaxed)
+}
+
+/// Candidates that did not even compile (or failed in an ordinary way where the problem is not a compile failure): the passes broke the program.
+pub fn invalid_candidates() -> usize {
+    ORACLE_INVALID.load(Ordering::Relaxed)
+}
+
+pub fn note_invalid() {
+    ORACLE_INVALID.fetch_add(1, Ordering::Relaxed);
 }
 
 /// Bracket every uncached oracle call with these two (the `Oracle` implementations do).
