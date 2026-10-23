@@ -339,40 +339,60 @@ fn remap(range: (usize, usize), removed: &[(usize, usize)]) -> Option<(usize, us
     Some((range.0 - shift, range.1 - shift))
 }
 
-/// Groups of ranges deleted together (an item and everything that mentions it), greedy from the end of the text.
+fn merge_ranges(mut ranges: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
+    ranges.sort();
+    let mut out: Vec<(usize, usize)> = Vec::new();
+    for r in ranges {
+        match out.last_mut() {
+            Some(l) if r.0 <= l.1 => l.1 = l.1.max(r.1),
+            _ => out.push(r),
+        }
+    }
+    out
+}
+
+/// Groups of ranges deleted together (an item and everything that mentions it): ddmin over the groups, chunks of neighbouring
+/// groups first, then smaller ones, down to single groups.
 pub(crate) fn delete_groups(it: &dyn Oracle, src: &str, mut groups: Vec<Vec<(usize, usize)>>, deadline: Instant) -> String {
     let mut cur = src.to_string();
-    for g in &mut groups {
-        g.sort();
-    }
-    groups.sort_by(|a, b| b.last().map(|r| r.1).cmp(&a.last().map(|r| r.1)));
+    // neighbours in the text are neighbours in the list
+    groups.sort_by_key(|g| g.iter().map(|r| r.0).min().unwrap_or(0));
     let width = par_checks();
-    let cut = |text: &str, g: &[(usize, usize)]| {
+    let cut = |text: &str, merged: &[(usize, usize)]| {
         let mut t = text.to_string();
-        for &(s, e) in g.iter().rev() {
+        for &(s, e) in merged.iter().rev() {
             t.replace_range(s..e, "");
         }
         t
     };
-    while !groups.is_empty() {
-        if expired(deadline) {
-            break;
-        }
-        let batch: Vec<Vec<(usize, usize)>> = groups.iter().take(width).cloned().collect();
-        let cands: Vec<String> = batch.iter().map(|g| cut(&cur, g)).collect();
-        let res = par_map(&cands, width, |c| !c.trim().is_empty() && it.check(c));
-        match res.iter().position(|&ok| ok) {
-            Some(p) => {
-                let removed = batch[p].clone();
-                cur = cands[p].clone();
-                groups = groups.into_iter().skip(p + 1).filter_map(|g| g.into_iter().map(|r| remap(r, &removed)).collect::<Option<Vec<_>>>()).collect();
+    let mut n = (groups.len() / 2).max(1);
+    loop {
+        let mut i = groups.len() as isize - n as isize;
+        while i >= 0 {
+            if expired(deadline) {
+                return cur;
             }
-            None => {
-                groups.drain(..batch.len());
+            let starts: Vec<isize> = (0..width as isize).map(|k| i - k * n as isize).take_while(|&s| s >= 0).collect();
+            let merged: Vec<Vec<(usize, usize)>> = starts.iter().map(|&s| merge_ranges(groups[s as usize..s as usize + n].iter().flatten().copied().collect())).collect();
+            let cands: Vec<String> = merged.iter().map(|m| cut(&cur, m)).collect();
+            let res = par_map(&cands, width, |c| !c.trim().is_empty() && it.check(c));
+            match res.iter().position(|&ok| ok) {
+                Some(p) => {
+                    let s = starts[p] as usize;
+                    let removed = merged[p].clone();
+                    cur = cands[p].clone();
+                    groups.drain(s..s + n);
+                    groups = groups.into_iter().filter_map(|g| g.into_iter().map(|r| remap(r, &removed)).collect::<Option<Vec<_>>>()).collect();
+                    i = (s as isize).min(groups.len() as isize - n as isize);
+                }
+                None => i = starts.last().copied().unwrap_or(0) - n as isize,
             }
         }
+        if n == 1 || groups.is_empty() {
+            return cur;
+        }
+        n = (n / 2).max(1);
     }
-    cur
 }
 
 /// An item together with every statement and item that mentions its name goes in one step: a `mod case_17` and the call that
@@ -414,6 +434,167 @@ pub fn shrink_items_with_users(it: &dyn Oracle, src: &str, deadline: Instant) ->
     let cur = delete_groups(it, src, groups, deadline);
     if cur.len() < src.len() {
         info!("items with their users: {before} -> {} lines", cur.lines().count());
+    }
+    cur
+}
+
+/// Statements of every block of every function body, one list per block (siblings).
+fn block_statement_lists(src: &str, open: usize, close: usize, out: &mut Vec<Vec<(usize, usize)>>) {
+    let b = src.as_bytes();
+    let mut mine: Vec<(usize, usize)> = Vec::new();
+    let mut start = open + 1;
+    let mut i = open + 1;
+    let first = |from: usize| skip_ws(b, from);
+    while i < close {
+        match b[i] {
+            b'"' => i = skip_string(b, i),
+            b'(' | b'[' => {
+                if let Some(c) = matching(b, i) {
+                    i = c;
+                }
+            }
+            b'{' => {
+                let Some(c) = matching(b, i) else { break };
+                block_statement_lists(src, i, c, out);
+                i = c;
+                let text = src[start..].trim_start();
+                let word: String = text.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+                let blocky = text.starts_with('{') || BLOCK_STARTS.contains(&word.as_str()) || word == "pub";
+                let next = skip_ws(b, c + 1);
+                let continues = src[next..].starts_with("else") || matches!(b.get(next), Some(b'.') | Some(b'?'));
+                if blocky && !continues && b.get(next) != Some(&b';') {
+                    mine.push((first(start), c + 1));
+                    start = c + 1;
+                }
+            }
+            b';' => {
+                mine.push((first(start), i + 1));
+                start = i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    let tail = first(start);
+    if tail < close && !src[tail..close].trim().is_empty() {
+        mine.push((tail, close));
+    }
+    if mine.len() >= 2 {
+        out.push(mine);
+    }
+}
+
+/// An item's range including the attributes in front of it.
+fn with_attributes(attrs: &[(usize, usize)], src: &str, start: usize) -> usize {
+    let mut s = start;
+    while let Some(&(a, _)) = attrs.iter().find(|&&(a, e)| a < s && e <= s && src[e..s].trim().is_empty()) {
+        s = a;
+    }
+    s
+}
+
+/// Lists of siblings: the items of the crate root, of every `mod` / `impl` / `trait` body, and the statements of every block.
+/// Statement lists come first (they use the items, so they have to go before the items can), then module bodies, then the crate root.
+fn sibling_lists(src: &str) -> Vec<(u8, Vec<(usize, usize)>)> {
+    let items = item_ranges(src);
+    let attrs = attribute_ranges(src);
+    let b = src.as_bytes();
+    let range_of = |i: &Item| (with_attributes(&attrs, src, i.start), i.end);
+    let mut lists: Vec<(u8, Vec<(usize, usize)>)> = Vec::new();
+    let mut push_items = |parent: Option<&Item>| {
+        let kids: Vec<(usize, usize)> = children(&items, parent).into_iter().filter(|k| k.kw != "use").map(&range_of).collect();
+        if kids.len() >= 2 {
+            lists.push((if parent.is_some() { 1 } else { 2 }, kids));
+        }
+    };
+    push_items(None);
+    for item in items.iter().filter(|i| matches!(i.kw.as_str(), "mod" | "impl" | "trait") && b.get(i.header_end) == Some(&b'{')) {
+        push_items(Some(item));
+    }
+    for item in items.iter().filter(|i| i.kw == "fn" && b.get(i.header_end) == Some(&b'{')) {
+        let mut found = Vec::new();
+        block_statement_lists(src, item.header_end, item.end - 1, &mut found);
+        lists.extend(found.into_iter().map(|l| (0, l)));
+    }
+    lists
+}
+
+fn list_key(src: &str, list: &[(usize, usize)]) -> u64 {
+    let mut h = 0xcbf29ce484222325u64;
+    for &(s, e) in list {
+        for byte in src[s..e].bytes().chain(std::iter::once(0xff)) {
+            h ^= byte as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+    }
+    h
+}
+
+/// ddmin over one list of siblings: chunks of consecutive siblings are deleted, halving the chunk size.
+fn ddmin_siblings(it: &dyn Oracle, cur: &mut String, mut list: Vec<(usize, usize)>, deadline: Instant) {
+    let width = par_checks();
+    let mut n = (list.len() / 2).max(1);
+    loop {
+        let mut i = list.len() as isize - n as isize;
+        while i >= 0 {
+            if expired(deadline) {
+                return;
+            }
+            let starts: Vec<isize> = (0..width as isize).map(|k| i - k * n as isize).take_while(|&s| s >= 0).collect();
+            let cut = |s: isize| {
+                let (a, z) = (list[s as usize].0, list[s as usize + n - 1].1);
+                format!("{}{}", &cur[..a], &cur[z..])
+            };
+            let cands: Vec<String> = starts.iter().map(|&s| cut(s)).collect();
+            let res = par_map(&cands, width, |c| !c.trim().is_empty() && it.check(c));
+            match res.iter().position(|&ok| ok) {
+                Some(p) => {
+                    let s = starts[p] as usize;
+                    let (a, z) = (list[s].0, list[s + n - 1].1);
+                    *cur = cands[p].clone();
+                    let removed = z - a;
+                    list.drain(s..s + n);
+                    for r in list.iter_mut().skip(s) {
+                        r.0 -= removed;
+                        r.1 -= removed;
+                    }
+                    i = (s as isize).min(list.len() as isize - n as isize);
+                }
+                None => i = starts.last().copied().unwrap_or(0) - n as isize,
+            }
+        }
+        if n == 1 || list.len() < 2 {
+            return;
+        }
+        n = (n / 2).max(1);
+    }
+}
+
+/// Delta debugging on the structure: for every list of siblings (the items of a module, the statements of a block) chunks of
+/// neighbours are deleted at once, largest lists first. Far fewer oracle calls than deleting one item or line at a time.
+pub fn shrink_siblings(it: &dyn Oracle, src: &str, deadline: Instant) -> String {
+    let mut cur = src.to_string();
+    let mut done: std::collections::HashSet<u64> = std::collections::HashSet::new();
+    for _ in 0..400 {
+        if expired(deadline) {
+            break;
+        }
+        let mut lists = sibling_lists(&cur);
+        lists.sort_by_key(|(prio, l)| (*prio, std::cmp::Reverse(l.last().map(|r| r.1).unwrap_or(0) - l.first().map(|r| r.0).unwrap_or(0))));
+        let Some((_, list)) = lists.into_iter().find(|(_, l)| !done.contains(&list_key(&cur, l))) else { break };
+        done.insert(list_key(&cur, &list));
+        let before = cur.len();
+        ddmin_siblings(it, &mut cur, list.clone(), deadline);
+        if cur.len() != before {
+            info!("siblings ({} items or statements in a list): {} -> {} bytes", list.len(), before, cur.len());
+            // what is left of the list is finished; the lists nested in its survivors are found by the next round
+        }
+        let rest = sibling_lists(&cur);
+        for (_, l) in rest {
+            if l.len() <= 1 {
+                done.insert(list_key(&cur, &l));
+            }
+        }
     }
     cur
 }

@@ -127,3 +127,55 @@ fn an_item_goes_together_with_the_statements_that_use_it() {
     assert!(out.contains("case_7") && !out.contains("case_8") && !out.contains("case_29"), "{out}");
     assert_eq!(out.matches("mod case_").count(), 1, "{out}");
 }
+
+fn counting_oracle<'a>(calls: &'a std::sync::atomic::AtomicUsize, needle: &'a str, expected: u32) -> rs_minimizer::Cached<impl Fn(&str) -> bool + Sync + 'a> {
+    use std::sync::atomic::Ordering;
+    rs_minimizer::Cached::new(move |s: &str| {
+        calls.fetch_add(1, Ordering::Relaxed);
+        s.contains(needle) && run_program(s).is_some_and(|out| out.trim().parse::<u32>().is_ok_and(|n| n == expected))
+    })
+}
+
+#[test]
+fn chunks_of_statements_are_deleted_with_few_oracle_calls() {
+    use rs_minimizer::items::shrink_siblings;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let mut src = String::from("fn main() {\n");
+    for i in 0..200 {
+        src.push_str(&format!("    let v{i} = {i}u32 * 3;\n"));
+    }
+    src.push_str("    println!(\"{}\", v7);\n}\n");
+    let calls = AtomicUsize::new(0);
+    let o = counting_oracle(&calls, "v7", 21);
+    check_oracle(&o, &src);
+    calls.store(0, Ordering::Relaxed);
+    rs_minimizer::control::set_parallel(8);
+    let out = shrink_siblings(&o, &src, far());
+    assert!(out.lines().filter(|l| !l.trim().is_empty()).count() <= 4, "{out}");
+    assert!(calls.load(Ordering::Relaxed) < 80, "one statement at a time needs 200 oracle calls, ddmin far fewer: {}", calls.load(Ordering::Relaxed));
+}
+
+#[test]
+fn items_and_their_users_are_deleted_in_chunks_too() {
+    use rs_minimizer::items::shrink_items_with_users;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let mut src = String::new();
+    for i in 0..64 {
+        src.push_str(&format!("mod m{i} {{\n    pub fn run() -> u32 {{\n        {i}\n    }}\n}}\n"));
+    }
+    src.push_str("fn main() {\n    let mut t = 0u32;\n");
+    for i in 0..64 {
+        src.push_str(&format!("    t += m{i}::run();\n"));
+    }
+    src.push_str("    println!(\"{}\", t);\n}\n");
+    let calls = AtomicUsize::new(0);
+    // the sum of what is left must be exactly 5 (module m5 alone)
+    let src = src.replace("println!(\"{}\", t);", "println!(\"{}\", t.min(5));");
+    let o = counting_oracle(&calls, "m5::run", 5);
+    check_oracle(&o, &src);
+    calls.store(0, Ordering::Relaxed);
+    rs_minimizer::control::set_parallel(8);
+    let out = shrink_items_with_users(&o, &src, far());
+    assert!(out.contains("mod m5") && !out.contains("mod m6 ") && !out.contains("mod m4 "), "{out}");
+    assert!(calls.load(Ordering::Relaxed) < 50, "{} oracle calls", calls.load(Ordering::Relaxed));
+}

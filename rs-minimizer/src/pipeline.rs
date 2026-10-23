@@ -6,7 +6,7 @@ use crate::exprs::{drop_calls, drop_let_bindings, flatten_blocks, simplify_exprs
 use crate::external::{shrinkray, shrinkray_available, treereduce};
 use crate::format::format_if_interesting;
 use crate::inline::{inline_calls, substitute_lets};
-use crate::items::{shrink_items, shrink_items_with_users, shrink_statements};
+use crate::items::{shrink_items, shrink_items_with_users, shrink_siblings, shrink_statements};
 use crate::lines::{shrink_lines, strip_comments};
 use crate::modules::hoist_modules;
 use crate::oracle::Oracle;
@@ -224,6 +224,9 @@ fn cheap_phase(it: &dyn Oracle, mut cur: String, pr: &mut Progress, log: &mut Re
         pr.pass("items with their users");
         cur = shrink_items_with_users(it, &cur, until);
         pr.result(log, "items together with the code that mentions them", &cur);
+        pr.pass("siblings");
+        cur = shrink_siblings(it, &cur, until);
+        pr.result(log, "siblings: chunks of neighbouring items and statements", &cur);
         pr.pass("items");
         cur = shrink_items(it, &cur, until);
         pr.result(log, "items", &cur);
