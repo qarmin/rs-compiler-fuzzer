@@ -4,7 +4,7 @@
 
 use crate::exprs::greedy_edits;
 use crate::oracle::Oracle;
-use crate::scan::{is_ident, matching, top_args};
+use crate::scan::{is_ident, matching, postfix_start, top_args};
 use crate::tokens::tokenize;
 use log::info;
 use std::time::Instant;
@@ -292,6 +292,43 @@ fn format_arguments_dropped(src: &str) -> Vec<Edit> {
     out
 }
 
+/// `x.checked_add(y).unwrap_or(z)`: an Option or Result producing call together with the unwrap that follows it is dropped (`x`), or
+/// the whole expression is replaced by one of the arguments (`y`, `z`). Dropping only one of the two never type checks.
+fn option_pairs(src: &str) -> Vec<Edit> {
+    const UNWRAPS: [&str; 5] = [".unwrap_or(", ".unwrap()", ".expect(", ".unwrap_or_default()", ".unwrap_or_else("];
+    let b = src.as_bytes();
+    let mut out = Vec::new();
+    for (dot, _) in src.match_indices('.') {
+        if !b.get(dot + 1).is_some_and(|c| c.is_ascii_alphabetic() || *c == b'_') {
+            continue;
+        }
+        let mut j = dot + 1;
+        while j < b.len() && is_ident(b[j]) {
+            j += 1;
+        }
+        if b.get(j) != Some(&b'(') {
+            continue;
+        }
+        let Some(close) = matching(b, j) else { continue };
+        let Some(un) = UNWRAPS.iter().find(|u| src[close + 1..].starts_with(**u)) else { continue };
+        let un_open = close + 1 + un.len() - 1;
+        let (un_open, un_end) = if *un == ".unwrap()" || *un == ".unwrap_or_default()" { (un_open, un_open + 1) } else { match matching(b, un_open) { Some(c) => (un_open, c + 1), None => continue } };
+        let rs = postfix_start(b, dot);
+        out.push((dot, un_end, String::new()));
+        let mut args = top_args(src, j, close);
+        if un_end > un_open + 1 && *un != ".unwrap()" && *un != ".unwrap_or_default()" {
+            args.extend(top_args(src, un_open, un_end - 1));
+        }
+        for (s, e) in args {
+            let arg = src[s..e].trim();
+            if !arg.is_empty() {
+                out.push((rs, un_end, format!("({arg})")));
+            }
+        }
+    }
+    out
+}
+
 /// `*(&x)` -> `(x)`: what is left after a let that holds a reference was substituted into its use.
 fn deref_of_borrow(src: &str) -> Vec<Edit> {
     let b = src.as_bytes();
@@ -407,11 +444,12 @@ fn folded_constants(src: &str) -> Vec<Edit> {
 /// The whole set, one category after the other.
 pub fn peep(it: &dyn Oracle, src: &str, deadline: Instant) -> String {
     let mut cur = src.to_string();
-    let passes: [(&str, fn(&str) -> Vec<Edit>); 10] = [
+    let passes: [(&str, fn(&str) -> Vec<Edit>); 11] = [
         ("keywords and compound assignments weakened", keyword_weakening),
         ("binary operators: one operand kept", binary_operands),
         ("parenthesised groups and blocks replaced by 0", groups_to_zero),
         ("calls replaced by values", calls_to_values),
+        ("option and result pairs dropped", option_pairs),
         ("dereferenced borrows cancelled", deref_of_borrow),
         ("format arguments dropped", format_arguments_dropped),
         ("call arguments replaced by literals", args_to_literals),

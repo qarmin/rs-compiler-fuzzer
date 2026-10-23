@@ -160,3 +160,13 @@ fn a_tuple_let_is_split_and_its_parts_substituted() {
     let out = rs_minimizer::exprs::simplify_let_tuples(&o, src, far());
     assert!(out.contains("let c = &mut h;"), "{out}");
 }
+
+#[test]
+fn a_checked_call_with_its_unwrap_is_dropped_or_replaced_by_an_argument() {
+    let src = "fn main() {\n    let a = 7u32;\n    let b = a.checked_add(0).unwrap_or(1);\n    println!(\"{}\", b);\n}\n";
+    let o = prints("7\n");
+    check_oracle(&o, src);
+    rs_minimizer::control::set_parallel(8);
+    let out = peep(&o, src, far());
+    assert!(!out.contains("checked_add"), "{out}");
+}
