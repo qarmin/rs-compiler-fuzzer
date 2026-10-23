@@ -2,6 +2,7 @@
 //! counters. One reduction runs at a time per process.
 
 use log::{error, info, warn};
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -180,6 +181,12 @@ pub fn current_pass() -> String {
     STAGE.lock().unwrap().clone()
 }
 
+/// The size the run starts from (the dashboard shows it until the first improvement).
+pub fn set_current_size(lines: usize, bytes: usize) {
+    CUR_LINES.store(lines, Ordering::Relaxed);
+    CUR_BYTES.store(bytes, Ordering::Relaxed);
+}
+
 fn note_size(before: Option<&str>, after: &str) {
     CUR_LINES.store(after.lines().count(), Ordering::Relaxed);
     CUR_BYTES.store(after.len(), Ordering::Relaxed);
@@ -248,8 +255,105 @@ pub fn invalid_candidates() -> usize {
     ORACLE_INVALID.load(Ordering::Relaxed)
 }
 
-pub fn note_invalid() {
+static NESTING_REQUIRED: AtomicBool = AtomicBool::new(false);
+static CHEAP_REJECTED: AtomicUsize = AtomicUsize::new(0);
+
+/// Start of a reduction: when the program's brackets nest properly, candidates whose brackets do not are refused without asking the
+/// compiler (it would only say "unexpected closing delimiter").
+pub fn require_nesting(program: &str) {
+    NESTING_REQUIRED.store(crate::tokens::balanced(program), Ordering::Relaxed);
+}
+
+/// True for a candidate that is refused without a run.
+pub fn refused_unbalanced(src: &str) -> bool {
+    let refuse = NESTING_REQUIRED.load(Ordering::Relaxed) && !crate::tokens::balanced(src);
+    if refuse {
+        CHEAP_REJECTED.fetch_add(1, Ordering::Relaxed);
+    }
+    refuse
+}
+
+pub fn refused_without_a_run() -> usize {
+    CHEAP_REJECTED.load(Ordering::Relaxed)
+}
+
+/// How many records of rejected candidates are kept for `write_rejected_log` (the oldest are dropped).
+const REJECTED_KEPT: usize = 1000;
+
+struct Rejected {
+    reasons: HashMap<String, usize>,
+    recent: VecDeque<String>,
+}
+
+static REJECTED: Mutex<Option<Rejected>> = Mutex::new(None);
+
+/// What the compiler complained about, without the names: `error[E0425]: cannot find value `_` in this scope`.
+fn reason_of(stderr: &str) -> String {
+    let line = stderr.lines().find(|l| l.starts_with("error")).unwrap_or("error: (no message)");
+    let mut out = String::new();
+    let mut in_quote = false;
+    for c in line.chars() {
+        match c {
+            '`' => {
+                in_quote = !in_quote;
+                out.push('`');
+                if in_quote {
+                    out.push('_');
+                }
+            }
+            _ if in_quote => {}
+            _ => out.push(c),
+        }
+    }
+    out.chars().take(140).collect()
+}
+
+/// A candidate that did not even compile: the compiler output says what the pass got wrong (counted per reason, the last
+/// `REJECTED_KEPT` kept with the pass that made them).
+pub fn note_invalid(stderr: &str) {
     ORACLE_INVALID.fetch_add(1, Ordering::Relaxed);
+    let reason = reason_of(stderr);
+    let mut g = REJECTED.lock().unwrap();
+    let r = g.get_or_insert_with(|| Rejected { reasons: HashMap::new(), recent: VecDeque::new() });
+    if r.reasons.len() < 500 || r.reasons.contains_key(&reason) {
+        *r.reasons.entry(reason.clone()).or_insert(0) += 1;
+    }
+    if r.recent.len() >= REJECTED_KEPT {
+        r.recent.pop_front();
+    }
+    let first_line = stderr.lines().find(|l| l.starts_with("error")).unwrap_or("").chars().take(200).collect::<String>();
+    r.recent.push_back(format!("[{}] {}", stage(), first_line));
+}
+
+/// The most frequent reasons candidates were rejected, most frequent first.
+pub fn rejection_reasons(n: usize) -> Vec<(String, usize)> {
+    let g = REJECTED.lock().unwrap();
+    let mut v: Vec<(String, usize)> = g.as_ref().map(|r| r.reasons.iter().map(|(k, c)| (k.clone(), *c)).collect()).unwrap_or_default();
+    v.sort_by_key(|(_, c)| std::cmp::Reverse(*c));
+    v.truncate(n);
+    v
+}
+
+/// The reasons with counts and the last records (at most `REJECTED_KEPT`) of rejected candidates, for finding what a pass gets wrong.
+pub fn write_rejected_log(path: &std::path::Path) {
+    let mut text = String::from("reasons (most frequent first):\n");
+    for (reason, count) in rejection_reasons(40) {
+        text.push_str(&format!("{count:>8}  {reason}\n"));
+    }
+    text.push_str("\nthe most recent rejected candidates (pass, first error):\n");
+    if let Some(r) = REJECTED.lock().unwrap().as_ref() {
+        for l in &r.recent {
+            text.push_str(l);
+            text.push('\n');
+        }
+    }
+    let _ = std::fs::write(path, text);
+}
+
+/// Forgets what an earlier reduction in this process rejected.
+pub fn reset_rejected() {
+    *REJECTED.lock().unwrap() = None;
+    ORACLE_INVALID.store(0, Ordering::Relaxed);
 }
 
 /// Bracket every uncached oracle call with these two (the `Oracle` implementations do).

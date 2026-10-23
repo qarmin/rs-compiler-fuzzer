@@ -55,6 +55,9 @@ impl<F: Fn(&str) -> bool + Sync> Oracle for Cached<F> {
         if let Some(&r) = self.cache.lock().unwrap().get(&key) {
             return r;
         }
+        if control::refused_unbalanced(src) {
+            return false;
+        }
         control::oracle_started();
         let r = (self.predicate)(src);
         control::oracle_finished(src, r);

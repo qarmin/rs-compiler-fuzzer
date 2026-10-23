@@ -128,8 +128,6 @@ pub fn lexeme_deletions(it: &dyn Oracle, src: &str, deadline: Instant) -> String
     if toks.len() < 20 || toks.len() > 40_000 {
         return src.to_string();
     }
-    let mut occurrences: HashMap<&[(usize, usize)], Vec<usize>> = HashMap::new();
-    let _ = &mut occurrences;
     // n-grams of 1..=4 tokens, positions of each
     let mut by_ngram: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
     for n in 1..=4usize {

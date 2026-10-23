@@ -38,6 +38,9 @@ pub fn shrink_lines(it: &dyn Oracle, src: &str, deadline: Instant) -> String {
 
 /// Comments and blank lines: they never matter to a reducer, so all of them go in one step.
 pub fn strip_comments(it: &dyn Oracle, src: &str) -> String {
+    if !src.lines().any(|l| l.trim().is_empty() || l.trim_start().starts_with("//")) {
+        return src.to_string();
+    }
     let cand: Vec<String> = src.lines().filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with("//")).map(|l| l.to_string()).collect();
     let cand = cand.join("\n") + "\n";
     if cand != src && it.check(&cand) {

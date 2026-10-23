@@ -178,6 +178,7 @@ pub fn run(args: Vec<String>) -> i32 {
     let result = minimize(&*oracle, &src, &opts, &mut log, &mut |_, _, _| None);
     let _ = std::fs::write(&output, &result);
     let _ = std::fs::remove_dir_all(&work);
+    crate::control::write_rejected_log(&output.with_extension("rejected.log"));
     log::info!("done: {} -> {} lines, written to {}", src.lines().count(), result.lines().count(), output.display());
     if ui {
         crate::ui::stop(&[format!("{} lines / {} bytes -> {} lines / {} bytes, written to {}", src.lines().count(), src.len(), result.lines().count(), result.len(), output.display())]);

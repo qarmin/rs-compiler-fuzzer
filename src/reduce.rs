@@ -78,6 +78,9 @@ impl Interest {
         if let Some(&r) = self.cache.lock().unwrap().get(&key) {
             return r;
         }
+        if rs_minimizer::control::refused_unbalanced(src) {
+            return false;
+        }
         rs_minimizer::control::oracle_started();
         let r = self.check_uncached(src);
         rs_minimizer::control::oracle_finished(src, r);
@@ -95,8 +98,8 @@ impl Interest {
         // the reference build first: a candidate that does not even compile and run there is not interesting, and the (usually much
         // slower) second build is skipped. Most candidates of a reduction are such.
         let first = run(&self.a);
-        if matches!(first, Outcome::CompileFail(_)) {
-            rs_minimizer::control::note_invalid();
+        if let Outcome::CompileFail(e) = &first {
+            rs_minimizer::control::note_invalid(e);
         }
         let interesting = if !matches!(first, Outcome::Ran { .. }) {
             false
@@ -208,7 +211,6 @@ pub fn unalias_black_box(it: &dyn Oracle, src: &str) -> String {
 pub fn reduce_all(it: &Interest, src: &str, budget: Duration, log: &mut ReduceLog) -> String {
     let mut opts = Options::new(budget);
     opts.rustc = it.rustc.clone();
-    opts.keep_module = Box::new(|name| name.starts_with("case_"));
     let mut hook = |stage: Stage, cur: &str, _deadline: Instant| -> Option<String> {
         match stage {
             // a single case left: drop the harness, a plain `fn main` is what a human would post

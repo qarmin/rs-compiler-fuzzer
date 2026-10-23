@@ -58,6 +58,7 @@ pub struct Snapshot {
     pub bytes: usize,
     pub oracle_runs: usize,
     pub invalid: usize,
+    pub reasons: Vec<(String, usize)>,
     pub pass: String,
     pub stopping: bool,
     pub change: Option<(String, String)>,
@@ -194,6 +195,9 @@ pub fn render(d: &Dash, s: &Snapshot, width: usize, height: usize) -> Vec<Line> 
     out.push(row(&format!("oracle calls {} ({:.1}/s)    now running: {}{}", s.oracle_runs, rate, if s.pass.is_empty() { "-" } else { s.pass.trim_start_matches("rs-minimizer: ") }, if s.stopping { "    STOPPING: finishing the running calls" } else { "" }), width, if s.stopping { Style::Red } else { Style::Plain }));
     let pct_of_runs = 100.0 * s.invalid as f32 / s.oracle_runs.max(1) as f32;
     out.push(row(&format!("candidates that did not compile (the passes broke the program): {} ({:.0}% of the calls)", s.invalid, pct_of_runs), width, Style::Dim));
+    for (reason, count) in s.reasons.iter().take(2) {
+        out.push(row(&format!("   {count:>6}x {reason}"), width, Style::Dim));
+    }
     // graph
     let gh = ((height.saturating_sub(12)) / 3).clamp(5, 14);
     out.push(boxed("size over time (bytes, log scale)", width));
@@ -280,6 +284,7 @@ fn paint(frame: &[Line], width: usize) -> String {
 /// Shows the dashboard until `stop`. The caller has set up the checkpoint file (the diff comes from the accepted changes).
 pub fn start(title: &str, budget: Duration, initial: (usize, usize), out_file: &str, log_file: &str) {
     control::set_ui(true);
+    control::set_current_size(initial.0, initial.1);
     *DASH.lock().unwrap() = Some(Dash { title: title.to_string(), budget_secs: budget.as_secs(), initial, log_file: log_file.to_string(), out_file: out_file.to_string(), samples: vec![(0.0, initial.1)], passes: VecDeque::new() });
     ACTIVE.store(true, Ordering::SeqCst);
     ON_SCREEN.store(true, Ordering::SeqCst);
@@ -295,7 +300,7 @@ pub fn start(title: &str, budget: Duration, initial: (usize, usize), out_file: &
                 last_size = Instant::now();
             }
             let (lines, bytes) = control::current_size();
-            let snap = Snapshot { elapsed: started.elapsed().as_secs_f32(), lines, bytes, oracle_runs: control::oracle_runs(), invalid: control::invalid_candidates(), pass: control::current_pass(), stopping: control::interrupted(), change: control::last_change() };
+            let snap = Snapshot { elapsed: started.elapsed().as_secs_f32(), lines, bytes, oracle_runs: control::oracle_runs(), invalid: control::invalid_candidates(), reasons: control::rejection_reasons(2), pass: control::current_pass(), stopping: control::interrupted(), change: control::last_change() };
             let frame = {
                 let mut g = DASH.lock().unwrap();
                 let Some(d) = g.as_mut() else { break };

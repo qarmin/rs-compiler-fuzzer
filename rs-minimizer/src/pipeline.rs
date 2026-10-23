@@ -153,6 +153,15 @@ impl Progress {
         by_gain.sort_by_key(|g| std::cmp::Reverse(g.1.abs()));
         let top: Vec<String> = by_gain.iter().take(6).map(|g| format!("{} {}{} bytes ({} calls)", g.0.trim_start_matches("rs-minimizer: "), if g.1 > 0 { "-" } else { "+" }, g.1.abs(), g.2)).collect();
         log.push(format!("SUMMARY biggest contributions: {}", top.join("; ")));
+        let refused = crate::control::refused_without_a_run();
+        if refused > 0 {
+            log.push(format!("SUMMARY {refused} candidates with unbalanced brackets were refused without a compiler run"));
+        }
+        let invalid = crate::control::invalid_candidates();
+        if invalid > 0 {
+            let reasons: Vec<String> = crate::control::rejection_reasons(5).iter().map(|(r, c)| format!("{c}x {r}")).collect();
+            log.push(format!("SUMMARY candidates that did not compile: {invalid} of {} oracle calls; most frequent: {}", oracle_runs(), reasons.join(" | ")));
+        }
     }
 }
 
@@ -325,6 +334,8 @@ pub fn minimize(it: &dyn Oracle, src: &str, opts: &Options, log: &mut ReduceLog,
     let budget = opts.budget;
     let mut cur = src.to_string();
     let mut good = src.to_string();
+    crate::control::set_current_size(src.lines().count(), src.len());
+    crate::control::require_nesting(src);
     let mut pr = Progress { start, lines: cur.lines().count(), bytes: cur.len(), n: 0, last_runs: oracle_runs(), last_at: start, initial: (cur.lines().count(), cur.len()), runs0: oracle_runs(), gains: Vec::new() };
     info!("system: {}", crate::control::describe_system());
     info!("compiler for the passes that compile: {}", if opts.rustc.is_empty() { "none (they are off)".to_string() } else { opts.rustc.join(" ") });

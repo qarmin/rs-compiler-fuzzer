@@ -324,13 +324,16 @@ fn main() {
             }
             let _ = std::fs::remove_dir_all(out.join("work"));
             info!("done: {}/reduced.rs, ISSUE.md, STATUS.md", dir.display());
+            rs_minimizer::control::write_rejected_log(std::path::Path::new("tmp/minimize.rejected.log"));
             if ui {
                 let case = std::fs::read_to_string(dir.join("case.rs")).unwrap_or_default();
                 let red = std::fs::read_to_string(dir.join("reduced.rs")).unwrap_or_default();
-                rs_minimizer::ui::stop(&[
-                    format!("{}: {} lines / {} bytes -> {} lines / {} bytes ({:.1}% fewer bytes), status: {}", dir.display(), case.lines().count(), case.len(), red.lines().count(), red.len(), 100.0 * (case.len() as f64 - red.len() as f64) / case.len().max(1) as f64, status_of(&dir)),
-                    format!("written: {0}/reduced.rs, {0}/ISSUE.md, {0}/STATUS.md; the full log: tmp/minimize.log", dir.display()),
-                ]);
+                let size = if red.is_empty() || red.len() >= case.len() {
+                    format!("{}: no reduced program was written ({} lines / {} bytes at the start)", dir.display(), case.lines().count(), case.len())
+                } else {
+                    format!("{}: {} lines / {} bytes -> {} lines / {} bytes ({:.1}% fewer bytes), status: {}", dir.display(), case.lines().count(), case.len(), red.lines().count(), red.len(), 100.0 * (case.len() as f64 - red.len() as f64) / case.len().max(1) as f64, status_of(&dir))
+                };
+                rs_minimizer::ui::stop(&[size, format!("written: {0}/reduced.rs, {0}/ISSUE.md, {0}/STATUS.md; log: tmp/minimize.log, rejected candidates: tmp/minimize.rejected.log", dir.display())]);
             }
             std::process::exit(0);
         }

@@ -203,7 +203,7 @@ impl Spec {
                 let b = self.compile(path, dir, &self.flags, "a", None)?;
                 let hit = !b.compile.timed_out && crash_signature(&b.compile.stderr, b.compile.signal).as_deref() == Some(signature.as_str());
                 if !hit && b.compile.code != Some(0) && !b.compile.timed_out && crash_signature(&b.compile.stderr, b.compile.signal).is_none() {
-                    crate::control::note_invalid();
+                    crate::control::note_invalid(&b.compile.stderr);
                 }
                 Ok(hit)
             }
@@ -212,7 +212,7 @@ impl Spec {
                 let failed = b.compile.code != Some(0) && !b.compile.timed_out;
                 let hit = failed && crash_signature(&b.compile.stderr, b.compile.signal).is_none() && first_error_line(&b.compile.stderr).is_some_and(|l| normalise(l).contains(needle.as_str()) || l.contains(needle.as_str()));
                 if !hit && failed && b.compile.stderr.lines().any(|l| l.starts_with("error: expected") || l.starts_with("error: unexpected") || l.contains("this file contains an unclosed delimiter")) {
-                    crate::control::note_invalid();
+                    crate::control::note_invalid(&b.compile.stderr);
                 }
                 Ok(hit)
             }
@@ -220,7 +220,7 @@ impl Spec {
                 let b = self.compile(path, dir, &self.flags, "a", None)?;
                 if b.compile.code != Some(0) {
                     if !b.compile.timed_out {
-                        crate::control::note_invalid();
+                        crate::control::note_invalid(&b.compile.stderr);
                     }
                     return Ok(false);
                 }
@@ -231,7 +231,7 @@ impl Spec {
                 let a = self.compile(path, dir, &self.flags, "a", None)?;
                 if a.compile.code != Some(0) || a.compile.timed_out {
                     if !a.compile.timed_out {
-                        crate::control::note_invalid();
+                        crate::control::note_invalid(&a.compile.stderr);
                     }
                     return Ok(false);
                 }
