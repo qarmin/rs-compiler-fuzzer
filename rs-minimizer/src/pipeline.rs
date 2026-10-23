@@ -70,7 +70,7 @@ fn stage(hook: Hook, st: Stage, cur: &mut String, deadline: Instant, log: &mut R
     }
 }
 
-const STEPS: usize = 10;
+const STEPS: usize = 11;
 
 /// Above this many lines only the cheap passes (deletions) run; the passes that grow or probe the program wait until it is smaller.
 const BIG_LINES: usize = 2000;
@@ -308,6 +308,14 @@ pub fn minimize(it: &dyn Oracle, src: &str, opts: &Options, log: &mut ReduceLog,
         log.push(format!("structure passes skipped: {} lines, they wait for fewer than {BIG_LINES}", cur.lines().count()));
     } else if !interrupted() {
         cur = structure_passes(it, cur, &mut pr, log, at(9, 20));
+    }
+
+    if !interrupted() {
+        // what Shrink Ray is bad at (statements, items, calls, operands) is what these passes were made for: a few minutes of them
+        // first leave it a program it can handle
+        pr.step("our own expression passes first, time-boxed (Shrink Ray is slow on big programs and blind to this structure)");
+        let slice = (budget / 6).min(Duration::from_secs(300));
+        cur = expensive_own_passes(it, cur, &mut pr, log, (Instant::now() + slice).min(at(9, 20)));
     }
 
     pr.step("shrinkray (or the built-in expression passes without it)");
