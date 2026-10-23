@@ -8,7 +8,11 @@ rs-minimizer INPUT.rs --test ./check.sh -o small.rs
 
 `check.sh` gets the path of a candidate as its last argument and exits with 0 while the problem (miscompilation, ICE, a lint, ...) is still there. The result is also the checkpoint: it is rewritten on every improvement, Ctrl+C once stops and keeps it, twice leaves at once.
 
-## Passes (in the order of the default pipeline)
+## Flow
+
+Cheap deletions come first (comments, items together with the code that mentions them, items, lines), repeated while a round removes a tenth of the program, and nothing is expanded or inlined yet. The passes that grow or probe the program (unroll, structure, inlining, peephole) wait until it has fewer than 2000 lines or 30 seconds have passed; the many-oracle-call passes (peephole 800 lines, tokens 4000 tokens) only run on small programs. Every line of the log names the pass that produced it: `[rs-minimizer: lines]`, `[shrinkray]`, `[treereduce-rust]`.
+
+## Passes (roughly in the order they run)
 
 1. **Unroll** - `macro_rules!` with one rule are expanded in place (statement, item and `$(...)*` forms, several macros of the same name), `catch_unwind(AssertUnwindSafe(|| X)).is_ok()` becomes `{ X; true }`, `set_hook` goes. Every step is kept only if the oracle still accepts the program, and the longer plain program becomes the baseline.
 2. **Modules** - top-level `mod x { .. }` wrappers are hoisted into the crate root with their `use` and path prefixes. When names collide (a renamed program has `mod a`, `trait a` and `fn a` side by side) the colliding items are renamed first, with `rustc` as the name resolver: the declaration is renamed and every use the compiler reports as unresolved is fixed (`rename.rs`).
