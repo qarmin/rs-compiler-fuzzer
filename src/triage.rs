@@ -41,7 +41,7 @@ impl TriageOpts {
 /// Version of the triage / minimisation logic. Bump it by hand whenever the results of `triage` get
 /// better (smarter reduction, more exact regression range, ...): every stored finding with a smaller
 /// `fuzzer_id` is then triaged again by the `retriage` job and replaced in the package.
-pub const FUZZER_ID: u32 = 4;
+pub const FUZZER_ID: u32 = 5;
 
 pub type Cfg = BTreeMap<String, String>;
 
@@ -105,7 +105,7 @@ pub fn reproduces(rustc: &[String], src: &Path, base: &Config, bad: &Config, sig
     }
     let yes = match sig {
         Some(s) => matches!(a, Outcome::Ran { .. }) && crash_signature(&b).as_deref() == Some(s.as_str()),
-        None => matches!((&a, &b), (Outcome::Ran { .. }, Outcome::Ran { .. })) && a.key() != b.key(),
+        None => matches!((&a, &b), (Outcome::Ran { .. }, Outcome::Ran { .. })) && crate::runner::differs(&a, &b, base, bad),
     };
     (if yes { Repro::Yes } else { Repro::No }, a, b)
 }

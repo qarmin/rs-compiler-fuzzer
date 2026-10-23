@@ -183,6 +183,41 @@ impl Outcome {
     }
 }
 
+/// (overflow-checks, debug-assertions) as the configuration builds with them (the common flags, then the configuration's own).
+fn checks_of(c: &Config) -> (bool, bool) {
+    let (mut overflow, mut debug): (Option<bool>, bool) = (None, false);
+    let flags: Vec<String> = common_flags().into_iter().chain(c.flags.iter().cloned()).collect();
+    let mut i = 0;
+    while i < flags.len() {
+        let f = flags[i].as_str();
+        let arg = if f == "-C" { i += 1; flags.get(i).map(String::as_str).unwrap_or("") } else { f.strip_prefix("-C").unwrap_or("") };
+        let on = |v: &str| matches!(v, "on" | "yes" | "y" | "true" | "");
+        if let Some(v) = arg.strip_prefix("overflow-checks=") {
+            overflow = Some(on(v));
+        } else if let Some(v) = arg.strip_prefix("debug-assertions=") {
+            debug = on(v);
+        }
+        i += 1;
+    }
+    (overflow.unwrap_or(debug), debug)
+}
+
+/// Two outcomes of two configurations "differ" when the output differs and the difference is not simply what the options mean:
+/// a program that overflows (or breaks an `unsafe` precondition) panics when overflow checks / debug assertions are on and goes on
+/// when they are off. That is no compiler bug, and a reducer finds such candidates very quickly (`i8::MAX + 1`).
+pub fn differs(a: &Outcome, b: &Outcome, ca: &Config, cb: &Config) -> bool {
+    if a.key() == b.key() {
+        return false;
+    }
+    if checks_of(ca) != checks_of(cb) {
+        let says = |o: &Outcome| matches!(o, Outcome::Ran { stderr, .. } if stderr.contains("with overflow") || stderr.contains("unsafe precondition") || stderr.contains("debug_assert") || stderr.contains("assertion failed: self.is_char_boundary"));
+        if says(a) || says(b) {
+            return false;
+        }
+    }
+    true
+}
+
 #[derive(Clone, Copy)]
 pub struct Limits {
     pub compile: Duration,
@@ -307,5 +342,27 @@ mod display_tests {
         let flags: Vec<String> = COMMON_FLAGS.iter().map(|s| s.to_string()).collect();
         let shown = shown_flags(&flags);
         assert!(!shown.contains("function_casts_as_integer") && shown.contains("--cap-lints allow"), "{shown}");
+    }
+}
+
+#[cfg(test)]
+mod overflow_tests {
+    use super::*;
+
+    fn ran(code: i32, stderr: &str) -> Outcome {
+        Outcome::Ran { code: Some(code), signal: None, stdout: String::new(), stderr: stderr.to_string() }
+    }
+
+    #[test]
+    fn an_overflow_panic_with_checks_on_is_not_a_difference() {
+        let off = Config::new("ref", "");
+        let on = Config::new("checks", "-C overflow-checks=on");
+        let panic = ran(101, "thread 'main' panicked: attempt to add with overflow");
+        assert!(!differs(&ran(0, ""), &panic, &off, &on));
+        // the same outputs with the same checks are a real difference
+        let other = Config::new("O3", "-C opt-level=3");
+        assert!(differs(&ran(0, ""), &panic, &off, &other));
+        // a different panic with checks on is still reported
+        assert!(differs(&ran(0, ""), &ran(101, "index out of bounds"), &off, &on));
     }
 }
