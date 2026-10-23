@@ -13,7 +13,6 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 pub use rs_minimizer::control::{best_so_far, install_ctrlc as install_sigint, last_run_complete, set_checkpoint, set_parallel, start_heartbeat, INTERRUPTED};
-pub use rs_minimizer::external::shrinkray_available;
 pub use rs_minimizer::ReduceLog;
 
 static N: AtomicUsize = AtomicUsize::new(0);
@@ -71,13 +70,6 @@ impl Oracle for Interest {
     fn work_dir(&self) -> PathBuf {
         self.work.clone()
     }
-
-    fn external_command(&self, dir: &std::path::Path) -> Option<Vec<String>> {
-        let cfg = dir.join("interest.cfg");
-        std::fs::write(&cfg, self.to_cfg()).ok()?;
-        let me = std::env::current_exe().ok()?;
-        Some(vec![me.display().to_string(), "interesting".into(), "--cfg".into(), cfg.display().to_string(), "--file".into()])
-    }
 }
 
 impl Interest {
@@ -116,7 +108,7 @@ impl Interest {
         interesting
     }
 
-    /// Serialise for the `interesting` subcommand used as treereduce's oracle.
+    /// Serialise for the `interesting` subcommand (the check as a command line, for scripts).
     pub fn to_cfg(&self) -> String {
         format!(
             "rustc={}\na_name={}\na_flags={}\nb_name={}\nb_flags={}\nsig={}\ncompile={}\nrun={}\nwork={}\n",
@@ -217,7 +209,7 @@ pub fn reduce_all(it: &Interest, src: &str, budget: Duration, log: &mut ReduceLo
     let mut hook = |stage: Stage, cur: &str, _deadline: Instant| -> Option<String> {
         match stage {
             // a single case left: drop the harness, a plain `fn main` is what a human would post
-            Stage::AfterLines | Stage::AfterExternal => match flatten(cur) {
+            Stage::Flatten => match flatten(cur) {
                 Some(flat) if flat != cur && it.check(&flat) => {
                     info!("flattened the harness into a plain `fn main` ({} -> {} lines)", cur.lines().count(), flat.lines().count());
                     Some(flat)
@@ -229,7 +221,6 @@ pub fn reduce_all(it: &Interest, src: &str, budget: Duration, log: &mut ReduceLo
                 _ => None,
             },
             Stage::Polish => Some(prefer_println(it, &unalias_black_box(it, cur))),
-            Stage::Unrolled | Stage::BeforeLines => None,
         }
     };
     rs_minimizer::minimize(it, src, &opts, log, &mut hook)

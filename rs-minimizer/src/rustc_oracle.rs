@@ -137,6 +137,11 @@ pub fn crash_signature(stderr: &str, signal: Option<i32>) -> Option<String> {
 }
 
 /// First error of a failed compilation: its code if it has one, else the message.
+/// The needle has to be in the first error: a reduction that breaks the syntax and keeps the original error as a side effect is not what was asked for.
+fn first_error_line(stderr: &str) -> Option<&str> {
+    stderr.lines().find(|l| l.starts_with("error"))
+}
+
 fn first_error(stderr: &str) -> Option<String> {
     let line = stderr.lines().find(|l| l.starts_with("error"))?;
     if let Some(code) = line.strip_prefix("error[").and_then(|r| r.split(']').next()) {
@@ -201,7 +206,7 @@ impl Spec {
             Mode::Error { needle } => {
                 let b = self.compile(path, dir, &self.flags, "a", None)?;
                 let failed = b.compile.code != Some(0) && !b.compile.timed_out;
-                Ok(failed && crash_signature(&b.compile.stderr, b.compile.signal).is_none() && b.compile.stderr.contains(needle.as_str()))
+                Ok(failed && crash_signature(&b.compile.stderr, b.compile.signal).is_none() && first_error_line(&b.compile.stderr).is_some_and(|l| normalise(l).contains(needle.as_str()) || l.contains(needle.as_str())))
             }
             Mode::Output { stdout, needle } => {
                 let b = self.compile(path, dir, &self.flags, "a", None)?;
@@ -228,37 +233,6 @@ impl Spec {
                 Ok(!rb.timed_out && (ra.stdout != rb.stdout || ra.code != rb.code || ra.signal != rb.signal))
             }
         }
-    }
-
-    /// Serialised for the external reducers, which call the oracle from their own processes.
-    pub fn to_text(&self) -> String {
-        let (mode, arg) = match &self.mode {
-            Mode::Crash { signature } => ("crash", signature.clone()),
-            Mode::Error { needle } => ("error", needle.clone()),
-            Mode::Hang { secs } => ("hang", secs.to_string()),
-            Mode::Oom { mb } => ("oom", mb.to_string()),
-            Mode::Differ { other_flags } => ("differ", other_flags.join(" ")),
-            Mode::Output { stdout, needle } => (if *stdout { "stdout" } else { "stderr" }, needle.clone()),
-        };
-        // one value per line; the needle may contain anything but a newline
-        format!("rustc={}\nflags={}\ncompile={}\nrun={}\nmode={mode}\narg={}\n", self.rustc.join(" "), self.flags.join(" "), self.compile_timeout.as_secs(), self.run_timeout.as_secs(), arg.replace('\n', " "))
-    }
-
-    pub fn from_text(text: &str) -> Option<Spec> {
-        let get = |k: &str| text.lines().find_map(|l| l.strip_prefix(&format!("{k}="))).map(str::to_string);
-        let words = |s: String| s.split_whitespace().map(String::from).collect::<Vec<_>>();
-        let arg = get("arg")?;
-        let mode = match get("mode")?.as_str() {
-            "crash" => Mode::Crash { signature: arg },
-            "error" => Mode::Error { needle: arg },
-            "hang" => Mode::Hang { secs: arg.parse().ok()? },
-            "oom" => Mode::Oom { mb: arg.parse().ok()? },
-            "differ" => Mode::Differ { other_flags: words(arg) },
-            "stdout" => Mode::Output { stdout: true, needle: arg },
-            "stderr" => Mode::Output { stdout: false, needle: arg },
-            _ => return None,
-        };
-        Some(Spec { rustc: words(get("rustc")?), flags: words(get("flags")?), mode, compile_timeout: Duration::from_secs(get("compile")?.parse().ok()?), run_timeout: Duration::from_secs(get("run")?.parse().ok()?) })
     }
 }
 
@@ -315,11 +289,9 @@ fn detect_in(spec: &Spec, path: &Path, dir: &Path) -> Option<(Mode, String)> {
 }
 
 /// The oracle for the reducer.
-pub fn oracle(spec: Spec, work: PathBuf, spec_file: PathBuf) -> Cached<impl Fn(&str) -> bool + Sync> {
-    let command = std::env::current_exe().ok().map(|me| vec![me.display().to_string(), "reduce".to_string(), "--check".to_string(), spec_file.display().to_string()]);
+pub fn oracle(spec: Spec, work: PathBuf) -> Cached<impl Fn(&str) -> bool + Sync> {
     let mut o = Cached::new(move |src: &str| spec.check(src));
     o.work = work;
-    o.external = command;
     o
 }
 

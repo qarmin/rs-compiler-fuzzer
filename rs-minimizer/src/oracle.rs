@@ -19,16 +19,11 @@ pub trait Oracle: Sync {
         String::new()
     }
 
-    /// Scratch directory for the external reducers and rustc runs of the passes.
+    /// Scratch directory for the rustc runs of the passes.
     fn work_dir(&self) -> PathBuf {
         std::env::temp_dir().join("rs-minimizer")
     }
 
-    /// Command line (program first) that exits with 0 when the file given as its last argument is interesting; lets external
-    /// reducers such as Shrink Ray call the oracle from their own processes. `None` switches those reducers off.
-    fn external_command(&self, _work: &std::path::Path) -> Option<Vec<String>> {
-        None
-    }
 }
 
 pub(crate) fn hash_text(s: &str) -> u64 {
@@ -45,13 +40,12 @@ pub(crate) fn hash_text(s: &str) -> u64 {
 pub struct Cached<F: Fn(&str) -> bool + Sync> {
     pub predicate: F,
     pub work: PathBuf,
-    pub external: Option<Vec<String>>,
     cache: Mutex<HashMap<u64, bool>>,
 }
 
 impl<F: Fn(&str) -> bool + Sync> Cached<F> {
     pub fn new(predicate: F) -> Self {
-        Cached { predicate, work: std::env::temp_dir().join("rs-minimizer"), external: None, cache: Mutex::new(HashMap::new()) }
+        Cached { predicate, work: std::env::temp_dir().join("rs-minimizer"), cache: Mutex::new(HashMap::new()) }
     }
 }
 
@@ -72,9 +66,6 @@ impl<F: Fn(&str) -> bool + Sync> Oracle for Cached<F> {
         self.work.clone()
     }
 
-    fn external_command(&self, _work: &std::path::Path) -> Option<Vec<String>> {
-        self.external.clone()
-    }
 }
 
 static SCRIPT_RUNS: AtomicUsize = AtomicUsize::new(0);

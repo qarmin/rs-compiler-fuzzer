@@ -23,7 +23,7 @@ pub struct Step {
 /// Version of the minimiser: bump it when a pass is added or improved. The step `minimized` is then open again and the
 /// convergence count starts from zero (the next runs continue from the previous result).
 /// 2: `print!` is turned back into `println!` at the end
-pub const REDUCE_VERSION: u32 = 2;
+pub const REDUCE_VERSION: u32 = 3;
 
 pub const STEPS: &[Step] = &[
     Step { id: "reproduced", title: "Reproduced on stable, beta and nightly (reduced program)", version: 1, code: true, max_age_days: 0 },

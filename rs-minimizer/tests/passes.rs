@@ -76,9 +76,7 @@ fn a_batch_harness_is_reduced_to_plain_code_for_the_needed_case() {
     let _ = full;
     check_oracle(&o, BATCH);
     rs_minimizer::control::set_parallel(8);
-    let mut opts = Options::new(Duration::from_secs(120));
-    opts.use_shrinkray = false;
-    opts.use_treereduce = false;
+    let opts = Options::new(Duration::from_secs(120));
     let mut log = ReduceLog::default();
     let out = minimize(&o, BATCH, &opts, &mut log, &mut |_, _, _| None);
     assert!(!out.contains("macro_rules") && !out.contains("catch_unwind") && !out.contains("set_hook"), "{out}");
@@ -116,9 +114,7 @@ fn the_renamed_program_with_modules_traits_and_generics_becomes_plain_code() {
     let o = prints("0\n");
     check_oracle(&o, &src);
     rs_minimizer::control::set_parallel(8);
-    let mut opts = Options::new(Duration::from_secs(180));
-    opts.use_shrinkray = false;
-    opts.use_treereduce = false;
+    let opts = Options::new(Duration::from_secs(180));
     let mut log = ReduceLog::default();
     let out = minimize(&o, &src, &opts, &mut log, &mut |_, _, _| None);
     for gone in ["mod ", "trait ", "impl "] {
@@ -144,9 +140,7 @@ fn locals_named_like_items_are_renamed_so_that_pasted_bodies_are_not_captured() 
 fn a_trait_method_call_whose_body_uses_a_shadowed_function_is_inlined_and_the_trait_goes() {
     let o = prints("42\n");
     rs_minimizer::control::set_parallel(8);
-    let mut opts = Options::new(Duration::from_secs(120));
-    opts.use_shrinkray = false;
-    opts.use_treereduce = false;
+    let opts = Options::new(Duration::from_secs(120));
     let mut log = ReduceLog::default();
     let out = minimize(&o, CAPTURE, &opts, &mut log, &mut |_, _, _| None);
     assert!(!out.contains("trait ") && !out.contains("impl "), "{out}");
@@ -212,12 +206,10 @@ fn a_hook_that_loses_the_bug_is_discarded() {
     let o = prints("42\n");
     check_oracle(&o, src);
     rs_minimizer::control::set_parallel(8);
-    let mut opts = Options::new(Duration::from_secs(60));
-    opts.use_shrinkray = false;
-    opts.use_treereduce = false;
+    let opts = Options::new(Duration::from_secs(60));
     let mut log = ReduceLog::default();
     // a hook that "rebuilds" the program and breaks it
-    let out = minimize(&o, src, &opts, &mut log, &mut |stage, cur, _| (stage == rs_minimizer::Stage::BeforeLines).then(|| cur.replace("42", "43").replace("6u32 * 7", "6u32 * 8")));
+    let out = minimize(&o, src, &opts, &mut log, &mut |stage, cur, _| (stage == rs_minimizer::Stage::Flatten).then(|| cur.replace("42", "43").replace("6u32 * 7", "6u32 * 8")));
     assert_prints(&out, "42\n");
     assert!(log.0.iter().any(|l| l.contains("not interesting - discarded")), "{:?}", log.0);
 }
@@ -276,8 +268,7 @@ fn a_run_that_finds_nothing_hands_the_input_back_unchanged() {
     let src = "fn main() {\n    println!(\"{}\", 6 * 7);\n}\n";
     let o = prints("42\n");
     rs_minimizer::control::set_parallel(8);
-    let mut opts = Options::new(Duration::from_secs(40));
-    opts.use_shrinkray = false;
+    let opts = Options::new(Duration::from_secs(40));
     let mut log = ReduceLog::default();
     let out = minimize(&o, src, &opts, &mut log, &mut |_, _, _| None);
     assert_prints(&out, "42\n");

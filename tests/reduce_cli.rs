@@ -25,7 +25,7 @@ fn reduces_with_a_test_script_and_keeps_what_the_script_needs() {
     let status = Command::new(env!("CARGO_BIN_EXE_rs-compiler-fuzzer"))
         .arg("reduce")
         .arg(&input)
-        .args(["--test", &script.display().to_string(), "-o", &out.display().to_string(), "--budget", "60", "--jobs", "4", "--rustc", "", "--no-shrinkray", "--no-treereduce", "--log", &log.display().to_string()])
+        .args(["--test", &script.display().to_string(), "-o", &out.display().to_string(), "--budget", "60", "--jobs", "4", "--rustc", "", "--log", &log.display().to_string()])
         .status()
         .unwrap();
     assert!(status.success());
@@ -71,7 +71,7 @@ fn reduce(dir: &std::path::Path, source: &str, extra: &[&str]) -> (std::process:
         .arg(&input)
         .args(["--rustc", if extra.contains(&"-Z treat-err-as-bug=1") { "rustc +nightly" } else { "rustc" }, "-o"])
         .arg(&out)
-        .args(["--budget", "60", "--jobs", "4", "--no-shrinkray", "--no-treereduce"])
+        .args(["--budget", "60", "--jobs", "4"])
         .args(extra)
         .output()
         .unwrap();
@@ -87,7 +87,7 @@ fn a_compile_error_is_found_and_reduced_without_a_script() {
     let (o, result) = reduce(&dir, NOISY_ERROR, &[]);
     assert!(o.status.success(), "{}", text_of(&o));
     assert!(text_of(&o).contains("E0308"), "the detected error is announced:\n{}", text_of(&o));
-    assert!(result.contains("\"text\"") && result.lines().count() <= 3, "{result}");
+    assert!(result.contains("u32") && result.lines().count() <= 3, "{result}");
     assert!(!result.contains("helper") && !result.contains("HashMap"), "{result}");
 }
 
@@ -97,7 +97,7 @@ fn a_compiler_crash_is_found_by_its_flags_and_kept() {
     let (o, result) = reduce(&dir, NOISY_ERROR, &["--flags", "-Z treat-err-as-bug=1"]);
     assert!(o.status.success(), "{}", text_of(&o));
     assert!(text_of(&o).contains("the compiler crashes"), "{}", text_of(&o));
-    assert!(result.contains("\"text\"") && result.lines().count() <= 3, "{result}");
+    assert!(result.contains("u32") && result.lines().count() <= 3, "{result}");
 }
 
 #[test]

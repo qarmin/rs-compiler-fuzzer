@@ -1,6 +1,6 @@
 # rs-minimizer
 
-Test-case reducer for Rust programs. It does what Shrink Ray, treereduce and C-Vise do badly on generated or machine-renamed code, and drives them as external tools on top.
+Test-case reducer for Rust programs. It does what generic reducers (Shrink Ray, treereduce, C-Vise) do badly on generated or machine-renamed code; all passes are built in, no external reducer is used. In a terminal it shows a dashboard (`--ui auto|tui|basic`).
 
 ```
 rs-compiler-fuzzer reduce INPUT.rs --test ./check.sh -o small.rs
@@ -10,7 +10,7 @@ rs-compiler-fuzzer reduce INPUT.rs --test ./check.sh -o small.rs
 
 ## Flow
 
-Cheap deletions come first (comments, items together with the code that mentions them, items, lines), repeated while a round removes a tenth of the program, and nothing is expanded or inlined yet. The passes that grow or probe the program (unroll, structure, inlining, peephole) wait until it has fewer than 2000 lines or 30 seconds have passed; the many-oracle-call passes (peephole 800 lines, tokens 4000 tokens) only run on small programs. Every line of the log names the pass that produced it: `[rs-minimizer: lines]`, `[shrinkray]`, `[treereduce-rust]`.
+Cheap deletions come first (comments, items together with the code that mentions them, items, lines), repeated while a round removes a tenth of the program, and nothing is expanded or inlined yet. The passes that grow or probe the program (unroll, structure, inlining, peephole) wait until it has fewer than 2000 lines or 30 seconds have passed; the many-oracle-call passes (peephole 800 lines, tokens 4000 tokens) only run on small programs. Every line of the log names the pass that produced it: `[rs-minimizer: lines]`.
 
 ## Passes (roughly in the order they run)
 
@@ -19,7 +19,7 @@ Cheap deletions come first (comments, items together with the code that mentions
 3. **Items** - whole functions, impls, structs, `use`, ... and attributes as deletion units; comments and blank lines.
 4. **Lines** - ddmin with several candidates tested at once.
 5. **Dead code** - one `rustc` run lists unused items and imports, they go together with the `impl` blocks that mention them.
-6. **Shrink Ray** - before and after the flattening and inlining above (so that it does not have to deal with macros and modules, and the flattening is not undone by its renaming); **treereduce-rust** runs as the last reducer. It stops by itself when a pass finds nothing to delete, which on a small program takes a second.
+6. **Brackets** - hollowing out a bracket pair, removing the brackets, lifting the contents of a block, deleting lexemes (the ideas of Shrink Ray, rewritten here and checked by the oracle after every step).
 7. **Inlining** - calls of functions and methods are replaced by their bodies (`f(a)` -> `{ let x = a; BODY }`, `r.m(a)` -> `{ let (__s, x) = (&r, a); BODY }`), so the function, its impl, its trait and the generic parameter that only existed for it can be deleted. Duplicate function names are made distinct first; bodies with `return`/`?` are never pasted.
 8. **Structure** - a newtype struct replaced by its field (`W(x)` -> `(x)`, `W` -> `T`, `x.0` -> `x` or `*x` depending on how `x` was declared), function bodies stubbed with `unimplemented!()`, unused parameters removed together with the matching argument of every call, unused struct fields removed together with their initialisers, enum variants removed together with the match arms that name them.
 9. **Peephole** (C-Vise `peep`/`balanced`, Shrink Ray `replace_identifiers_with_zero`) - every call, identifier, parenthesised group and block tried as `0`, one operand kept of every binary expression, `let mut` -> `let`, `&mut` -> `&`, `+=` -> `=`.

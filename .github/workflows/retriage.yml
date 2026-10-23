@@ -66,8 +66,6 @@ jobs:
         run: |
           for c in stable beta nightly; do rustup toolchain install $c --profile minimal; done
           rustup component add miri rust-src --toolchain nightly || echo "miri unavailable on this nightly"
-          [ -d "$HOME/sr" ] || { python3 -m venv "$HOME/sr" && "$HOME/sr/bin/pip" install -q shrinkray || echo "shrinkray unavailable"; }
-          echo "$HOME/sr/bin" >> "$GITHUB_PATH"
           [ -x "$HOME/.cargo/bin/cargo-bisect-rustc" ] || cargo +stable install cargo-bisect-rustc --locked || echo "cargo-bisect-rustc unavailable"
       - run: cargo +stable build --release
 

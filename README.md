@@ -41,8 +41,7 @@ rs-compiler-fuzzer reduce bug.rs --test ./check.sh                              
 ```
 
 It uses every core (`--jobs`), stops after `--budget` seconds (default 600), writes the best program found so far to the output
-file on every improvement, and Ctrl+C keeps it. [Shrink Ray](https://github.com/DRMacIver/shrinkray) (`pip install shrinkray`) is used when installed, and
-[treereduce-rust](https://github.com/langston-barrett/treereduce) can be added with `--treereduce` (off by default: it rarely finds anything the built-in passes miss).
+file on every improvement, and Ctrl+C keeps it. In a terminal it shows a dashboard (size over time, the last reduction as a diff, what each pass achieved); `--ui basic` gives the plain log, which is also used when stdout is not a terminal. Everything is built in, no other reducer has to be installed.
 Before it touches anything it checks that the file shows the problem, so a wrong flag shows up at once. A project with several
 files has to be put into one (`cargo expand`, or `rustc -Z unpretty=expanded`) first.
 
@@ -157,8 +156,7 @@ by hand. The `*-checks` configs and `PANIC` lines can also point at a generator 
   - **00:00 UTC daily**: nightly **and** stable, `full` profile, 2 hours per job (jobs are limited to ~2h50);
   - **manual dispatch**: duration, profile, scale, strategy groups, toolchains, seed are inputs.
   One job per (toolchain, strategy group): 7 groups x 2 toolchains = 14 jobs. Each job runs the canaries,
-  fuzzes, then **triages** the new findings (`triage`: reproduces on stable/beta/nightly, reduces with the
-  [Shrink Ray](https://github.com/DRMacIver/shrinkray) (`pip install shrinkray`; by far the best on expression chains) after flattening the harness into a plain `fn main`, plus built-in expression passes and [treereduce-rust](https://github.com/langston-barrett/treereduce) when Shrink Ray is missing, checks the reduced
+  fuzzes, then **triages** the new findings (`triage`: reproduces on stable/beta/nightly, reduces with the built-in passes after flattening the harness into a plain `fn main`, checks the reduced
   program with Miri, searches rust-lang/rust issues with `gh`) and prints the result into the log, the step
   summary and an artifact. Every finding gets a `STATUS.md` with a **checklist** (what is done, what is open - see below) and an `ISSUE.md` draft (plus `ISSUE_TITLE.txt`) in the rust-lang format: the reduced program only, the shortest
   command lines (triage drops every flag the bug does not need: `--edition`, `-C debug-assertions`..., and tries a

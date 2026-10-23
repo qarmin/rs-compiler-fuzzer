@@ -104,9 +104,7 @@ fn the_trait_and_wrapper_example_becomes_a_few_lines_of_plain_code() {
     let o = prints("42");
     check_oracle(&o, src);
     rs_minimizer::control::set_parallel(8);
-    let mut opts = Options::new(Duration::from_secs(120));
-    opts.use_shrinkray = false;
-    opts.use_treereduce = false;
+    let opts = Options::new(Duration::from_secs(120));
     let mut log = ReduceLog::default();
     let out = minimize(&o, src, &opts, &mut log, &mut |_, _, _| None);
     for gone in ["trait ", "impl ", "struct "] {

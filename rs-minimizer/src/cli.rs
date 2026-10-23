@@ -31,9 +31,8 @@ OPTIONS:
   -o, --output FILE  where the result goes (default: FILE.min.rs); it is also the checkpoint, rewritten on every improvement
   --budget SECS      time limit (default 600)
   --jobs N           parallel runs (default: number of cores)
-  --no-shrinkray     do not use Shrink Ray (`pip install shrinkray`; used when installed)
-  --treereduce       also use treereduce-rust (`cargo install treereduce-rust`; off by default, it rarely finds anything more)
   --log FILE         also write the log to FILE
+  --ui MODE          auto (default), tui or basic: a dashboard with a size graph and the last reduction as a diff when stdout is a terminal, the plain log otherwise
 
 Ctrl+C once stops and keeps the best program found so far, twice leaves at once.
 
@@ -50,22 +49,13 @@ fn die(msg: &str) -> ! {
 
 /// The command line of the standalone reducer (`args` without the program name); returns the exit code.
 pub fn run(args: Vec<String>) -> i32 {
-    // the check an external reducer (Shrink Ray, treereduce) calls: `reduce --check SPEC FILE`
-    if args.first().map(String::as_str) == Some("--check") {
-        let spec = args.get(1).and_then(|f| std::fs::read_to_string(f).ok()).and_then(|t| Spec::from_text(&t));
-        let src = args.get(2).and_then(|f| std::fs::read_to_string(f).ok());
-        return match (spec, src) {
-            (Some(spec), Some(src)) if spec.check(&src) => 0,
-            _ => 1,
-        };
-    }
     let (mut input, mut test, mut output, mut log_file) = (None::<PathBuf>, None::<String>, None::<PathBuf>, None::<PathBuf>);
+    let mut ui_mode = "auto".to_string();
     let mut budget = 600u64;
     let mut jobs = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
     let mut rustc = "rustc".to_string();
     let mut flags = String::new();
     let (mut compile_secs, mut run_secs) = (120u64, 20u64);
-    let (mut shrinkray, mut treereduce) = (true, false);
     // explicit modes: (name, optional argument)
     let mut wanted: Option<(String, Option<String>)> = None;
     let mut it = args.iter().peekable();
@@ -85,9 +75,7 @@ pub fn run(args: Vec<String>) -> i32 {
             "--rustc" => rustc = val(),
             "--flags" => flags = val(),
             "--log" => log_file = Some(PathBuf::from(val())),
-            "--no-shrinkray" => shrinkray = false,
-            "--no-treereduce" => treereduce = false,
-            "--treereduce" => treereduce = true,
+            "--ui" => ui_mode = val(),
             "--ice" => wanted = Some(("ice".into(), None)),
             "--auto" => wanted = None,
             "--error" | "--hang" => {
@@ -105,7 +93,14 @@ pub fn run(args: Vec<String>) -> i32 {
     let input = input.unwrap_or_else(|| die("FILE.rs is required (see --help)"));
     let output = output.unwrap_or_else(|| input.with_extension("min.rs"));
 
-    let mut loggers: Vec<Box<dyn handsome_logger::SharedLogger>> = vec![TermLogger::new(Config::default(), TerminalMode::Mixed, ColorChoice::Auto)];
+    let ui = crate::ui::wanted(&ui_mode);
+    if ui && log_file.is_none() {
+        log_file = Some(output.with_extension("log"));
+    }
+    let mut loggers: Vec<Box<dyn handsome_logger::SharedLogger>> = Vec::new();
+    if !ui {
+        loggers.push(TermLogger::new(Config::default(), TerminalMode::Mixed, ColorChoice::Auto));
+    }
     if let Some(f) = &log_file {
         match std::fs::OpenOptions::new().create(true).append(true).open(f) {
             Ok(file) => loggers.push(WriteLogger::new(Config::default(), file)),
@@ -127,7 +122,6 @@ pub fn run(args: Vec<String>) -> i32 {
         }
         let mut oracle = Cached::new(script_predicate(command.clone(), work.clone()));
         oracle.work = work.clone();
-        oracle.external = Some(command.iter().map(|c| std::path::absolute(c).ok().filter(|p| p.exists()).map(|p| p.display().to_string()).unwrap_or_else(|| c.clone())).collect());
         Box::new(oracle)
     } else {
         if rustc.trim().is_empty() {
@@ -164,9 +158,7 @@ pub fn run(args: Vec<String>) -> i32 {
         // the passes that compile for their own diagnostics (dead code, renames, inlining) need a program that compiles
         uses_rustc_passes = matches!(mode, Mode::Differ { .. } | Mode::Output { .. });
         spec.mode = mode;
-        let spec_file = work.join("spec.cfg");
-        let _ = std::fs::write(&spec_file, spec.to_text());
-        Box::new(crate::rustc_oracle::oracle(spec, work.clone(), spec_file))
+        Box::new(crate::rustc_oracle::oracle(spec, work.clone()))
     };
 
     if !oracle.check(&src) {
@@ -178,12 +170,17 @@ pub fn run(args: Vec<String>) -> i32 {
     set_checkpoint(Some(output.clone()));
     let mut opts = Options::new(Duration::from_secs(budget));
     opts.rustc = if uses_rustc_passes { words(&rustc) } else { Vec::new() };
-    opts.use_shrinkray = shrinkray;
-    opts.use_treereduce = treereduce;
+    if ui {
+        let log_name = log_file.as_ref().map(|f| f.display().to_string()).unwrap_or_default();
+        crate::ui::start(&input.display().to_string(), Duration::from_secs(budget), (src.lines().count(), src.len()), &output.display().to_string(), &log_name);
+    }
     let mut log = ReduceLog::default();
     let result = minimize(&*oracle, &src, &opts, &mut log, &mut |_, _, _| None);
     let _ = std::fs::write(&output, &result);
     let _ = std::fs::remove_dir_all(&work);
     log::info!("done: {} -> {} lines, written to {}", src.lines().count(), result.lines().count(), output.display());
+    if ui {
+        crate::ui::stop(&[format!("{} lines / {} bytes -> {} lines / {} bytes, written to {}", src.lines().count(), src.len(), result.lines().count(), result.len(), output.display())]);
+    }
     0
 }

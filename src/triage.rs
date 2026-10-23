@@ -2,7 +2,7 @@
 //!
 //! For one finding directory (`case.rs` + `repro.cfg`) this
 //!  1. re-runs it on every installed channel (stable/beta/nightly),
-//!  2. reduces it (line/let/call-chain passes + `treereduce-rust`) -> `reduced.rs`,
+//!  2. reduces it (the built-in passes) -> `reduced.rs`,
 //!  3. checks the reduced program with Miri (undefined behaviour / does Miri agree with one side?),
 //!  4. searches GitHub for already reported issues (needs an authenticated `gh`),
 //!  5. writes `status.cfg`, `STATUS.md`, `ISSUE.md` and a "Status" block at the top of `report.md`,
@@ -959,7 +959,7 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     } else if rl > 300 {
         put(&mut st, "minimized", "partial", "", format!("still {rl} lines and no single case shows it on its own: it depends on the size/shape of the whole program (inlining or similar) - needs a longer reduction or a hand investigation"));
     } else {
-        let extra = if rl > 80 { format!(" - but still {rl} lines: reduce further by hand (tools/reduce.py, treereduce-rust)") } else { String::new() };
+        let extra = if rl > 80 { format!(" - but still {rl} lines: reduce further by hand (tools/reduce.py)") } else { String::new() };
         put(&mut st, "minimized", "done", "", format!("{min_status}, {rl} lines after {min_runs} run(s){extra}"));
     }
     if still && flags_reused {

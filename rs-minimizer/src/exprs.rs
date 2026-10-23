@@ -360,17 +360,37 @@ pub(crate) fn greedy_edits(it: &dyn Oracle, src: &str, mut edits: Vec<(usize, us
         let batch: Vec<(usize, usize, String)> = edits.iter().take(width).cloned().collect();
         let cands: Vec<String> = batch.iter().map(|(s, e, t)| format!("{}{}{}", &cur[..*s], t, &cur[*e..])).collect();
         let res = par_map(&cands, width, |c| !c.trim().is_empty() && it.check(c));
-        match res.iter().position(|&ok| ok) {
-            Some(p) => {
-                let s = batch[p].0;
-                cur = cands[p].clone();
-                // edits that lay inside or behind the changed text are recomputed by the caller's next round
-                edits.retain(|e| e.1 <= s);
-            }
-            None => {
-                edits.drain(..batch.len());
-            }
+        let winners: Vec<usize> = res.iter().enumerate().filter(|(_, ok)| **ok).map(|(i, _)| i).collect();
+        if winners.is_empty() {
+            edits.drain(..batch.len());
+            continue;
         }
+        // several accepted on their own: all of them together in one more oracle call (when they do not overlap)
+        let build = |subset: &[usize]| -> Option<String> {
+            let mut chosen: Vec<&(usize, usize, String)> = subset.iter().map(|&i| &batch[i]).collect();
+            chosen.sort_by_key(|e| e.0);
+            if chosen.windows(2).any(|w| w[0].1 > w[1].0) {
+                return None;
+            }
+            let mut t = cur.clone();
+            for (s, e, r) in chosen.iter().rev() {
+                t.replace_range(*s..*e, r);
+            }
+            Some(t)
+        };
+        let (applied, text) = match crate::combine::merge_winners(it, &winners, build) {
+            Some(m) => m,
+            None => (vec![winners[0]], cands[winners[0]].clone()),
+        };
+        let lowest = applied.iter().map(|&i| batch[i].0).min().unwrap_or(0);
+        cur = text;
+        // edits behind the changed text are recomputed by the caller's next round; the others of this batch that were fine on their own
+        // and lie before the change are tried again
+        let again: Vec<(usize, usize, String)> = winners.iter().filter(|w| !applied.contains(w)).map(|&i| batch[i].clone()).filter(|e| e.1 <= lowest).collect();
+        edits.drain(..batch.len());
+        edits.retain(|e| e.1 <= lowest);
+        edits.extend(again);
+        edits.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
     }
     cur
 }

@@ -34,12 +34,12 @@ USAGE:
   rs-compiler-fuzzer triage --dir DIR   reproduce on all channels, reduce, Miri-check, search GitHub, write STATUS.md/ISSUE.md/verdict
                             (--bisect SECS: find the first stable release / nightly that has the bug; --dirs ROOT: every finding below ROOT; --budget SECS reduction time per finding; --no-search; --no-reduce; --limit N)
   rs-compiler-fuzzer minimize DIR       local, long minimisation of one stored finding on all cores (--jobs N, --budget SECS per run, --deadline SECS overall,
-                            --bisect SECS, --search, --no-force = skip a finding that already converged); Ctrl+C keeps the best program and rewrites ISSUE.md/STATUS.md/finding.json; run it again to continue
+                            --bisect SECS, --search, --no-force = skip a finding that already converged, --ui auto|tui|basic: dashboard with a size graph and the last diff in a terminal, plain log otherwise); Ctrl+C keeps the best program and rewrites ISSUE.md/STATUS.md/finding.json; run it again to continue
   rs-compiler-fuzzer retriage --pkg DIR  triage again (in place) every stored finding with an older fuzzer_id (--shard I/N, --limit N, --deadline SECS, --budget, --bisect; --finding NAME: just that one, minimised again)
   rs-compiler-fuzzer pack --pkg DIR     merge finding directories (--add DIR, repeatable) into an unpacked package, rebuild INDEX.md
                             (--toolchain NAME records where they were found; --contains KEYS_FILE checks that keys are present)
   rs-compiler-fuzzer reduce FILE.rs --test CMD    reduce any Rust file while CMD (given the candidate path, exit 0 = still interesting) succeeds; --help for the options
-  rs-compiler-fuzzer interesting --cfg FILE --file F   oracle for external reducers (exit 0 = still interesting)
+  rs-compiler-fuzzer interesting --cfg FILE --file F   the check as a command line (exit 0 = still interesting), for scripts
   rs-compiler-fuzzer list               list strategies and default configurations
 
 OPTIONS:
@@ -69,9 +69,10 @@ gen only:
 ";
 
 /// Terminal logger; the long-running local commands also write to `tmp/<command>.log` (appended, no colours).
-fn init_logging(cmd: &str) {
+fn init_logging(cmd: &str, ui: bool) {
     use handsome_logger::{ColorChoice, CombinedLogger, Config, ConfigBuilder, LevelFilter, TermLogger, TerminalMode, WriteLogger};
-    let mut loggers: Vec<Box<dyn handsome_logger::SharedLogger>> = vec![TermLogger::new(Config::default(), TerminalMode::Mixed, ColorChoice::Auto)];
+    // with the dashboard on the screen the log goes to the file only
+    let mut loggers: Vec<Box<dyn handsome_logger::SharedLogger>> = if ui { Vec::new() } else { vec![TermLogger::new(Config::default(), TerminalMode::Mixed, ColorChoice::Auto)] };
     // the long-running commands also write a much more detailed log to a file (debug level: every improvement, every pass start), which
     // the CI jobs keep as an artifact
     if matches!(cmd, "minimize" | "triage" | "retriage") {
@@ -102,7 +103,9 @@ fn main() {
         // the standalone reducer of any Rust file (its own logger, its own options)
         std::process::exit(rs_minimizer::cli::run(args[1..].to_vec()));
     }
-    init_logging(&cmd);
+    let ui_arg = args.windows(2).find(|w| w[0] == "--ui").map(|w| w[1].clone()).unwrap_or_else(|| "auto".to_string());
+    let ui = cmd == "minimize" && rs_minimizer::ui::wanted(&ui_arg);
+    init_logging(&cmd, ui);
     let mut seed: Option<u64> = None;
     let mut duration = None;
     let mut rounds = None;
@@ -180,7 +183,7 @@ fn main() {
             "--profile" => profile = val(),
             "--budget" => budget = num(val()),
             "--no-search" => no_search = true,
-            "--search" | "--no-force" | "--no-shrinkray" if cmd == "minimize" => {}
+            "--search" | "--no-force" if cmd == "minimize" => {}
             "--no-reduce" => no_reduce = true,
             "--bisect" => bisect_secs = num(val()),
             "--shard" => shard = val(),
@@ -195,6 +198,9 @@ fn main() {
             "--contains" => contains = Some(PathBuf::from(val())),
             "--skip" => skip_file = Some(PathBuf::from(val())),
             "--finding" => finding = Some(val()),
+            "--ui" => {
+                let _ = val();
+            }
             "--budget-max" => budget_max = num(val()),
             "--minimize-secs" => minimize_secs = num(val()),
             "--strategy" => strategy = Some(val()),
@@ -272,9 +278,6 @@ fn main() {
             let flag_given = |f: &str| args.iter().any(|a| a == f);
             let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
             let par = if flag_given("--jobs") { jobs } else { cores };
-            if !reduce::shrinkray_available() && !flag_given("--no-shrinkray") {
-                die("shrinkray not found - the built-in passes alone give poor results. Run `just setup` (uses uv when available), set SHRINKRAY=/path/to/shrinkray, or pass --no-shrinkray to go on without it");
-            }
             reduce::set_parallel(par);
             reduce::install_sigint();
             let per_run = if flag_given("--budget") { budget } else { 4 * 3600 };
@@ -286,6 +289,10 @@ fn main() {
             info!("minimize {}: {par} parallel jobs on {cores} cores, up to {per_run}s per pass over everything, {total}s overall", dir.display());
             info!("Ctrl+C once = stop and write everything up, twice = leave at once (reduced.rs is saved on every improvement)");
             reduce::start_heartbeat(Duration::from_secs(30));
+            if ui {
+                let case = std::fs::read_to_string(dir.join("case.rs")).unwrap_or_default();
+                rs_minimizer::ui::start(&dir.display().to_string(), Duration::from_secs(total), (case.lines().count(), case.len()), &format!("{}/reduced.rs", dir.display()), "tmp/minimize.log");
+            }
             let mut runs = 0;
             loop {
                 runs += 1;
@@ -317,6 +324,14 @@ fn main() {
             }
             let _ = std::fs::remove_dir_all(out.join("work"));
             info!("done: {}/reduced.rs, ISSUE.md, STATUS.md", dir.display());
+            if ui {
+                let case = std::fs::read_to_string(dir.join("case.rs")).unwrap_or_default();
+                let red = std::fs::read_to_string(dir.join("reduced.rs")).unwrap_or_default();
+                rs_minimizer::ui::stop(&[
+                    format!("{}: {} lines / {} bytes -> {} lines / {} bytes ({:.1}% fewer bytes), status: {}", dir.display(), case.lines().count(), case.len(), red.lines().count(), red.len(), 100.0 * (case.len() as f64 - red.len() as f64) / case.len().max(1) as f64, status_of(&dir)),
+                    format!("written: {0}/reduced.rs, {0}/ISSUE.md, {0}/STATUS.md; the full log: tmp/minimize.log", dir.display()),
+                ]);
+            }
             std::process::exit(0);
         }
         "retriage" => {

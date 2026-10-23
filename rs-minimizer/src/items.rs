@@ -213,18 +213,25 @@ pub(crate) fn delete_ranges(it: &dyn Oracle, src: &str, mut ranges: Vec<(usize, 
         let batch: Vec<(usize, usize)> = ranges.iter().take(width).copied().collect();
         let cands: Vec<String> = batch.iter().map(|&(s, e)| format!("{}{}", &cur[..s], &cur[e..])).collect();
         let res = par_map(&cands, width, |c| !c.trim().is_empty() && it.check(c));
-        match res.iter().position(|&ok| ok) {
-            Some(p) => {
-                let (s, e) = batch[p];
-                cur = cands[p].clone();
-                let removed = e - s;
-                // what lay inside is gone, what lay after moved; what lay before is untouched
-                ranges = ranges.into_iter().filter(|&(a, z)| z <= s || a >= e).map(|(a, z)| if a >= e { (a - removed, z - removed) } else { (a, z) }).collect();
-            }
-            None => {
-                ranges.drain(..batch.len());
-            }
-        }
+        let winners: Vec<usize> = res.iter().enumerate().filter(|(_, ok)| **ok).map(|(k, _)| k).collect();
+        let Some(first) = winners.first().copied() else {
+            ranges.drain(..batch.len());
+            continue;
+        };
+        // ranges that were each fine on their own: all together in one more oracle call
+        let build = |subset: &[usize]| -> Option<String> {
+            let sets: Vec<Vec<(usize, usize)>> = subset.iter().map(|&k| vec![batch[k]]).collect();
+            let refs: Vec<&[(usize, usize)]> = sets.iter().map(|v| v.as_slice()).collect();
+            Some(crate::combine::without_ranges(&cur, &crate::combine::disjoint_union(&refs)))
+        };
+        let (applied, text) = crate::combine::merge_winners(it, &winners, build).unwrap_or((vec![first], cands[first].clone()));
+        let sets: Vec<Vec<(usize, usize)>> = applied.iter().map(|&k| vec![batch[k]]).collect();
+        let refs: Vec<&[(usize, usize)]> = sets.iter().map(|v| v.as_slice()).collect();
+        let removed = crate::combine::disjoint_union(&refs);
+        cur = text;
+        // what lay inside is gone, what lay after moved; what lay before is untouched
+        ranges = ranges.into_iter().filter_map(|r| remap(r, &removed)).collect();
+        ranges.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
     }
     cur
 }
@@ -353,7 +360,7 @@ fn merge_ranges(mut ranges: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
 
 /// Groups of ranges deleted together (an item and everything that mentions it): ddmin over the groups, chunks of neighbouring
 /// groups first, then smaller ones, down to single groups.
-pub(crate) fn delete_groups(it: &dyn Oracle, src: &str, mut groups: Vec<Vec<(usize, usize)>>, deadline: Instant) -> String {
+pub fn delete_groups(it: &dyn Oracle, src: &str, mut groups: Vec<Vec<(usize, usize)>>, deadline: Instant) -> String {
     let mut cur = src.to_string();
     // neighbours in the text are neighbours in the list
     groups.sort_by_key(|g| g.iter().map(|r| r.0).min().unwrap_or(0));
@@ -376,14 +383,25 @@ pub(crate) fn delete_groups(it: &dyn Oracle, src: &str, mut groups: Vec<Vec<(usi
             let merged: Vec<Vec<(usize, usize)>> = starts.iter().map(|&s| merge_ranges(groups[s as usize..s as usize + n].iter().flatten().copied().collect())).collect();
             let cands: Vec<String> = merged.iter().map(|m| cut(&cur, m)).collect();
             let res = par_map(&cands, width, |c| !c.trim().is_empty() && it.check(c));
-            match res.iter().position(|&ok| ok) {
-                Some(p) => {
-                    let s = starts[p] as usize;
-                    let removed = merged[p].clone();
-                    cur = cands[p].clone();
-                    groups.drain(s..s + n);
+            let winners: Vec<usize> = res.iter().enumerate().filter(|(_, ok)| **ok).map(|(k, _)| k).collect();
+            match winners.first().copied() {
+                Some(first) => {
+                    let build = |subset: &[usize]| -> Option<String> {
+                        let sets: Vec<&[(usize, usize)]> = subset.iter().map(|&k| merged[k].as_slice()).collect();
+                        Some(crate::combine::without_ranges(&cur, &crate::combine::disjoint_union(&sets)))
+                    };
+                    let (applied, text) = crate::combine::merge_winners(it, &winners, build).unwrap_or((vec![first], cands[first].clone()));
+                    let sets: Vec<&[(usize, usize)]> = applied.iter().map(|&k| merged[k].as_slice()).collect();
+                    let removed = crate::combine::disjoint_union(&sets);
+                    cur = text;
+                    // the chunks that were applied leave the list, highest first (the lower ones keep their index)
+                    let mut chunk_starts: Vec<usize> = applied.iter().map(|&k| starts[k] as usize).collect();
+                    chunk_starts.sort_unstable_by(|a, b| b.cmp(a));
+                    for s in &chunk_starts {
+                        groups.drain(*s..*s + n);
+                    }
                     groups = groups.into_iter().filter_map(|g| g.into_iter().map(|r| remap(r, &removed)).collect::<Option<Vec<_>>>()).collect();
-                    i = (s as isize).min(groups.len() as isize - n as isize);
+                    i = (*chunk_starts.last().unwrap() as isize).min(groups.len() as isize - n as isize);
                 }
                 None => i = starts.last().copied().unwrap_or(0) - n as isize,
             }
@@ -608,10 +626,28 @@ fn ddmin_siblings(it: &dyn Oracle, cur: &mut String, mut list: Vec<(usize, usize
             };
             let cands: Vec<String> = plans.iter().map(|p| cut(p)).collect();
             let res = par_map(&cands, width, |c| !c.trim().is_empty() && it.check(c));
-            match res.iter().position(|&ok| ok) {
-                Some(p) => {
-                    let removed = &plans[p];
-                    *cur = cands[p].clone();
+            let winners: Vec<usize> = res.iter().enumerate().filter(|(_, ok)| **ok).map(|(k, _)| k).collect();
+            match winners.first().copied() {
+                Some(first) => {
+                    // chunks that were each fine on their own: all together in one more oracle call
+                    let build = |subset: &[usize]| -> Option<String> {
+                        let mut all = vec![false; list.len()];
+                        for &k in subset {
+                            for (j, r) in plans[k].iter().enumerate() {
+                                all[j] |= *r;
+                            }
+                        }
+                        Some(cut(&all))
+                    };
+                    let (applied, text) = crate::combine::merge_winners(it, &winners, build).unwrap_or((vec![first], cands[first].clone()));
+                    let mut removed = vec![false; list.len()];
+                    for &k in &applied {
+                        for (j, r) in plans[k].iter().enumerate() {
+                            removed[j] |= *r;
+                        }
+                    }
+                    let resume = applied.iter().map(|&k| starts[k]).min().unwrap_or(0);
+                    *cur = text;
                     let mut shift = 0;
                     let mut kept: Vec<(usize, usize)> = Vec::new();
                     for (j, &(a, z)) in list.iter().enumerate() {
@@ -627,7 +663,7 @@ fn ddmin_siblings(it: &dyn Oracle, cur: &mut String, mut list: Vec<(usize, usize
                     }
                     units = units_of(cur, &list);
                     // the units before the removed ones are the same units
-                    i = starts[p].min(units.len() as isize - n as isize);
+                    i = resume.min(units.len() as isize - n as isize);
                 }
                 None => i = starts.last().copied().unwrap_or(0) - n as isize,
             }

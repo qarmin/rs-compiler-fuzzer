@@ -83,12 +83,3 @@ fn crash_signatures_ignore_numbers_and_quoted_names() {
     assert!(crash_signature("error[E0308]: mismatched types", None).is_none());
     assert!(crash_signature("", Some(11)).is_some(), "a segmentation fault is a crash");
 }
-
-#[test]
-fn the_spec_survives_the_trip_through_a_file() {
-    let s = spec(&["-C", "opt-level=3"], Mode::Differ { other_flags: vec!["-C".into(), "opt-level=0".into()] });
-    let back = Spec::from_text(&s.to_text()).unwrap();
-    assert_eq!(back.mode, s.mode);
-    assert_eq!(back.flags, s.flags);
-    assert_eq!(back.rustc, s.rustc);
-}

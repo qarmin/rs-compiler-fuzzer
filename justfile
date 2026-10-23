@@ -182,7 +182,6 @@ doctor:
         fi
     }
     has() { command -v "$1" >/dev/null 2>&1; }
-    shrinkray_exe="${SHRINKRAY:-shrinkray}"
 
     echo "Toolchain Rust:"
     check "rustc"                        rustc --version
@@ -197,14 +196,11 @@ doctor:
 
     echo ""
     echo "Narzedzia minimalizacji i triage (jobs = $(nproc)):"
-    check "shrinkray (wymagany do minimize)" "$shrinkray_exe" --version
     check "python3"                      python3 --version
     check "curl (just download)"         curl --version
     check "unzip (just download)"        unzip -v
     check "timeout"                      timeout --version
     check "nproc"                        nproc
-    info "uv (instaluje shrinkray)"     uv --version
-    info "treereduce-rust"               treereduce-rust --version
     info "cargo-bisect-rustc (bisect)"   cargo-bisect-rustc --version
     info "gh (upstream search)"          gh --version
     info "cargo-edit (just upgrade)"     cargo upgrade --version
@@ -218,9 +214,6 @@ doctor:
     info "nightly: llvm-tools-preview"   bash -c "rustup component list --toolchain nightly --installed | grep -q llvm-tools"
 
     echo ""
-    if ! has shrinkray && [ -z "${SHRINKRAY:-}" ]; then
-        echo "Bez shrinkray 'minimize' uzywa tylko wlasnych, slabszych przejsc."
-    fi
     if [ "$fail" -eq 0 ]; then
         echo "Wszystko OK."
     else
@@ -234,7 +227,6 @@ doctor-quick:
     #!/usr/bin/env bash
     missing=""
     for t in rustc cargo rustup timeout python3; do command -v $t >/dev/null 2>&1 || missing="$missing $t"; done
-    command -v "${SHRINKRAY:-shrinkray}" >/dev/null 2>&1 || missing="$missing shrinkray"
     rustup run nightly rustc --version >/dev/null 2>&1 || missing="$missing nightly-toolchain"
     if [ -n "$missing" ]; then echo "missing:$missing - run 'just doctor' and 'just setup'"; exit 1; fi
 
@@ -246,21 +238,7 @@ setup:
     rustup toolchain install stable --profile minimal -c rustfmt -c clippy
     rustup toolchain install nightly --profile minimal -c rustfmt -c clippy -c miri -c rust-src -c llvm-tools-preview
     command -v cargo-upgrade >/dev/null 2>&1 || cargo install cargo-edit --locked
-    command -v treereduce-rust >/dev/null 2>&1 || cargo install treereduce-rust --locked || true
     command -v cargo-bisect-rustc >/dev/null 2>&1 || cargo install cargo-bisect-rustc --locked || true
-    if ! command -v "${SHRINKRAY:-shrinkray}" >/dev/null 2>&1; then
-        if command -v uv >/dev/null 2>&1; then
-            uv tool install shrinkray
-        else
-            echo "uv not found (preferred, https://docs.astral.sh/uv) - falling back to a venv with pip"
-            venv="$HOME/.local/share/shrinkray-venv"
-            python3 -m venv "$venv"
-            "$venv/bin/pip" install -q shrinkray
-            mkdir -p "$HOME/.local/bin"
-            ln -sf "$venv/bin/shrinkray" "$HOME/.local/bin/shrinkray"
-        fi
-        echo "shrinkray installed; ~/.local/bin has to be on PATH"
-    fi
     for t in curl unzip; do
         command -v $t >/dev/null 2>&1 || echo "$t not found - install it with: sudo apt install $t"
     done
