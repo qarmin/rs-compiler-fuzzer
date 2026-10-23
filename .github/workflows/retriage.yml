@@ -70,6 +70,21 @@ jobs:
           [ -x "$HOME/.cargo/bin/cargo-bisect-rustc" ] || cargo +stable install cargo-bisect-rustc --locked || echo "cargo-bisect-rustc unavailable"
       - run: cargo +stable build --release
 
+      # The newest nightly is the reference: a bug that no longer reproduces there (two checks in a row) is removed from the
+      # package (`fixed.txt` remembers it). This replaces the former separate verify workflow; one shard does it per run.
+      - name: Verify the stored findings on the newest nightly and remove the fixed ones
+        if: startsWith(matrix.shard, '0/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TOOLCHAIN: nightly
+        run: |
+          export BIN=$PWD/target/release/rs-compiler-fuzzer
+          tools/release_sync.sh tools/verify_mutator.sh
+          {
+            echo "### nightly: stored findings"
+            echo '```'; grep -E '^(STILL|FIXED|REMOVED|verify:)' verify.log || echo '(nothing stored yet)'; echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Download the package
         env:
           GH_TOKEN: ${{ github.token }}

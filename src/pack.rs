@@ -171,13 +171,19 @@ fn add_word(cfg: &mut Cfg, key: &str, word: &str) {
     }
 }
 
+/// Keys of findings that were removed because they no longer reproduce (`fixed.txt`: key, date, rustc, first seen).
+pub fn fixed_keys(pkg: &Path) -> std::collections::HashSet<String> {
+    std::fs::read_to_string(pkg.join("fixed.txt")).unwrap_or_default().lines().filter_map(|l| l.split('\t').next()).map(String::from).collect()
+}
+
 pub fn run(pkg: &Path, adds: &[PathBuf], toolchain: &str, contains: Option<&Path>) -> i32 {
     let root = pkg.join("findings");
     std::fs::create_dir_all(&root).unwrap();
     if let Some(keys) = contains {
         let mut missing = 0;
+        let fixed = fixed_keys(pkg);
         for k in std::fs::read_to_string(keys).unwrap_or_default().lines().map(str::trim).filter(|l| !l.is_empty()) {
-            if !root.join(k).join("case.rs").exists() {
+            if !root.join(k).join("case.rs").exists() && !fixed.contains(k) {
                 eprintln!("MISSING {k}");
                 missing += 1;
             }
@@ -215,6 +221,11 @@ pub fn run(pkg: &Path, adds: &[PathBuf], toolchain: &str, contains: Option<&Path
                 }
             }
             let dest = root.join(&key);
+            // a triage that was running while the finding got removed must not bring it back
+            if toolchain == "retriage" && !dest.join("case.rs").exists() && fixed_keys(pkg).contains(&key) {
+                println!("SKIPPED {key} (removed: no longer reproduces)");
+                continue;
+            }
             let mut st: Cfg;
             if dest.join("case.rs").exists() {
                 st = read_cfg(&dest.join("status.cfg"));
@@ -311,5 +322,13 @@ pub fn write_index(pkg: &Path) {
         write_finding_json(&root.join(k));
     }
     let _ = writeln!(s, "\n{} findings.", rows.len());
+    let gone = std::fs::read_to_string(pkg.join("fixed.txt")).unwrap_or_default();
+    if !gone.trim().is_empty() {
+        let _ = writeln!(s, "\n## Removed: no longer reproduce on the newest nightly\n\n| finding | removed | checked with | first seen |\n|---|---|---|---|");
+        for l in gone.lines().rev().take(40) {
+            let c: Vec<&str> = l.split('\t').collect();
+            let _ = writeln!(s, "| `{}` | {} | {} | {} |", c.first().unwrap_or(&""), c.get(1).unwrap_or(&""), c.get(2).unwrap_or(&""), c.get(3).unwrap_or(&""));
+        }
+    }
     std::fs::write(pkg.join("INDEX.md"), s).unwrap();
 }

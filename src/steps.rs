@@ -33,6 +33,7 @@ pub const STEPS: &[Step] = &[
     Step { id: "opt_levels", title: "Other optimisation levels (and -Zmir-opt-level=0) tried, results grouped in the issue", version: 2, code: true, max_age_days: 0 },
     Step { id: "ub_check", title: "Checked for undefined behaviour (Miri)", version: 2, code: true, max_age_days: 0 },
     Step { id: "mir_llvm", title: "MIR optimisations or LLVM? (-Zmir-opt-level=0)", version: 1, code: true, max_age_days: 0 },
+    Step { id: "pass_bisect", title: "Culprit optimisation pass found by bisecting the LLVM / MIR passes (nightly)", version: 1, code: true, max_age_days: 0 },
     Step { id: "regression", title: "Regression or long-standing bug? (decides whether the bisection below applies)", version: 1, code: true, max_age_days: 0 },
     Step { id: "bisect_stable", title: "Regression: first stable release that has it", version: 2, code: true, max_age_days: 0 },
     Step { id: "bisect_nightly", title: "Regression: first nightly that has it", version: 2, code: true, max_age_days: 0 },

@@ -130,9 +130,8 @@ by hand. The `*-checks` configs and `PANIC` lines can also point at a generator 
 - **Pipeline**: every fuzz job fuzzes for 45 minutes, stores the raw findings in the package, and then spends about an hour
   triaging what it found (drop unneeded cases, reduce with Shrink Ray, shortest flags, Miri, exact regression range, GitHub
   search), storing each result as soon as it is ready. `retriage.yml` (when a fuzz/miri run ends, and daily at 01:30 UTC, 4
-  shards) continues with everything that has no result yet, an older `fuzzer_id`, or an unsettled minimisation; `verify.yml`
-  (01:00 UTC) re-runs the stored reproducers. Schedule: fuzz ~00:00 Warsaw time (22:00 UTC), verify 01:00 UTC, retriage
-  01:30 UTC, Miri 03:00 UTC.
+  shards) continues with everything that has no result yet, an older `fuzzer_id`, or an unsettled minimisation; the first shard also
+  verifies the stored reproducers. Schedule: fuzz ~00:00 Warsaw time (22:00 UTC), retriage 01:30 UTC, Miri 03:00 UTC.
 - **Checklist instead of a verdict** (`src/steps.rs`): every stored finding says which steps are done and which are open -
   reproduced on stable/beta/nightly, **fully minimised**, shortest command line, Miri (UB) check, MIR-vs-LLVM, regression range
   (stable / nightly / the PR), upstream search, issue draft, and (manual) reported. `STATUS.md` shows it as `- [x]` / `- [~]` (started) /
@@ -151,8 +150,10 @@ by hand. The `*-checks` configs and `PANIC` lines can also point at a generator 
 - **`finding.json`**: the standard machine readable description of a stored finding (strategy, kind, minimal flags, reduced program hash,
   regression edges, reproduction per channel, checklist ...), rewritten whenever `status.cfg` changes. When two jobs triaged the same
   finding concurrently, the result with more finished steps wins; the same reduced program found twice is merged (`reduced_hash`).
-- `verify.yml` (daily, or manual): per channel (nightly, beta, stable) re-runs every stored finding and records
-  `repro.<channel>`, `last_verified` and `state` (`open`/`fixed`) in its `status.cfg`, via the same sync. Nothing is deleted.
+- **Self-cleaning package**: the first shard of every `retriage.yml` run re-runs each stored reproducer on the newest nightly (the
+  reference). A finding that no longer reproduces there is marked `not-reproducing`; the next check removes it (two in a row, so one odd
+  run cannot delete anything). Removed findings are listed in `fixed.txt` and in the "Removed" table of `INDEX.md`, and a triage that
+  was running at the time cannot bring them back. There is no separate verify workflow any more: the retriage run does the verification.
 
 ## Reports
 

@@ -88,7 +88,7 @@ pub fn exec(mut cmd: Command, timeout: Duration) -> std::io::Result<Exec> {
     let mut child = cmd.spawn()?;
     let pid = child.id();
     let so = drain(child.stdout.take().unwrap(), 32 << 20);
-    let se = drain(child.stderr.take().unwrap(), 256 << 10);
+    let se = drain(child.stderr.take().unwrap(), 4 << 20);
     let start = Instant::now();
     let (status, timed_out) = loop {
         if let Some(st) = child.try_wait()? {
