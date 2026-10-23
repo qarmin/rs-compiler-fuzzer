@@ -19,6 +19,7 @@ pub mod oracle;
 pub mod par;
 pub mod pipeline;
 pub mod rename;
+pub mod rustc_oracle;
 pub mod peep;
 pub mod scan;
 pub mod structure;

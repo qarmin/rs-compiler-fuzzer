@@ -18,12 +18,33 @@ Exit code `0` = nothing new, `2` = new findings. Every finding is a directory wi
 `report.md` (commands and outputs) and `repro.cfg`. Smaller or longer runs: `--duration`, `--strategies arith,loops`, `--scale 50`;
 `rs-compiler-fuzzer --help` lists everything. Already-known upstream bugs are filtered out (`known-bugs.txt`).
 
-The reducer is a tool of its own and works on any Rust file, e.g. an ICE:
+## Reduce a program that misbehaves (copy, paste, wait)
+
+The reducer works on any single Rust file and needs no script: it compiles and runs the file and keeps what stands out.
 
 ```bash
-# check.sh gets the candidate path as its last argument and exits 0 while the problem shows
-rs-compiler-fuzzer reduce ice.rs --test ./check.sh -o small.rs
+# the compiler crashes (ICE, LLVM error, segfault), the compilation fails with an error, takes forever,
+# or the program behaves differently at -C opt-level 0 and 1/2/3/s/z: the file says which, the log says what was found
+rs-compiler-fuzzer reduce bug.rs --rustc "rustc +nightly"                          # result: bug.min.rs
+
+# flags the bug needs
+rs-compiler-fuzzer reduce bug.rs --rustc "rustc +nightly" --flags "-C opt-level=3 -Z mir-opt-level=4"
+
+# say what to keep yourself
+rs-compiler-fuzzer reduce bug.rs --rustc "rustc +nightly" --ice                    # the same crash (message + compiler source file)
+rs-compiler-fuzzer reduce bug.rs --rustc "rustc +nightly" --error E0308            # that error, nothing else
+rs-compiler-fuzzer reduce bug.rs --rustc "rustc +nightly" --oom 8                  # the compiler uses more than 8 GB
+rs-compiler-fuzzer reduce bug.rs --rustc "rustc +nightly" --hang 60                # the compilation does not finish in 60 s
+rs-compiler-fuzzer reduce bug.rs --rustc "rustc +nightly" --flags "-C opt-level=0" --vs "-C opt-level=3"   # miscompilation: the two builds differ
+rs-compiler-fuzzer reduce bug.rs --rustc "rustc +nightly" --stdout "wrong value"   # the program prints this
+rs-compiler-fuzzer reduce bug.rs --test ./check.sh                                # your own check: given the candidate, exit 0 while the bug shows
 ```
+
+It uses every core (`--jobs`), stops after `--budget` seconds (default 600), writes the best program found so far to the output
+file on every improvement, and Ctrl+C keeps it. [Shrink Ray](https://github.com/DRMacIver/shrinkray) (`pip install shrinkray`) and
+[treereduce-rust](https://github.com/langston-barrett/treereduce) (`cargo install treereduce-rust`) are used when installed.
+Before it touches anything it checks that the file shows the problem, so a wrong flag shows up at once. A project with several
+files has to be put into one (`cargo expand`, or `rustc -Z unpretty=expanded`) first.
 
 Details: [`rs-minimizer`](rs-minimizer/README.md).
 

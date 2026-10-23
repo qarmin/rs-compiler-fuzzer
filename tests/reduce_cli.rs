@@ -56,3 +56,62 @@ fn help_and_usage_errors() {
     let bad = Command::new(env!("CARGO_BIN_EXE_rs-compiler-fuzzer")).arg("reduce").output().unwrap();
     assert!(!bad.status.success());
 }
+
+fn text_of(o: &std::process::Output) -> String {
+    format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr))
+}
+
+fn reduce(dir: &std::path::Path, source: &str, extra: &[&str]) -> (std::process::Output, String) {
+    let input = dir.join("in.rs");
+    std::fs::write(&input, source).unwrap();
+    let out = dir.join("out.rs");
+    let o = Command::new(env!("CARGO_BIN_EXE_rs-compiler-fuzzer"))
+        .arg("reduce")
+        .arg(&input)
+        .args(["--rustc", "rustc +nightly", "-o"])
+        .arg(&out)
+        .args(["--budget", "60", "--jobs", "4", "--no-shrinkray", "--no-treereduce"])
+        .args(extra)
+        .output()
+        .unwrap();
+    let result = std::fs::read_to_string(&out).unwrap_or_default();
+    (o, result)
+}
+
+const NOISY_ERROR: &str = "use std::collections::HashMap;\nfn helper(a: u32) -> u32 { a * 2 }\nstruct Unused { x: u8 }\nfn main() {\n    let mut total = 0;\n    for i in 0..10 { total += helper(i); }\n    let wrong: u32 = \"text\";\n    println!(\"{}\", total);\n}\n";
+
+#[test]
+fn a_compile_error_is_found_and_reduced_without_a_script() {
+    let dir = scratch("error");
+    let (o, result) = reduce(&dir, NOISY_ERROR, &[]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert!(text_of(&o).contains("E0308"), "the detected error is announced:\n{}", text_of(&o));
+    assert!(result.contains("\"text\"") && result.lines().count() <= 3, "{result}");
+    assert!(!result.contains("helper") && !result.contains("HashMap"), "{result}");
+}
+
+#[test]
+fn a_compiler_crash_is_found_by_its_flags_and_kept() {
+    let dir = scratch("ice");
+    let (o, result) = reduce(&dir, NOISY_ERROR, &["--flags", "-Z treat-err-as-bug=1"]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert!(text_of(&o).contains("the compiler crashes"), "{}", text_of(&o));
+    assert!(result.contains("\"text\"") && result.lines().count() <= 3, "{result}");
+}
+
+#[test]
+fn two_builds_that_disagree_are_reduced_to_what_makes_them_disagree() {
+    let dir = scratch("vs");
+    let src = "fn unused() -> u32 { 5 }\nfn main() {\n    let v: Vec<u32> = (0..5).collect();\n    println!(\"{}\", v.len());\n    println!(\"{}\", cfg!(debug_assertions));\n}\n";
+    let (o, result) = reduce(&dir, src, &["--flags", "-C debug-assertions=off", "--vs", "-C debug-assertions=on"]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert!(result.contains("debug_assertions") && !result.contains("unused") && !result.contains("collect"), "{result}");
+}
+
+#[test]
+fn a_file_with_nothing_wrong_says_so() {
+    let dir = scratch("fine");
+    let (o, _) = reduce(&dir, "fn main() { println!(\"{}\", 6 * 7); }\n", &[]);
+    assert!(!o.status.success());
+    assert!(text_of(&o).contains("nothing to reduce"), "{}", text_of(&o));
+}
