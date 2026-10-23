@@ -1,0 +1,98 @@
+name: minimize-long
+
+# One finding, minimised for hours (a GitHub-hosted job may run for 6 hours). For findings the daily retriage cannot get small in
+# its 100 minutes: Shrink Ray, treereduce-rust and rs-minimizer take turns, the program is stored after the run and the next
+# retriage continues from it. Start it by hand: `gh workflow run minimize-long -f finding=arith__Oz__19f07f8eea -f hours=5`.
+on:
+  workflow_dispatch:
+    inputs:
+      finding:
+        description: "Name of the stored finding (directory in the package, e.g. arith__Oz__19f07f8eea)"
+        required: true
+      hours:
+        description: "Time for the minimisation, hours (the job limit is 6; setup and the steps after the minimisation take about 25 minutes)"
+        default: "5"
+      bisect_seconds:
+        description: "Regression-range time after the minimisation"
+        default: "1200"
+
+permissions:
+  contents: write
+  actions: read
+
+# shares the group with retriage: both write the package
+concurrency:
+  group: retriage
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RELEASE: Nightly
+
+jobs:
+  minimize:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v6
+      - name: Cache the reducers (Shrink Ray, treereduce-rust, cargo-bisect-rustc)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/sr
+            ~/.cargo/bin/treereduce-rust
+            ~/.cargo/bin/cargo-bisect-rustc
+          key: reducers-${{ runner.os }}-v1
+      - name: Toolchains and reducers
+        run: |
+          for c in stable beta nightly; do rustup toolchain install $c --profile minimal; done
+          rustup component add miri rust-src --toolchain nightly || echo "miri unavailable on this nightly"
+          [ -d "$HOME/sr" ] || { python3 -m venv "$HOME/sr" && "$HOME/sr/bin/pip" install -q shrinkray || echo "shrinkray unavailable"; }
+          echo "$HOME/sr/bin" >> "$GITHUB_PATH"
+          [ -x "$HOME/.cargo/bin/treereduce-rust" ] || cargo +stable install treereduce-rust --locked || echo "treereduce-rust unavailable"
+          [ -x "$HOME/.cargo/bin/cargo-bisect-rustc" ] || cargo +stable install cargo-bisect-rustc --locked || echo "cargo-bisect-rustc unavailable"
+      - run: cargo +stable build --release
+
+      - name: Download the package
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p pkg
+          if gh release download "$RELEASE" --repo "$GITHUB_REPOSITORY" --pattern findings.zip --dir . 2>/dev/null; then unzip -q -o findings.zip -d pkg; fi
+          ls pkg/findings 2>/dev/null | wc -l | sed 's/$/ stored findings/'
+          test -f "pkg/findings/${{ inputs.finding }}/case.rs" || { echo "no such finding: ${{ inputs.finding }}"; ls pkg/findings; exit 1; }
+          echo "resources:"; nproc; free -g | head -2
+
+      - name: Minimise, then store the result
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+          HOURS: ${{ inputs.hours }}
+          BISECT: ${{ inputs.bisect_seconds }}
+        run: |
+          export BIN=$PWD/target/release/rs-compiler-fuzzer KEYS_FILE=$PWD/stored-keys.txt TOOLCHAIN=retriage
+          # the whole `retriage` call (reproduction, minimisation, flags, Miri, bisection) has this many seconds; the minimisation gets
+          # 85% of them
+          total=$(python3 -c "import os; print(int(float(os.environ['HOURS']) * 3600))")
+          budget=$((total * 85 / 100))
+          "$BIN" retriage --pkg pkg --finding "${{ inputs.finding }}" --limit 1 --budget "$budget" --budget-max "$budget" --deadline "$total" --bisect "$BISECT" --out retriage-out 2>&1 | tee one.txt
+          k=$(sed -n 's/^RETRIAGED //p' one.txt | head -n1)
+          [ -z "$k" ] && { echo "the finding was not triaged"; exit 1; }
+          rm -rf upd && mkdir -p "upd/$k" && cp -r "pkg/findings/$k/." "upd/$k/"
+          ADD_DIRS="upd" tools/release_sync.sh tools/store_mutator.sh
+          {
+            echo "### ${{ inputs.finding }}"
+            wc -l "pkg/findings/$k/case.rs" "pkg/findings/$k/reduced.rs" | head -2
+            grep -E "min_status|min_runs" "pkg/findings/$k/status.cfg" || true
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: minimize-long
+          path: |
+            upd
+            one.txt
+          if-no-files-found: ignore
+          retention-days: 14

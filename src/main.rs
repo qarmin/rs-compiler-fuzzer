@@ -35,7 +35,7 @@ USAGE:
                             (--bisect SECS: find the first stable release / nightly that has the bug; --dirs ROOT: every finding below ROOT; --budget SECS reduction time per finding; --no-search; --no-reduce; --limit N)
   rs-compiler-fuzzer minimize DIR       local, long minimisation of one stored finding on all cores (--jobs N, --budget SECS per run, --deadline SECS overall,
                             --bisect SECS, --search, --no-force = skip a finding that already converged); Ctrl+C keeps the best program and rewrites ISSUE.md/STATUS.md/finding.json; run it again to continue
-  rs-compiler-fuzzer retriage --pkg DIR  triage again (in place) every stored finding with an older fuzzer_id (--shard I/N, --limit N, --deadline SECS, --budget, --bisect)
+  rs-compiler-fuzzer retriage --pkg DIR  triage again (in place) every stored finding with an older fuzzer_id (--shard I/N, --limit N, --deadline SECS, --budget, --bisect; --finding NAME: just that one, minimised again)
   rs-compiler-fuzzer pack --pkg DIR     merge finding directories (--add DIR, repeatable) into an unpacked package, rebuild INDEX.md
                             (--toolchain NAME records where they were found; --contains KEYS_FILE checks that keys are present)
   rs-compiler-fuzzer interesting --cfg FILE --file F   oracle for external reducers (exit 0 = still interesting)
@@ -131,6 +131,7 @@ fn main() {
     let mut toolchain_name = String::from("unknown");
     let mut contains: Option<PathBuf> = None;
     let mut skip_file: Option<PathBuf> = None;
+    let mut finding: Option<String> = None;
     let mut budget_max = 0u64;
     let mut minimize_secs = 1500u64;
     let mut strategy: Option<String> = None;
@@ -186,6 +187,7 @@ fn main() {
             "--toolchain" => toolchain_name = val(),
             "--contains" => contains = Some(PathBuf::from(val())),
             "--skip" => skip_file = Some(PathBuf::from(val())),
+            "--finding" => finding = Some(val()),
             "--budget-max" => budget_max = num(val()),
             "--minimize-secs" => minimize_secs = num(val()),
             "--strategy" => strategy = Some(val()),
@@ -315,9 +317,17 @@ fn main() {
             let pkg = pkg.unwrap_or_else(|| die("retriage needs --pkg DIR (an unpacked findings.zip)"));
             let (si, sn) = shard.split_once('/').map(|(a, b)| (a.parse::<usize>().unwrap_or(0), b.parse::<usize>().unwrap_or(1).max(1))).unwrap_or((0, 1));
             let skip: std::collections::HashSet<String> = skip_file.as_ref().and_then(|f| std::fs::read_to_string(f).ok()).map(|t| t.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect()).unwrap_or_default();
-            let stale: Vec<PathBuf> = triage::stale_findings(&pkg, &skip).into_iter().filter(|p| pack::name_hash(&p.file_name().unwrap().to_string_lossy()) % sn as u64 == si as u64).collect();
+            let mut stale: Vec<PathBuf> = triage::stale_findings(&pkg, &skip).into_iter().filter(|p| pack::name_hash(&p.file_name().unwrap().to_string_lossy()) % sn as u64 == si as u64).collect();
+            if let Some(name) = &finding {
+                // one finding, whatever its checklist says, minimised again from where it stands
+                let dir = pkg.join("findings").join(name);
+                if !dir.join("case.rs").exists() {
+                    die(&format!("--finding {name}: {} has no case.rs", dir.display()));
+                }
+                stale = vec![dir];
+            }
             info!("retriage: {} stored finding(s) with open checklist steps in shard {shard}", stale.len());
-            let mut o = triage::TriageOpts { budget: Duration::from_secs(budget), search: !no_search, work: out.join("work"), no_reduce, bisect: Duration::from_secs(bisect_secs), checkpoint: false, force_reduce: false };
+            let mut o = triage::TriageOpts { budget: Duration::from_secs(budget), search: !no_search, work: out.join("work"), no_reduce, bisect: Duration::from_secs(bisect_secs), checkpoint: false, force_reduce: finding.is_some() };
             let start = std::time::Instant::now();
             let max_budget = budget_max.max(budget);
             let mut done = 0;
@@ -325,16 +335,29 @@ fn main() {
                 // Minimisation gets the time the other waiting findings do not need: the smaller the queue, the longer a finding
                 // may be minimised (between --budget and --budget-max); what a finding does not use stays for the next one.
                 let remaining = if deadline_secs > 0 { deadline_secs.saturating_sub(start.elapsed().as_secs()) } else { 0 };
-                let (mut other, mut mins) = (0u64, 0u64);
+                // a bigger finding, or one whose minimisation is not settled yet, gets a bigger share of what is left
+                let weight = |p: &PathBuf| -> f64 {
+                    let lines = std::fs::read_to_string(p.join("reduced.rs")).or_else(|_| std::fs::read_to_string(p.join("case.rs"))).map(|t| t.lines().count()).unwrap_or(500) as f64;
+                    let settled = std::fs::read_to_string(p.join("status.cfg")).unwrap_or_default().lines().any(|l| l.starts_with("min_status=converged"));
+                    1.0 + lines / 400.0 + if settled { 0.0 } else { 1.0 }
+                };
+                let (mut other, mut mins, mut weights) = (0u64, 0u64, 0.0f64);
                 for p in &stale {
                     let ids = triage::open_ids_of(p);
                     if ids.iter().any(|i| *i == "minimized" || *i == "minimize_cases") {
                         mins += 1;
+                        weights += weight(p);
                     }
                     other += 300 + if ids.iter().any(|i| i.starts_with("bisect") || *i == "pass_bisect") { bisect_secs + 600 } else { 0 };
                 }
                 let this_min = triage::open_ids_of(d).iter().any(|i| *i == "minimized" || *i == "minimize_cases");
-                let b = if deadline_secs > 0 && this_min { (remaining.saturating_sub(other) / mins.max(1)).clamp(budget, max_budget) } else { budget };
+                let b = if deadline_secs > 0 && this_min {
+                    let share = remaining.saturating_sub(other) as f64 * weight(d) / weights.max(1.0);
+                    (share as u64).clamp(budget, max_budget)
+                } else {
+                    budget
+                };
+                let _ = mins;
                 o.budget = Duration::from_secs(b);
                 let bis_needed = triage::open_ids_of(d).iter().any(|i| i.starts_with("bisect") || *i == "pass_bisect");
                 if deadline_secs > 0 && start.elapsed() + Duration::from_secs(budget.min(b) + if bis_needed { bisect_secs + 600 } else { 0 } + 240) > Duration::from_secs(deadline_secs) {

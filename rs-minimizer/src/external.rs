@@ -106,6 +106,12 @@ pub fn shrinkray(it: &dyn Oracle, src: &str, deadline: Instant, log: &mut Reduce
     let _ = child.wait();
     set_external_running(false);
     log.push(format!("shrinkray {how} after {}s", sr_start.elapsed().as_secs()));
+    {
+        let said = format!("{}{}", std::fs::read_to_string(dir.join("sr.out")).unwrap_or_default(), std::fs::read_to_string(dir.join("sr.err")).unwrap_or_default());
+        if said.contains("should return 0") {
+            warn!("shrinkray's check of the start program failed: the oracle called from another process says `not interesting`. In-process re-check: {}. {}", it.recheck(src), it.explain(src));
+        }
+    }
     if how.starts_with("exited by itself") {
         // an early exit usually means the tool gave up: keep its last words
         let text = format!("{}{}", std::fs::read_to_string(dir.join("sr.out")).unwrap_or_default(), std::fs::read_to_string(dir.join("sr.err")).unwrap_or_default());
@@ -183,6 +189,9 @@ pub fn treereduce(it: &dyn Oracle, src: &str, deadline: Instant, jobs: usize, pa
         res
     } else {
         let tail: Vec<&str> = said.lines().filter(|l| !l.trim().is_empty()).rev().take(4).collect();
+        if code == Some(1) && started.elapsed().as_secs() < 5 {
+            warn!("treereduce-rust gave up at once: its check of the start program probably failed. In-process re-check: {}. {}", it.recheck(src), it.explain(src));
+        }
         info!("treereduce-rust finished after {}s (status {code:?}) without an improvement; it said: {}", started.elapsed().as_secs(), tail.into_iter().rev().collect::<Vec<_>>().join(" | "));
         src.to_string()
     }

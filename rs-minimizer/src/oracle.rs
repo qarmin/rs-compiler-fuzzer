@@ -9,6 +9,16 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 pub trait Oracle: Sync {
     fn check(&self, src: &str) -> bool;
 
+    /// The verdict without any cache: for checking whether the program is interesting every time (a flaky bug is not).
+    fn recheck(&self, src: &str) -> bool {
+        self.check(src)
+    }
+
+    /// One line on what the oracle sees in `src` (what each configuration did), for the log when a verdict is a surprise.
+    fn explain(&self, _src: &str) -> String {
+        String::new()
+    }
+
     /// Scratch directory for the external reducers and rustc runs of the passes.
     fn work_dir(&self) -> PathBuf {
         std::env::temp_dir().join("rs-minimizer")

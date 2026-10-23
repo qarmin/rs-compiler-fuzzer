@@ -616,7 +616,25 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
                             crate::reduce::set_checkpoint(Some(dir.join("reduced.rs")));
                         }
                         info!("step 2: reduction from {} lines, {}s budget{}", start_src.lines().count(), o.budget.as_secs(), if o.checkpoint { ", checkpointed to reduced.rs" } else { "" });
-                        reduced = reduce_all(&it, &start_src, o.budget, &mut reduce_log);
+                        // Rounds: a round that changed the program is followed by another one on its result while time is left (the
+                        // confirmation run that used to wait for the next day happens here), a round that changed nothing ends it.
+                        let t0 = std::time::Instant::now();
+                        let mut round_src = start_src.clone();
+                        let mut last_unchanged = false;
+                        for round in 1..=4 {
+                            let out = reduce_all(&it, &round_src, o.budget.saturating_sub(t0.elapsed()), &mut reduce_log);
+                            last_unchanged = out == round_src;
+                            round_src = out;
+                            let more = !last_unchanged && crate::reduce::last_run_complete() && !crate::reduce::INTERRUPTED.load(std::sync::atomic::Ordering::Relaxed) && t0.elapsed() * 4 < o.budget * 3 && round < 4;
+                            if !more {
+                                break;
+                            }
+                            info!("round {round} changed the program to {} lines; another round on it ({}s of {}s used)", round_src.lines().count(), t0.elapsed().as_secs(), o.budget.as_secs());
+                        }
+                        reduced = round_src;
+                        if last_unchanged {
+                            continued_from = Some(crate::pack::text_hash(&reduced));
+                        }
                         if o.checkpoint {
                             // an interrupted run may hold a smaller program than the pass that was cut short returned
                             if let Some(best) = crate::reduce::best_so_far().filter(|b| b.len() < reduced.len() && it.check(b)) {

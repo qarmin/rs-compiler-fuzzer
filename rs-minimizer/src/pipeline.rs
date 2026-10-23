@@ -279,6 +279,14 @@ pub fn minimize(it: &dyn Oracle, src: &str, opts: &Options, log: &mut ReduceLog,
     let mut cur = src.to_string();
     let mut pr = Progress { start, lines: cur.lines().count(), bytes: cur.len(), n: 0, last_runs: oracle_runs(), last_at: start };
     info!("reduction starts: {} lines, {} bytes, budget {}s, {} oracle calls at once", pr.lines, pr.bytes, budget.as_secs(), par_checks());
+    // a bug that shows in some runs only (addresses, timing, load) makes every verdict a coin toss: say so before spending hours
+    let stable = (0..3).filter(|_| it.recheck(&cur)).count();
+    if stable == 3 {
+        info!("the starting program is interesting in 3 of 3 runs");
+    } else {
+        warn!("the starting program is interesting in only {stable} of 3 runs - the problem is flaky or the setup differs from the one that found it. {}", it.explain(&cur));
+        log.push(format!("the starting program was interesting in {stable} of 3 runs"));
+    }
     info!("plan: cheap deletions first, the passes that grow or probe the program only once it has fewer than {BIG_LINES} lines (or {CHEAP_SECS}s have passed)");
 
     pr.step("cheap deletions: comments, items, lines (nothing is expanded or inlined yet)");

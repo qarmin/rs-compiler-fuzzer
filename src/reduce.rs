@@ -45,6 +45,29 @@ impl Oracle for Interest {
         Interest::check(self, src)
     }
 
+    fn recheck(&self, src: &str) -> bool {
+        self.check_uncached(src)
+    }
+
+    fn explain(&self, src: &str) -> String {
+        let dir = self.work.join(format!("x{}_{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("main.rs");
+        let _ = std::fs::write(&path, src);
+        let describe = |c: &Config| {
+            let out = build_and_run(&self.rustc, &path, &dir.join(format!("bin_{}", c.name)), c, &self.limits);
+            let extra = match &out {
+                Outcome::CompileFail(e) => format!(" ({})", e.lines().find(|l| l.contains("error")).unwrap_or("").chars().take(160).collect::<String>()),
+                Outcome::Ran { stdout, .. } => format!(" (stdout hash {:x})", hash_text(stdout)),
+                _ => String::new(),
+            };
+            format!("{} [{}]: {}{extra}", c.name, c.flags.join(" "), out.describe())
+        };
+        let text = format!("{} | {} | compiler `{}`", describe(&self.a), describe(&self.b), self.rustc.join(" "));
+        let _ = std::fs::remove_dir_all(&dir);
+        text
+    }
+
     fn work_dir(&self) -> PathBuf {
         self.work.clone()
     }
