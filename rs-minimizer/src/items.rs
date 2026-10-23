@@ -637,15 +637,28 @@ fn ddmin_siblings(it: &dyn Oracle, cur: &mut String, mut list: Vec<(usize, usize
 /// Delta debugging on the structure: for every list of siblings (the items of a module, the statements of a block) chunks of
 /// neighbours are deleted at once, largest lists first. Far fewer oracle calls than deleting one item or line at a time.
 pub fn shrink_siblings(it: &dyn Oracle, src: &str, deadline: Instant) -> String {
+    let mut done = std::collections::HashSet::new();
     let mut cur = src.to_string();
-    let mut done: std::collections::HashSet<u64> = std::collections::HashSet::new();
-    for _ in 0..400 {
-        if expired(deadline) {
+    while !expired(deadline) {
+        let (next, finished) = shrink_siblings_step(it, &cur, deadline, usize::MAX, &mut done);
+        cur = next;
+        if finished {
             break;
+        }
+    }
+    cur
+}
+
+/// At most `max_lists` lists of `shrink_siblings`; `done` remembers the finished ones between calls. Returns whether no list is left.
+pub fn shrink_siblings_step(it: &dyn Oracle, src: &str, deadline: Instant, max_lists: usize, done: &mut std::collections::HashSet<u64>) -> (String, bool) {
+    let mut cur = src.to_string();
+    for _ in 0..max_lists.min(400) {
+        if expired(deadline) {
+            return (cur, false);
         }
         let mut lists = sibling_lists(&cur);
         lists.sort_by_key(|(prio, l)| (*prio, std::cmp::Reverse(l.last().map(|r| r.1).unwrap_or(0) - l.first().map(|r| r.0).unwrap_or(0))));
-        let Some((prio, list)) = lists.into_iter().find(|(_, l)| !done.contains(&list_key(&cur, l))) else { break };
+        let Some((prio, list)) = lists.into_iter().find(|(_, l)| !done.contains(&list_key(&cur, l))) else { return (cur, true) };
         done.insert(list_key(&cur, &list));
         let before = cur.len();
         ddmin_siblings(it, &mut cur, list.clone(), prio == 0, deadline);
@@ -653,14 +666,12 @@ pub fn shrink_siblings(it: &dyn Oracle, src: &str, deadline: Instant) -> String 
             // deleted statements leave empty lines behind; they carry no meaning
             cur = cur.lines().filter(|l| !l.trim().is_empty()).collect::<Vec<_>>().join("\n") + "\n";
             info!("siblings ({} items or statements in a list): {} -> {} bytes", list.len(), before, cur.len());
-            // what is left of the list is finished; the lists nested in its survivors are found by the next round
         }
-        let rest = sibling_lists(&cur);
-        for (_, l) in rest {
+        for (_, l) in sibling_lists(&cur) {
             if l.len() <= 1 {
                 done.insert(list_key(&cur, &l));
             }
         }
     }
-    cur
+    (cur, false)
 }

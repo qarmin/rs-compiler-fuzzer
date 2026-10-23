@@ -6,7 +6,7 @@ use crate::exprs::{drop_calls, drop_let_bindings, flatten_blocks, simplify_exprs
 use crate::external::{shrinkray, shrinkray_available, treereduce};
 use crate::format::format_if_interesting;
 use crate::inline::{inline_calls, substitute_lets};
-use crate::items::{shrink_items, shrink_items_with_users, shrink_siblings, shrink_statements};
+use crate::items::{shrink_items, shrink_items_with_users, shrink_siblings_step, shrink_statements};
 use crate::lines::{shrink_lines, strip_comments};
 use crate::modules::hoist_modules;
 use crate::oracle::Oracle;
@@ -218,7 +218,7 @@ fn flatten_and_clean(it: &dyn Oracle, mut cur: String, opts: &Options, pr: &mut 
 
 /// The cheap deletions: the caller's batch step, comments, items with the code that mentions them, items, lines. Repeated while a
 /// round still removes a tenth of the program, until the program is small or `until` passes.
-fn cheap_phase(it: &dyn Oracle, mut cur: String, pr: &mut Progress, log: &mut ReduceLog, hook: Hook, until: Instant, soft: Instant) -> String {
+fn cheap_phase(it: &dyn Oracle, mut cur: String, opts: &Options, pr: &mut Progress, log: &mut ReduceLog, hook: Hook, until: Instant, soft: Instant) -> String {
     for round in 1..=4 {
         let before = cur.len();
         if round == 1 {
@@ -231,9 +231,29 @@ fn cheap_phase(it: &dyn Oracle, mut cur: String, pr: &mut Progress, log: &mut Re
         pr.pass("items with their users");
         cur = shrink_items_with_users(it, &cur, until);
         pr.result(log, "items together with the code that mentions them", &cur);
-        pr.pass("siblings");
-        cur = shrink_siblings(it, &cur, until);
-        pr.result(log, "siblings: chunks of neighbouring items and statements", &cur);
+        // the compiler finds in a second what deleting statements one list at a time would need minutes for: the items nobody calls any
+        // more. It runs before the siblings and between batches of their lists.
+        let dead = |cur: String, pr: &mut Progress, log: &mut ReduceLog| -> String {
+            if opts.rustc.is_empty() || interrupted() {
+                return cur;
+            }
+            pr.pass("dead code");
+            let cur = remove_dead_code(it, &cur, &opts.rustc, until);
+            pr.result(log, "dead code", &cur);
+            cur
+        };
+        cur = dead(cur, pr, log);
+        let mut done = std::collections::HashSet::new();
+        loop {
+            pr.pass("siblings");
+            let (next, finished) = shrink_siblings_step(it, &cur, until, 6, &mut done);
+            cur = next;
+            pr.result(log, "siblings: chunks of neighbouring items and statements", &cur);
+            cur = dead(cur, pr, log);
+            if finished || expired(until) || interrupted() {
+                break;
+            }
+        }
         pr.pass("items");
         cur = shrink_items(it, &cur, until);
         pr.result(log, "items", &cur);
@@ -263,7 +283,7 @@ pub fn minimize(it: &dyn Oracle, src: &str, opts: &Options, log: &mut ReduceLog,
 
     pr.step("cheap deletions: comments, items, lines (nothing is expanded or inlined yet)");
     let soft = start + Duration::from_secs(CHEAP_SECS).min(budget / 8);
-    cur = cheap_phase(it, cur, &mut pr, log, hook, at(2, 5), soft);
+    cur = cheap_phase(it, cur, opts, &mut pr, log, hook, at(2, 5), soft);
 
     pr.step("dead code reported by the compiler");
     if !opts.rustc.is_empty() && !interrupted() {

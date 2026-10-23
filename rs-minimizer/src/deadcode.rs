@@ -1,4 +1,4 @@
-//! Unused items and imports as the compiler sees them: one `rustc` run lists every `dead_code` / `unused_imports` warning, the
+//! Unused items and imports as the compiler sees them (`--force-warn`: a crate-level `#![allow(dead_code)]`, as generated programs have, does not hide them): one `rustc` run lists every `dead_code` / `unused_imports` warning, the
 //! items they point at are deleted (all at once, else one at a time) and the run is repeated while it finds more.
 
 use crate::control::{expired, interrupted, par_checks};
@@ -15,7 +15,7 @@ const KINDS: [&str; 13] =
 
 /// Positions of the warnings that name an item the compiler considers unused.
 fn unused_spots(rustc: &[String], work: &std::path::Path, src: &str) -> Vec<usize> {
-    let Some(diags) = compile_diags(rustc, work, src, &["-W", "dead_code", "-W", "unused_imports"]) else { return Vec::new() };
+    let Some(diags) = compile_diags(rustc, work, src, &["--force-warn", "dead_code", "--force-warn", "unused_imports"]) else { return Vec::new() };
     diags
         .iter()
         .filter(|d| !d.error)

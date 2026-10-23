@@ -195,3 +195,13 @@ fn single_use_lets_are_substituted() {
     assert!(out.matches("let ").count() < src.matches("let ").count(), "{out}");
     assert_prints(&out, "42\n");
 }
+
+#[test]
+fn dead_code_is_found_even_when_the_crate_allows_it() {
+    let src = "#![allow(dead_code, unused)]\nfn used() -> u32 { 7 }\nfn never() -> u32 { 1 }\nuse std::collections::HashMap;\nfn main() { println!(\"{}\", used()); }\n";
+    let o = prints("7\n");
+    check_oracle(&o, src);
+    let out = remove_dead_code(&o, src, &["rustc".to_string()], far());
+    assert!(!out.contains("never") && !out.contains("HashMap"), "{out}");
+    assert_prints(&out, "7\n");
+}
