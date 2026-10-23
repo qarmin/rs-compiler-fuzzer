@@ -183,8 +183,8 @@ pub fn current_pass() -> String {
 fn note_size(before: Option<&str>, after: &str) {
     CUR_LINES.store(after.lines().count(), Ordering::Relaxed);
     CUR_BYTES.store(after.len(), Ordering::Relaxed);
-    if ui_on() {
-        *LAST_CHANGE.lock().unwrap() = Some((before.unwrap_or("").to_string(), after.to_string()));
+    if let (true, Some(before)) = (ui_on(), before) {
+        *LAST_CHANGE.lock().unwrap() = Some((before.to_string(), after.to_string()));
     }
 }
 static CLOCK: Mutex<Option<Instant>> = Mutex::new(None);

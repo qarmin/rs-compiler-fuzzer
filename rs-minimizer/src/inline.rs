@@ -487,7 +487,11 @@ fn let_stmt_end(src: &str, pos: usize) -> Option<usize> {
             _ => {}
         }
         if depth < 0 {
-            return None;
+            // `pos` sits inside a tuple or slice pattern: its closing bracket is not the end of the block
+            if b[k] == b'}' {
+                return None;
+            }
+            depth = 0;
         }
         k += 1;
     }

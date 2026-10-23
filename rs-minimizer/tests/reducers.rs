@@ -113,3 +113,50 @@ fn the_trait_and_wrapper_example_becomes_a_few_lines_of_plain_code() {
     assert!(out.lines().count() <= 5, "{out}");
     assert_prints(&out, "42");
 }
+
+fn prints_ending_in(end: &'static str) -> rs_minimizer::oracle::Cached<impl Fn(&str) -> bool + Sync> {
+    let mut o = rs_minimizer::oracle::Cached::new(move |src: &str| run_program(src).is_some_and(|out| out.ends_with(end)));
+    o.work = scratch();
+    o
+}
+
+#[test]
+fn peephole_drops_format_arguments_and_replaces_call_arguments_by_literals() {
+    let src = "fn f(a: u32) -> u32 { a }\nfn main() {\n    let h = 7u32;\n    println!(\"{} {}\", f(3 + h * 0 + 1), h);\n}\n";
+    let o = prints_ending_in("7\n");
+    check_oracle(&o, src);
+    rs_minimizer::control::set_parallel(8);
+    let out = peep(&o, src, far());
+    assert!(out.contains("println!(\"{}\", h)") || out.contains("println!(\"{}\", 7"), "{out}");
+    assert!(!out.contains("3 +"), "{out}");
+}
+
+#[test]
+fn a_dereferenced_borrow_is_cancelled() {
+    let src = "fn main() {\n    let b = 7u32;\n    let c = *(&b);\n    println!(\"{}\", c);\n}\n";
+    let o = prints("7\n");
+    check_oracle(&o, src);
+    rs_minimizer::control::set_parallel(8);
+    let out = peep(&o, src, far());
+    assert!(!out.contains("*(&"), "{out}");
+}
+
+#[test]
+fn a_reference_let_is_substituted_even_when_the_name_is_bound_again_later() {
+    let src = "fn main() {\n    let mut h = 0;\n    let b = 7u32;\n    let v = &b;\n    let c = v;\n    let (c, v) = (&mut h, *c);\n    *c = v;\n    println!(\"{}\", h);\n}\n";
+    let o = prints("7\n");
+    check_oracle(&o, src);
+    rs_minimizer::control::set_parallel(8);
+    let out = rs_minimizer::inline::substitute_lets(&o, src, far());
+    assert!(!out.contains("let v = &b") && !out.contains("let c = "), "{out}");
+}
+
+#[test]
+fn a_tuple_let_is_split_and_its_parts_substituted() {
+    let src = "fn main() {\n    let mut h = 0;\n    let b = 7u32;\n    let (c, v) = (&mut h, b);\n    *c = v;\n    println!(\"{}\", h);\n}\n";
+    let o = prints("7\n");
+    check_oracle(&o, src);
+    rs_minimizer::control::set_parallel(8);
+    let out = rs_minimizer::exprs::simplify_let_tuples(&o, src, far());
+    assert!(out.contains("let c = &mut h;"), "{out}");
+}

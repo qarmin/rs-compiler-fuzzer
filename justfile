@@ -52,7 +52,13 @@ build:
 
 [group('test')]
 test:
-    cargo test --release --workspace --all-features --all-targets
+    #!/usr/bin/env bash
+    # crashing compilers and programs under test leave core.* files behind
+    ulimit -c 0
+    status=0
+    cargo test --release --workspace --all-features --all-targets || status=$?
+    rm -f core core.*
+    exit $status
 
 # reduce any Rust file with the standalone minimizer: just reduce ice.rs ./check.sh (check.sh exits 0 while the problem shows)
 [group('findings')]

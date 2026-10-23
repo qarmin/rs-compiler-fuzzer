@@ -493,6 +493,15 @@ pub fn simplify_let_tuples(it: &dyn Oracle, src: &str, deadline: Instant) -> Str
                 };
                 edits.push((at, vclose + 1, text));
             }
+            // the pair as separate statements: later passes can substitute one of them without the other
+            if types.is_none() {
+                let line_start = cur[..at].rfind('\n').map_or(0, |n| n + 1);
+                let indent = &cur[line_start..at];
+                if indent.trim().is_empty() {
+                    let lets: Vec<String> = pats.iter().zip(&vals).map(|(p, v)| format!("let {p} = {v}")).collect();
+                    edits.push((at, vclose + 1, lets.join(&format!(";\n{indent}"))));
+                }
+            }
         }
         if edits.is_empty() {
             break;

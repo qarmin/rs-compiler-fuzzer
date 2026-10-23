@@ -193,6 +193,120 @@ fn calls_to_values(src: &str) -> Vec<Edit> {
     out
 }
 
+/// Every argument of every call that is more than a literal or a name, replaced by a small literal (`f(a.g(1).0 as i8)` -> `f(1)`):
+/// a call is rarely needed with exactly the argument it was generated with.
+fn args_to_literals(src: &str) -> Vec<Edit> {
+    let b = src.as_bytes();
+    let toks = tokenize(src);
+    let mut out = Vec::new();
+    for (k, &(s, e)) in toks.iter().enumerate() {
+        let word = &src[s..e];
+        if !(word.as_bytes()[0].is_ascii_alphabetic() || word.as_bytes()[0] == b'_') || KEYWORDS.contains(&word) || b.get(e) != Some(&b'(') {
+            continue;
+        }
+        let prev = k.checked_sub(1).map(|p| &src[toks[p].0..toks[p].1]);
+        if matches!(prev, Some("fn" | "struct" | "enum" | "impl" | "trait")) {
+            continue;
+        }
+        let Some(close) = matching(b, e) else { continue };
+        for (a, z) in top_args(src, e, close) {
+            let arg = src[a..z].trim();
+            if arg.len() < 3 || arg.bytes().all(|c| c.is_ascii_digit() || c == b'_') {
+                continue;
+            }
+            let lead = src[a..z].len() - src[a..z].trim_start().len();
+            for value in ["0", "1"] {
+                out.push((a + lead, a + lead + arg.len(), value.to_string()));
+            }
+        }
+    }
+    out
+}
+
+/// `println!("{} {}", a, b)` -> `println!("{}", b)`: one placeholder with its argument at a time (plain `{}`-style placeholders only).
+fn format_arguments_dropped(src: &str) -> Vec<Edit> {
+    let b = src.as_bytes();
+    let mut out = Vec::new();
+    for mac in ["println!(", "print!(", "eprintln!(", "eprint!(", "format!("] {
+        for (at, _) in src.match_indices(mac) {
+            if at > 0 && is_ident(b[at - 1]) {
+                continue;
+            }
+            let open = at + mac.len() - 1;
+            let Some(close) = matching(b, open) else { continue };
+            let args = top_args(src, open, close);
+            let Some(&(ls, le)) = args.first() else { continue };
+            let lit = src[ls..le].trim();
+            if !lit.starts_with('"') || !lit.ends_with('"') || args.len() < 2 {
+                continue;
+            }
+            let lit_start = ls + (src[ls..le].len() - src[ls..le].trim_start().len());
+            let body = &lit[1..lit.len() - 1];
+            let mut spans = Vec::new();
+            let mut k = 0;
+            let bytes = body.as_bytes();
+            while k < bytes.len() {
+                match bytes[k] {
+                    b'{' if bytes.get(k + 1) == Some(&b'{') => k += 2,
+                    b'}' if bytes.get(k + 1) == Some(&b'}') => k += 2,
+                    b'{' => match body[k..].find('}') {
+                        Some(e) => {
+                            let inner = &body[k + 1..k + e];
+                            if inner.is_empty() || inner.starts_with(':') {
+                                spans.push((k, k + e + 1));
+                            } else {
+                                spans.clear();
+                                break;
+                            }
+                            k += e + 1;
+                        }
+                        None => break,
+                    },
+                    _ => k += 1,
+                }
+            }
+            if spans.len() != args.len() - 1 {
+                continue;
+            }
+            for (i, &(ps, pe)) in spans.iter().enumerate() {
+                let (head, rest) = (&body[..ps], &body[pe..]);
+                let text = match head.strip_suffix(' ') {
+                    Some(h) => format!("\"{h}{rest}\""),
+                    None => format!("\"{head}{}\"", rest.strip_prefix(' ').unwrap_or(rest)),
+                };
+                let mut kept: Vec<&str> = Vec::new();
+                for (j, &(s2, e2)) in args.iter().skip(1).enumerate() {
+                    if j != i {
+                        kept.push(src[s2..e2].trim());
+                    }
+                }
+                let mut all = text;
+                for a in kept {
+                    all.push_str(", ");
+                    all.push_str(a);
+                }
+                out.push((lit_start, close, all));
+            }
+        }
+    }
+    out
+}
+
+/// `*(&x)` -> `(x)`: what is left after a let that holds a reference was substituted into its use.
+fn deref_of_borrow(src: &str) -> Vec<Edit> {
+    let b = src.as_bytes();
+    let mut out = Vec::new();
+    for (at, _) in src.match_indices("*(&") {
+        if at > 0 && (is_ident(b[at - 1]) || matches!(b[at - 1], b')' | b']')) {
+            continue;
+        }
+        let Some(close) = matching(b, at + 1) else { continue };
+        let inner = src[at + 3..close].trim_start_matches("mut ");
+        out.push((at, close + 1, format!("({inner})")));
+    }
+    out
+}
+
 /// Occurrences of `pattern` replaced by `with` (`let mut ` -> `let `, `&mut ` -> `&`, `+=` -> `=`).
 fn replacements(src: &str, pattern: &str, with: &str) -> Vec<Edit> {
     let b = src.as_bytes();
@@ -293,11 +407,14 @@ fn folded_constants(src: &str) -> Vec<Edit> {
 /// The whole set, one category after the other.
 pub fn peep(it: &dyn Oracle, src: &str, deadline: Instant) -> String {
     let mut cur = src.to_string();
-    let passes: [(&str, fn(&str) -> Vec<Edit>); 7] = [
+    let passes: [(&str, fn(&str) -> Vec<Edit>); 10] = [
         ("keywords and compound assignments weakened", keyword_weakening),
         ("binary operators: one operand kept", binary_operands),
         ("parenthesised groups and blocks replaced by 0", groups_to_zero),
         ("calls replaced by values", calls_to_values),
+        ("dereferenced borrows cancelled", deref_of_borrow),
+        ("format arguments dropped", format_arguments_dropped),
+        ("call arguments replaced by literals", args_to_literals),
         ("identifiers replaced by 0", idents_to_zero),
         ("constant arithmetic folded", folded_constants),
         ("integer literals made smaller", smaller_integers),
