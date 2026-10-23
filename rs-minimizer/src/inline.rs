@@ -12,35 +12,35 @@ use log::info;
 use std::time::Instant;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
-enum Recv {
+pub(crate) enum Recv {
     Ref,
     RefMut,
     Value { mutable: bool },
 }
 
 #[derive(Clone, Debug)]
-struct Param {
-    name: String,
-    pos: usize,
-    mutable: bool,
-    ty: String,
+pub(crate) struct Param {
+    pub(crate) name: String,
+    pub(crate) pos: usize,
+    pub(crate) mutable: bool,
+    pub(crate) ty: String,
 }
 
 #[derive(Clone, Debug)]
-struct FnDef {
-    name: String,
-    name_pos: usize,
-    item: Item,
-    recv: Option<Recv>,
-    params: Vec<Param>,
-    generics: Vec<String>,
-    body: String,
-    unsafe_fn: bool,
+pub(crate) struct FnDef {
+    pub(crate) name: String,
+    pub(crate) name_pos: usize,
+    pub(crate) item: Item,
+    pub(crate) recv: Option<Recv>,
+    pub(crate) params: Vec<Param>,
+    pub(crate) generics: Vec<String>,
+    pub(crate) body: String,
+    pub(crate) unsafe_fn: bool,
     /// type of the enclosing `impl` block (`None` for free functions and generic impls)
-    self_ty: Option<String>,
+    pub(crate) self_ty: Option<String>,
     /// the method belongs to a trait or a trait impl: its name is shared with the trait
-    in_trait: bool,
-    in_impl: bool,
+    pub(crate) in_trait: bool,
+    pub(crate) in_impl: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -227,20 +227,22 @@ fn parse_fn(src: &str, items: &[Item], item: &Item) -> Option<FnDef> {
     Some(FnDef { name, name_pos: ns, item: item.clone(), recv, params, generics, body, unsafe_fn, self_ty, in_trait, in_impl })
 }
 
-fn defs_of(src: &str) -> Vec<FnDef> {
+pub(crate) fn defs_of(src: &str) -> Vec<FnDef> {
     let items = item_ranges(src);
     items.iter().filter_map(|i| parse_fn(src, &items, i)).collect()
 }
 
 #[derive(Clone)]
-struct Site {
-    start: usize,
-    end: usize,
-    recv: Option<String>,
-    args: Vec<String>,
+pub(crate) struct Site {
+    pub(crate) start: usize,
+    pub(crate) end: usize,
+    pub(crate) recv: Option<String>,
+    pub(crate) args: Vec<String>,
+    /// absolute byte ranges of the arguments (as `top_args` reports them)
+    pub(crate) arg_ranges: Vec<(usize, usize)>,
 }
 
-fn find_sites(src: &str, def: &FnDef) -> Vec<Site> {
+pub(crate) fn find_sites(src: &str, def: &FnDef) -> Vec<Site> {
     let b = src.as_bytes();
     let pat = def.name.as_str();
     let mut out = Vec::new();
@@ -265,7 +267,8 @@ fn find_sites(src: &str, def: &FnDef) -> Vec<Site> {
         if before.ends_with("fn") && !before[..before.len() - 2].ends_with(|c: char| is_ident(c as u8)) {
             continue;
         }
-        let args: Vec<String> = top_args(src, open, close).into_iter().map(|(s, e)| src[s..e].trim().to_string()).collect();
+        let arg_ranges = top_args(src, open, close);
+        let args: Vec<String> = arg_ranges.iter().map(|&(s, e)| src[s..e].trim().to_string()).collect();
         if args.len() != def.params.len() {
             continue;
         }
@@ -278,7 +281,7 @@ fn find_sites(src: &str, def: &FnDef) -> Vec<Site> {
             if start >= dot {
                 continue;
             }
-            Site { start, end: close + 1, recv: Some(src[start..dot].trim().to_string()), args }
+            Site { start, end: close + 1, recv: Some(src[start..dot].trim().to_string()), args, arg_ranges }
         } else if before.ends_with("::") {
             let ty = def.self_ty.as_deref();
             let prefix_start = before[..before.len() - 2].rfind(|c: char| !(c.is_alphanumeric() || c == '_')).map(|p| p + 1).unwrap_or(0);
@@ -286,12 +289,12 @@ fn find_sites(src: &str, def: &FnDef) -> Vec<Site> {
             if def.recv.is_some() || ty != Some(prefix) {
                 continue;
             }
-            Site { start: prefix_start, end: close + 1, recv: None, args }
+            Site { start: prefix_start, end: close + 1, recv: None, args, arg_ranges }
         } else {
             if def.recv.is_some() || def.in_impl {
                 continue;
             }
-            Site { start: name_at, end: close + 1, recv: None, args }
+            Site { start: name_at, end: close + 1, recv: None, args, arg_ranges }
         };
         out.push(site);
         i = close + 1;

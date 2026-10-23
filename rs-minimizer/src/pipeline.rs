@@ -10,6 +10,9 @@ use crate::items::{shrink_items, shrink_items_with_users, shrink_statements};
 use crate::lines::{shrink_lines, strip_comments};
 use crate::modules::hoist_modules;
 use crate::oracle::Oracle;
+use crate::peep::peep;
+use crate::structure::{remove_fields, remove_params, remove_variants_and_arms, stub_bodies, unwrap_newtypes};
+use crate::tokens::shrink_tokens;
 use crate::unroll::unroll;
 use log::{info, warn};
 use std::time::{Duration, Instant};
@@ -134,6 +137,26 @@ fn external_round(it: &dyn Oracle, mut cur: String, opts: &Options, pr: &mut Pro
     cur
 }
 
+/// Reductions of the program's structure: bodies stubbed, wrappers unwrapped, unused parameters, fields, variants and arms.
+fn structure_passes(it: &dyn Oracle, mut cur: String, pr: &mut Progress, log: &mut ReduceLog, until: Instant) -> String {
+    pr.pass("newtypes");
+    cur = unwrap_newtypes(it, &cur, until);
+    pr.result(log, "newtype structs replaced by their field", &cur);
+    pr.pass("function bodies");
+    cur = stub_bodies(it, &cur, until);
+    pr.result(log, "function bodies replaced by `unimplemented!()`", &cur);
+    pr.pass("parameters");
+    cur = remove_params(it, &cur, until);
+    pr.result(log, "unused parameters and their arguments", &cur);
+    pr.pass("fields");
+    cur = remove_fields(it, &cur, until);
+    pr.result(log, "unused struct fields", &cur);
+    pr.pass("variants and arms");
+    cur = remove_variants_and_arms(it, &cur, until);
+    pr.result(log, "enum variants and match arms", &cur);
+    cur
+}
+
 /// Inlining of calls and the cleanups it makes possible, repeated while something changes. The program may grow in here; only the
 /// passes that follow check the size again.
 fn flatten_and_clean(it: &dyn Oracle, mut cur: String, opts: &Options, pr: &mut Progress, log: &mut ReduceLog, until: Instant) -> String {
@@ -142,6 +165,12 @@ fn flatten_and_clean(it: &dyn Oracle, mut cur: String, opts: &Options, pr: &mut 
         pr.pass("inline");
         cur = inline_calls(it, &cur, &opts.rustc, until);
         pr.result(log, &format!("inline calls (round {round})"), &cur);
+        pr.pass("newtypes");
+        cur = unwrap_newtypes(it, &cur, until);
+        pr.result(log, "newtype structs replaced by their field", &cur);
+        pr.pass("parameters");
+        cur = remove_params(it, &cur, until);
+        pr.result(log, "unused parameters and their arguments", &cur);
         pr.pass("let bindings");
         cur = drop_let_bindings(it, &cur, until);
         pr.result(log, "unused let bindings dropped (the initialiser stays)", &cur);
@@ -209,6 +238,9 @@ pub fn minimize(it: &dyn Oracle, src: &str, opts: &Options, log: &mut ReduceLog,
         cur = remove_dead_code(it, &cur, &opts.rustc, at(9, 20));
     }
     pr.result(log, "dead code", &cur);
+    if !interrupted() {
+        cur = structure_passes(it, cur, &mut pr, log, at(9, 20));
+    }
 
     pr.step("shrinkray (or the built-in expression passes without it)");
     cur = external_round(it, cur, opts, &mut pr, log, (at(9, 20), at(9, 20)));
@@ -244,6 +276,12 @@ pub fn minimize(it: &dyn Oracle, src: &str, opts: &Options, log: &mut ReduceLog,
     pr.pass("lines");
     cur = shrink_lines(it, &cur, at(18, 20));
     pr.result(log, "calls, expressions, lines", &cur);
+    pr.pass("peephole");
+    cur = peep(it, &cur, at(18, 20));
+    pr.result(log, "peephole replacements (operands, values, zeros)", &cur);
+    pr.pass("tokens");
+    cur = shrink_tokens(it, &cur, at(18, 20));
+    pr.result(log, "tokens", &cur);
 
     if !interrupted() && opts.use_treereduce {
         pr.step("treereduce-rust, then our own passes once more (they have the last word)");
@@ -262,6 +300,10 @@ pub fn minimize(it: &dyn Oracle, src: &str, opts: &Options, log: &mut ReduceLog,
             cur = simplify_exprs(it, &cur, at(39, 40));
             pr.pass("lines");
             cur = shrink_lines(it, &cur, at(39, 40));
+            pr.pass("peephole");
+            cur = peep(it, &cur, at(39, 40));
+            pr.pass("tokens");
+            cur = shrink_tokens(it, &cur, at(39, 40));
             pr.result(log, "own passes after treereduce-rust", &cur);
         }
     }

@@ -325,7 +325,7 @@ pub fn strip_parens(it: &dyn Oracle, src: &str) -> String {
 
 /// Edits `(start, end, replacement)` applied greedily from the end of the text, `par_checks()` candidates per round; what lies
 /// before an applied edit keeps its position.
-fn greedy_edits(it: &dyn Oracle, src: &str, mut edits: Vec<(usize, usize, String)>, deadline: Instant) -> String {
+pub(crate) fn greedy_edits(it: &dyn Oracle, src: &str, mut edits: Vec<(usize, usize, String)>, deadline: Instant) -> String {
     let mut cur = src.to_string();
     edits.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
     let width = par_checks();
@@ -411,7 +411,18 @@ pub fn simplify_let_tuples(it: &dyn Oracle, src: &str, deadline: Instant) -> Str
                 continue;
             }
             let Some(close) = matching(b, open) else { continue };
-            let eq = crate::scan::skip_ws(b, close + 1);
+            let mut eq = crate::scan::skip_ws(b, close + 1);
+            // an annotation `: (T1, T2)` is cut together with the pair
+            let mut types: Option<Vec<String>> = None;
+            if b.get(eq) == Some(&b':') && b.get(eq + 1) != Some(&b':') {
+                let topen = crate::scan::skip_ws(b, eq + 1);
+                if b.get(topen) == Some(&b'(') {
+                    if let Some(tclose) = matching(b, topen) {
+                        types = Some(top_args(&cur, topen, tclose).into_iter().map(|(s, e)| cur[s..e].trim().to_string()).collect());
+                        eq = crate::scan::skip_ws(b, tclose + 1);
+                    }
+                }
+            }
             if b.get(eq) != Some(&b'=') || b.get(eq + 1) == Some(&b'=') {
                 continue;
             }
@@ -422,13 +433,20 @@ pub fn simplify_let_tuples(it: &dyn Oracle, src: &str, deadline: Instant) -> Str
             let Some(vclose) = matching(b, vopen) else { continue };
             let pats: Vec<String> = top_args(&cur, open, close).into_iter().map(|(s, e)| cur[s..e].trim().to_string()).collect();
             let vals: Vec<String> = top_args(&cur, vopen, vclose).into_iter().map(|(s, e)| cur[s..e].trim().to_string()).collect();
-            if pats.len() != vals.len() || pats.len() < 2 {
+            if pats.len() != vals.len() || pats.len() < 2 || types.as_ref().is_some_and(|t| t.len() != pats.len()) {
                 continue;
             }
             for i in 0..pats.len() {
-                let rest_p: Vec<&str> = pats.iter().enumerate().filter(|(k, _)| *k != i).map(|(_, p)| p.as_str()).collect();
-                let rest_v: Vec<&str> = vals.iter().enumerate().filter(|(k, _)| *k != i).map(|(_, v)| v.as_str()).collect();
-                let text = if rest_p.len() == 1 { format!("let {} = {}", rest_p[0], rest_v[0]) } else { format!("let ({}) = ({})", rest_p.join(", "), rest_v.join(", ")) };
+                let keep = |k: &usize| *k != i;
+                let rest_p: Vec<&str> = pats.iter().enumerate().filter(|(k, _)| keep(k)).map(|(_, p)| p.as_str()).collect();
+                let rest_v: Vec<&str> = vals.iter().enumerate().filter(|(k, _)| keep(k)).map(|(_, v)| v.as_str()).collect();
+                let rest_t: Option<Vec<&str>> = types.as_ref().map(|t| t.iter().enumerate().filter(|(k, _)| keep(k)).map(|(_, v)| v.as_str()).collect());
+                let text = match (&rest_t, rest_p.len()) {
+                    (None, 1) => format!("let {} = {}", rest_p[0], rest_v[0]),
+                    (None, _) => format!("let ({}) = ({})", rest_p.join(", "), rest_v.join(", ")),
+                    (Some(t), 1) => format!("let {}: {} = {}", rest_p[0], t[0], rest_v[0]),
+                    (Some(t), _) => format!("let ({}): ({}) = ({})", rest_p.join(", "), t.join(", "), rest_v.join(", ")),
+                };
                 edits.push((at, vclose + 1, text));
             }
         }

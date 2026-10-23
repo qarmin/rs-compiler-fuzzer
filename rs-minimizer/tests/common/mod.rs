@@ -20,7 +20,7 @@ pub fn run_program(src: &str) -> Option<String> {
     std::fs::write(&file, src).ok()?;
     let bin = dir.join("bin");
     let compiled = Command::new("rustc").args(["--edition", "2021", "-C", "opt-level=0", "-A", "warnings", "-o"]).arg(&bin).arg(&file).output().ok()?;
-    let out = if compiled.status.success() { Command::new(&bin).output().ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).to_string()) } else { None };
+    let out = if compiled.status.success() { run_with_timeout(&bin, Duration::from_secs(10)) } else { None };
     let _ = std::fs::remove_dir_all(&dir);
     out
 }
@@ -49,4 +49,30 @@ pub fn assert_prints(src: &str, expected: &str) {
 
 pub fn check_oracle(o: &dyn Oracle, src: &str) {
     assert!(o.check(src), "the oracle must accept the starting program:\n{src}");
+}
+
+/// Stdout of the program when it exits successfully within `limit`.
+fn run_with_timeout(bin: &std::path::Path, limit: Duration) -> Option<String> {
+    use std::io::Read;
+    let mut child = Command::new(bin).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).spawn().ok()?;
+    let mut stdout = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut text = String::new();
+        let _ = stdout.read_to_string(&mut text);
+        text
+    });
+    let start = Instant::now();
+    let status = loop {
+        match child.try_wait().ok()? {
+            Some(st) => break st,
+            None if start.elapsed() > limit => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            None => std::thread::sleep(Duration::from_millis(20)),
+        }
+    };
+    let text = reader.join().ok()?;
+    status.success().then_some(text)
 }

@@ -297,7 +297,7 @@ fn drop_hook(it: &dyn Oracle, src: &str) -> String {
 
 /// First reduction step: plain code instead of macros and panic plumbing.
 pub fn unroll(it: &dyn Oracle, src: &str) -> String {
-    let mut cur = expand_macros(it, src);
+    let mut cur = expand_macros(it, &normalize_spacing(src));
     cur = drop_catch_unwind(it, &cur);
     if !cur.contains("catch_unwind") {
         cur = drop_hook(it, &cur);
@@ -305,3 +305,35 @@ pub fn unroll(it: &dyn Oracle, src: &str) -> String {
     cur
 }
 
+
+/// `let(a, b) = ..` is the same program as `let (a, b) = ..`; the passes look for `let ` (reducers that strip whitespace write the
+/// first form).
+pub fn normalize_spacing(src: &str) -> String {
+    let b = src.as_bytes();
+    let mut out = String::with_capacity(src.len() + 8);
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'"' {
+            let e = {
+                let mut k = i + 1;
+                while k < b.len() && b[k] != b'"' {
+                    if b[k] == b'\\' {
+                        k += 1;
+                    }
+                    k += 1;
+                }
+                k.min(b.len() - 1)
+            };
+            out.push_str(&src[i..=e]);
+            i = e + 1;
+        } else if src[i..].starts_with("let(") && (i == 0 || !is_ident(b[i - 1])) {
+            out.push_str("let (");
+            i += 4;
+        } else {
+            let ch = src[i..].chars().next().unwrap();
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+    out
+}

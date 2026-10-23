@@ -340,7 +340,7 @@ fn remap(range: (usize, usize), removed: &[(usize, usize)]) -> Option<(usize, us
 }
 
 /// Groups of ranges deleted together (an item and everything that mentions it), greedy from the end of the text.
-fn delete_groups(it: &dyn Oracle, src: &str, mut groups: Vec<Vec<(usize, usize)>>, deadline: Instant) -> String {
+pub(crate) fn delete_groups(it: &dyn Oracle, src: &str, mut groups: Vec<Vec<(usize, usize)>>, deadline: Instant) -> String {
     let mut cur = src.to_string();
     for g in &mut groups {
         g.sort();
