@@ -28,8 +28,26 @@ impl Config {
 
 /// Flags pinned identically for every configuration, so a difference can only come from the
 /// flags deliberately varied by `Config`. (Later `-C` flags override earlier ones.)
-pub const COMMON_FLAGS: &[&str] =
-    &["--edition", "2021", "--cap-lints", "allow", "-C", "debug-assertions=off", "-C", "overflow-checks=off"];
+pub const COMMON_FLAGS: &[&str] = &[
+    "--edition",
+    "2021",
+    "--cap-lints",
+    "allow",
+    "--force-warn",
+    "function_casts_as_integer",
+    "-C",
+    "debug-assertions=off",
+    "-C",
+    "overflow-checks=off",
+];
+
+/// The address of a function differs on every run (ASLR), so a program that turns one into an integer is no test case. The lint is
+/// forced to warn (`--cap-lints` cannot hide it) and a compilation that shows it counts as failed.
+pub fn casts_function_address(stderr: &str) -> bool {
+    stderr.contains("direct cast of function item") || stderr.contains("function_casts_as_integer") && stderr.contains("warning")
+}
+
+const FN_ADDRESS_MESSAGE: &str = "the program casts a function item into an integer: the address differs on every run";
 
 static COMMON_OVERRIDE: std::sync::Mutex<Option<Vec<String>>> = std::sync::Mutex::new(None);
 
@@ -178,6 +196,9 @@ pub fn build_and_run(rustc: &[String], src: &Path, bin: &Path, cfg: &Config, lim
     if r.code != Some(0) {
         return Outcome::CompileFail(r.stderr);
     }
+    if casts_function_address(&r.stderr) {
+        return Outcome::CompileFail(FN_ADDRESS_MESSAGE.into());
+    }
     let run = match exec(Command::new(bin), lim.run) {
         Ok(r) => r,
         Err(e) => return Outcome::CompileFail(format!("cannot run binary: {e}")),
@@ -202,6 +223,7 @@ pub fn check_only(rustc: &[String], src: &Path, out_dir: &Path, timeout: Duratio
     c.args(COMMON_FLAGS);
     match exec(c, timeout) {
         Ok(r) if r.timed_out => Err("check timed out".into()),
+        Ok(r) if r.code == Some(0) && casts_function_address(&r.stderr) => Err(FN_ADDRESS_MESSAGE.into()),
         Ok(r) if r.code == Some(0) => Ok(()),
         Ok(r) => Err(r.stderr),
         Err(e) => Err(format!("cannot spawn rustc: {e}")),
@@ -223,3 +245,34 @@ pub fn crash_signature(o: &Outcome) -> Option<String> {
     Some(norm.chars().take(160).collect())
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run(src: &str) -> Outcome {
+        let dir = std::env::temp_dir().join(format!("rsfuzz-runner-test-{}-{}", std::process::id(), src.len()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("main.rs");
+        std::fs::write(&file, src).unwrap();
+        let out = build_and_run(&["rustc".to_string()], &file, &dir.join("bin"), &Config::new("O0", "-C opt-level=0"), &Limits { compile: Duration::from_secs(120), run: Duration::from_secs(10) });
+        let _ = std::fs::remove_dir_all(&dir);
+        out
+    }
+
+    #[test]
+    fn a_function_address_turned_into_an_integer_is_not_a_test_case() {
+        match run("fn a() {}\nfn main() {\n    print!(\"{}\", a as i8)\n}\n") {
+            Outcome::CompileFail(msg) => assert!(msg.contains("function item"), "{msg}"),
+            other => panic!("the program must be refused, got {}", other.describe()),
+        }
+    }
+
+    #[test]
+    fn a_plain_program_still_runs() {
+        match run("fn a() -> i8 { 3 }\nfn main() {\n    print!(\"{}\", a() as i32)\n}\n") {
+            Outcome::Ran { stdout, .. } => assert_eq!(stdout, "3"),
+            other => panic!("{}", other.describe()),
+        }
+    }
+}
