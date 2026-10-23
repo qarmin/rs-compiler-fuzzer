@@ -1088,8 +1088,12 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
 
     // issue draft: only the reduced program, the shortest commands, the output and a version table
     let mut is = String::new();
-    let cmd = |c: &Config| format!("rustc reduced.rs {} {}", common_txt, c.flags.join(" ")).split_whitespace().collect::<Vec<_>>().join(" ");
-    let vcmd = |flags: &str| format!("rustc reduced.rs {} {}", common_txt, flags).split_whitespace().collect::<Vec<_>>().join(" ");
+    // `-Z` options are only accepted by nightly: the command in the issue names the toolchain, a plain `rustc` would refuse them
+    let vcmd = |flags: &str| {
+        let compiler = if format!("{common_txt} {flags}").split_whitespace().any(|f| f.starts_with("-Z")) { "rustc +nightly" } else { "rustc" };
+        format!("{compiler} reduced.rs {} {}", common_txt, flags).split_whitespace().collect::<Vec<_>>().join(" ")
+    };
+    let cmd = |c: &Config| vcmd(&c.flags.join(" "));
     let first_yes = matrix2.iter().find(|m| m.2 == Repro::Yes).map(|m| m.0.clone());
     let vv = first_yes
         .as_ref()
