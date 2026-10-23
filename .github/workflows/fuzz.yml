@@ -113,7 +113,7 @@ jobs:
       - run: cargo +stable build --release
 
       - name: Cache the reducers (Shrink Ray, treereduce-rust, cargo-bisect-rustc)
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/sr
