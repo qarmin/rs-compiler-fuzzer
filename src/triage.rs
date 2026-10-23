@@ -307,51 +307,207 @@ fn show_out(o: &Outcome) -> String {
     }
 }
 
+/// Does this flag group set `name` (`opt-level=`, `codegen-units=`, `mir-opt-level=` ...)? `-C opt-level=3`, `-Copt-level=3` and `-Zmir-opt-level=3` all count,
+/// `-Zmir-opt-level=3` does not count as `opt-level=`.
+fn has_flag(g: &[String], name: &str) -> bool {
+    g.iter().any(|t| {
+        let n = t.trim_start_matches('-');
+        n.starts_with(name) || ((n.starts_with('C') || n.starts_with('Z')) && n[1..].starts_with(name))
+    })
+}
+
+/// The flag groups with the one that sets `name` replaced by `new` (appended if there is none): a flag is never given twice.
+fn with_flag(groups: &[Vec<String>], name: &str, new: Vec<String>) -> Vec<Vec<String>> {
+    let mut g2 = groups.to_vec();
+    match g2.iter().position(|g| has_flag(g, name)) {
+        Some(i) => g2[i] = new,
+        None => g2.push(new),
+    }
+    g2
+}
+
+fn variant_of(o: &Outcome, sig: &Option<String>, reference: &Option<Outcome>) -> (bool, String) {
+    let bug = match sig {
+        Some(s) => crash_signature(o).as_deref() == Some(s.as_str()),
+        None => match (o, reference) {
+            (Outcome::Ran { .. }, Some(r)) => o.key() != r.key(),
+            _ => false,
+        },
+    };
+    let out = match o {
+        Outcome::CompileFail(_) if bug => "(compiler crash)".to_string(),
+        Outcome::CompileFail(_) => "(does not compile)".to_string(),
+        other => show_out(other),
+    };
+    (bug, out)
+}
+
+/// The same program at the other `opt-level`s (on the channel the issue shows) and at the other `-Zmir-opt-level`s (nightly): which of them show the bug.
 fn opt_variants(rustc: &[String], src: &Path, base: &Config, bad: &Config, sig: &Option<String>, reference: &Option<Outcome>, lim: &Limits, work: &Path) -> Vec<Variant> {
     let groups = flag_groups(&bad.flags);
-    let pos = groups.iter().position(|g| g.iter().any(|t| t.contains("opt-level=")));
     let mut cfgs: Vec<(Vec<String>, Config)> = Vec::new();
     for l in ["0", "1", "2", "3", "s", "z"] {
-        let new = vec!["-C".to_string(), format!("opt-level={l}")];
-        let mut g2 = groups.clone();
-        match pos {
-            Some(i) => g2[i] = new,
-            None => g2.push(new),
-        }
         let mut c = bad.clone();
         c.name = format!("opt-{l}");
-        c.flags = g2.into_iter().flatten().collect();
+        c.flags = with_flag(&groups, "opt-level=", vec!["-C".to_string(), format!("opt-level={l}")]).into_iter().flatten().collect();
         cfgs.push((rustc.to_vec(), c));
     }
-    // is it the MIR optimisations? (nightly only flag: built with the nightly compiler)
-    let mut m = bad.clone();
-    m.name = "mir0".into();
-    m.flags.push("-Zmir-opt-level=0".into());
-    cfgs.push((vec!["rustc".to_string(), "+nightly".to_string()], m));
+    // MIR optimisation levels need the nightly compiler
+    for l in ["0", "1", "2", "3"] {
+        let mut c = bad.clone();
+        c.name = format!("mir{l}");
+        c.flags = with_flag(&groups, "mir-opt-level=", vec![format!("-Zmir-opt-level={l}")]).into_iter().flatten().collect();
+        cfgs.push((vec!["rustc".to_string(), "+nightly".to_string()], c));
+    }
     let _ = base;
     let id = std::process::id();
     let outs = crate::runner::par_map(&cfgs, 3, |(r, c)| build_and_run(r, src, &work.join(format!("var_{id}_{}", c.name)), c, lim));
     cfgs.iter()
         .zip(outs)
         .filter_map(|((_, c), o)| {
-            if c.name == "mir0" && matches!(&o, Outcome::CompileFail(e) if e.contains("unstable") || e.contains("nightly")) {
+            if c.name.starts_with("mir") && matches!(&o, Outcome::CompileFail(e) if e.contains("only accepted on the nightly") || e.contains("unknown unstable option") || e.contains("unstable option")) {
                 return None; // no nightly installed
             }
-            let bug = match sig {
-                Some(s) => crash_signature(&o).as_deref() == Some(s.as_str()),
-                None => match (&o, reference) {
-                    (Outcome::Ran { .. }, Some(r)) => o.key() != r.key(),
-                    _ => false,
-                },
-            };
-            let out = match &o {
-                Outcome::CompileFail(_) if bug => "(compiler crash)".to_string(),
-                Outcome::CompileFail(_) => "(does not compile)".to_string(),
-                other => show_out(other),
-            };
+            let (bug, out) = variant_of(&o, sig, reference);
             Some(Variant { flags: c.flags.join(" "), bug, out })
         })
         .collect()
+}
+
+/// The culprit found by bisecting the optimisation passes.
+#[derive(Clone, Debug, Default)]
+struct Culprit {
+    kind: String, // "llvm" | "mir"
+    n: usize,
+    total: usize,
+    name: String,
+    target: String,
+    good: Variant,
+    bad: Variant,
+    note: String,
+}
+
+impl Default for Variant {
+    fn default() -> Self {
+        Variant { flags: String::new(), bug: false, out: String::new() }
+    }
+}
+
+fn culprit_to_text(c: &Culprit) -> String {
+    format!(
+        "kind={}\nn={}\ntotal={}\nname={}\ntarget={}\nnote={}\n{}{}",
+        c.kind,
+        c.n,
+        c.total,
+        c.name,
+        c.target,
+        c.note,
+        variants_to_text(&[c.good.clone()]).replace('\t', "\u{1}").lines().map(|l| format!("good={l}\n")).collect::<String>(),
+        variants_to_text(&[c.bad.clone()]).replace('\t', "\u{1}").lines().map(|l| format!("bad={l}\n")).collect::<String>()
+    )
+}
+
+fn culprit_from_text(t: &str) -> Culprit {
+    let mut c = Culprit::default();
+    for l in t.lines() {
+        if let Some(x) = l.strip_prefix("kind=") {
+            c.kind = x.into();
+        } else if let Some(x) = l.strip_prefix("n=") {
+            c.n = x.parse().unwrap_or(0);
+        } else if let Some(x) = l.strip_prefix("total=") {
+            c.total = x.parse().unwrap_or(0);
+        } else if let Some(x) = l.strip_prefix("name=") {
+            c.name = x.into();
+        } else if let Some(x) = l.strip_prefix("target=") {
+            c.target = x.into();
+        } else if let Some(x) = l.strip_prefix("note=") {
+            c.note = x.into();
+        } else if let Some(x) = l.strip_prefix("good=") {
+            c.good = variants_from_text(&x.replace('\u{1}', "\t")).pop().unwrap_or_default();
+        } else if let Some(x) = l.strip_prefix("bad=") {
+            c.bad = variants_from_text(&x.replace('\u{1}', "\t")).pop().unwrap_or_default();
+        }
+    }
+    c
+}
+
+/// Binary search over the passes of LLVM (`-C llvm-args=-opt-bisect-limit=N`, one codegen unit) or of MIR (`-Zmir-opt-bisect-limit=N`)
+/// for the first pass whose execution makes the difference. Nightly only.
+fn pass_bisect(kind: &str, src: &Path, base: &Config, bad: &Config, sig: &Option<String>, lim: &Limits, work: &Path) -> Culprit {
+    let rustc = vec!["rustc".to_string(), "+nightly".to_string()];
+    let groups = flag_groups(&bad.flags);
+    let mk = |n: i64| -> Config {
+        let g2 = if kind == "llvm" {
+            let g = with_flag(&groups, "codegen-units=", vec!["-C".into(), "codegen-units=1".into()]);
+            with_flag(&g, "llvm-args=-opt-bisect-limit=", vec!["-C".into(), format!("llvm-args=-opt-bisect-limit={n}")])
+        } else {
+            with_flag(&groups, "mir-opt-bisect-limit=", vec![format!("-Zmir-opt-bisect-limit={n}")])
+        };
+        let mut c = bad.clone();
+        c.name = format!("bis{}", n.max(0));
+        c.flags = g2.into_iter().flatten().collect();
+        c
+    };
+    let mut res = Culprit { kind: kind.to_string(), ..Default::default() };
+    let id = std::process::id();
+    // the crate is named after the file: keep the temporary name out of the report
+    let sdir = work.join(format!("pbsrc_{id}"));
+    let _ = std::fs::create_dir_all(&sdir);
+    let _ = std::fs::copy(src, sdir.join("reduced.rs"));
+    let src_owned = sdir.join("reduced.rs");
+    let src = src_owned.as_path();
+    let reference = Some(build_and_run(&rustc, src, &work.join(format!("pb_{id}_ref")), base, lim));
+    let run = |n: i64| -> (Variant, bool) {
+        let c = mk(n);
+        let o = build_and_run(&rustc, src, &work.join(format!("pb_{id}_{}", c.name)), &c, lim);
+        let (bug, out) = variant_of(&o, sig, &reference);
+        (Variant { flags: c.flags.join(" "), bug, out }, bug)
+    };
+    // all passes, listed
+    let c_all = mk(1_000_000);
+    let mut cmd = crate::runner::rustc_cmd(&rustc);
+    cmd.args(crate::runner::compile_args(src, &work.join(format!("pb_{id}_list")), &c_all));
+    let listing = exec(cmd, lim.compile).map(|r| r.stderr).unwrap_or_default();
+    let passes: Vec<&str> = listing.lines().filter(|l| l.starts_with("BISECT: running pass (")).collect();
+    res.total = passes.len();
+    if passes.is_empty() {
+        res.note = "the compiler did not list any pass".into();
+        return res;
+    }
+    let (v_all, bug_all) = run(res.total as i64);
+    if !bug_all {
+        res.note = format!("does not reproduce with {} (so the difference depends on the pass pipeline as a whole)", v_all.flags);
+        return res;
+    }
+    let (v0, bug0) = run(0);
+    if bug0 {
+        res.note = "still present with no optimisation pass at all".into();
+        return res;
+    }
+    let (mut lo, mut hi, mut v_hi, mut v_lo) = (0usize, res.total, v_all, v0);
+    while hi - lo > 1 {
+        let mid = (lo + hi) / 2;
+        let (v, bug) = run(mid as i64);
+        if bug {
+            hi = mid;
+            v_hi = v;
+        } else {
+            lo = mid;
+            v_lo = v;
+        }
+    }
+    // "BISECT: running pass (N) name on target"
+    let line = passes[hi - 1];
+    let rest = line.splitn(2, ") ").nth(1).unwrap_or("");
+    let (name, target) = rest.split_once(" on ").unwrap_or((rest, ""));
+    res.n = hi;
+    res.name = name.to_string();
+    let t = crate::demangle::demangle_text(target.trim());
+    res.target = t.strip_prefix("function (").and_then(|x| x.strip_suffix(')')).unwrap_or(&t).to_string();
+    let _ = std::fs::remove_dir_all(&sdir);
+    res.good = v_lo;
+    res.bad = v_hi;
+    res
 }
 
 fn search_to_text(s: &Search) -> String {
@@ -583,6 +739,25 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
         let _ = std::fs::write(dir.join("variants.txt"), variants_to_text(&variants));
     }
 
+    // 4c. which optimisation pass? (opt-bisect: LLVM when MIR is cleared, MIR otherwise)
+    let culprit_kind = if mir_opt.starts_with("llvm") { Some("llvm") } else if mir_opt.starts_with("mir") { Some("mir") } else { None };
+    let cul_reused = cur("pass_bisect") && dir.join("culprit.txt").exists();
+    let culprit: Option<Culprit> = if cul_reused {
+        Some(culprit_from_text(&std::fs::read_to_string(dir.join("culprit.txt")).unwrap_or_default()))
+    } else if let (true, Some(k)) = (still, culprit_kind) {
+        Some(pass_bisect(k, &reduced_path, &base, &bad, &sig, &lim, &o.work))
+    } else {
+        None
+    };
+    match &culprit {
+        Some(c) => {
+            let _ = std::fs::write(dir.join("culprit.txt"), culprit_to_text(c));
+        }
+        None => {
+            let _ = std::fs::remove_file(dir.join("culprit.txt"));
+        }
+    }
+
     // 5. Miri (only meaningful for wrong-code findings)
     let ub_reused = !crash && still && cur("ub_check") && old.contains_key("miri");
     let (m, miri_agrees) = if crash || !still {
@@ -703,6 +878,16 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
         "skipped" => put(&mut st, "ub_check", "todo", &ctx, m.detail.clone()),
         _ => put(&mut st, "ub_check", "partial", &ctx, format!("Miri could not decide: {}", m.detail)),
     }
+    }
+    if cul_reused {
+        keep(&mut st, "pass_bisect");
+    } else {
+        match &culprit {
+            Some(c) if c.n > 0 => put(&mut st, "pass_bisect", "done", &ctx, format!("first {} pass that matters: #{} of {}: {} on {}", c.kind.to_uppercase(), c.n, c.total, c.name, c.target)),
+            Some(c) => put(&mut st, "pass_bisect", "done", &ctx, format!("tried, {} pass bisection could not isolate a pass: {}", c.kind, c.note)),
+            None if still => put(&mut st, "pass_bisect", "n/a", &ctx, "neither MIR nor LLVM could be determined as the cause".into()),
+            None => put(&mut st, "pass_bisect", "todo", &ctx, "needs a reproducing program first".into()),
+        }
     }
     if mir_reused {
         keep(&mut st, "mir_llvm");
@@ -906,7 +1091,8 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
         };
         entries.push(Entry { flags: bad.flags.join(" "), text: if crash { crash_err.clone() } else { show_out(b) }, fails: true });
     }
-    for v in &variants {
+    let culprit_variants: Vec<Variant> = culprit.iter().filter(|c| c.n > 0).flat_map(|c| [c.good.clone(), c.bad.clone()]).collect();
+    for v in variants.iter().chain(culprit_variants.iter()) {
         if entries.iter().any(|e| e.flags == v.flags) {
             continue;
         }
@@ -935,6 +1121,11 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
                 let _ = writeln!(is, "{lead}\n```\n{}\n```\n{verb}\n```\n{text}\n```\n", cmds.join("\n"));
             }
         }
+    }
+    if let Some(c) = culprit.as_ref().filter(|c| c.n > 0) {
+        let what = if c.kind == "llvm" { "LLVM pass" } else { "MIR pass" };
+        let limit = if c.kind == "llvm" { "-C llvm-args=-opt-bisect-limit" } else { "-Zmir-opt-bisect-limit" };
+        let _ = writeln!(is, "Bisecting the optimization passes with `{limit}`: the first {what} that changes the result is pass #{} of {}, `{}` on `{}`.\n", c.n, c.total, c.name, c.target);
     }
     // Miri is a required step of every finding; its output only belongs here when the program has no `unsafe` and Miri still complains
     if !m.report.is_empty() && !reduced.contains("unsafe") {
@@ -988,7 +1179,7 @@ pub fn stale_findings(pkg: &Path, skip: &std::collections::HashSet<String>) -> V
             let mut st = read_cfg(&p.join("status.cfg"));
             let meta = read_cfg(&p.join("repro.cfg"));
             steps::backfill(&mut st, &p);
-            let done = st.get("state").map(|s| s == "fixed").unwrap_or(false) || meta.get("mode").map(|m| m == "miri").unwrap_or(false) || skip.contains(&name);
+            let done = st.get("state").map(|s| s == "fixed" || s == "not-reproducing").unwrap_or(false) || meta.get("mode").map(|m| m == "miri").unwrap_or(false) || skip.contains(&name);
             if done || steps::has_failure(&st) {
                 return None;
             }

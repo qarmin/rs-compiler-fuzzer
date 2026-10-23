@@ -681,6 +681,7 @@ pub fn verify(o: &Opts, root: &Path, report_dir: &Path, label: &str) -> i32 {
     std::fs::create_dir_all(&work).unwrap();
     std::fs::create_dir_all(report_dir).unwrap();
     let (mut still, mut fixed) = (Vec::new(), Vec::new());
+    let mut removed = 0usize;
     let jobs = o.jobs;
     let results = par_map(&dirs, jobs, |d| {
         let meta: std::collections::HashMap<String, String> = std::fs::read_to_string(d.join("repro.cfg"))
@@ -704,31 +705,55 @@ pub fn verify(o: &Opts, root: &Path, report_dir: &Path, label: &str) -> i32 {
         let name = d.file_name().unwrap().to_string_lossy().to_string();
         if diverges {
             eprintln!("STILL {name} [{badname}] baseline: {b}; bad: {x}");
-            still.push(name);
+            still.push(name.clone());
         } else {
             eprintln!("FIXED {name} [{badname}]");
-            fixed.push(name);
+            fixed.push(name.clone());
         }
-        // record the result in the finding itself (state is `fixed` only when no verified channel reproduces it)
+        // record the result in the finding itself
         if !label.is_empty() {
             let path = d.join("status.cfg");
             let mut st = crate::triage::read_cfg(&path);
             st.insert(format!("repro.{label}"), if diverges { "yes".into() } else { "no".into() });
             let date = std::process::Command::new("date").args(["-u", "+%F"]).output().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
             st.insert("last_verified".into(), date.clone());
-            let any_yes = st.iter().any(|(k, v)| k.starts_with("repro.") && v.starts_with("yes"));
-            let was = st.get("state").cloned().unwrap_or_default();
-            let now = if any_yes { "open" } else { "fixed" };
-            if was != now {
-                st.insert("state".into(), now.into());
-                st.insert("state_changed".into(), date);
+            if label == "nightly" {
+                // the newest nightly is the reference: a bug that is gone there is gone (two checks in a row, so one odd run
+                // cannot delete a finding); fixed findings are removed from the package, a line in `fixed.txt` remembers them
+                if diverges {
+                    st.insert("nightly_misses".into(), "0".into());
+                    if st.get("state").map(|s| s != "open").unwrap_or(false) {
+                        st.insert("state".into(), "open".into());
+                        st.insert("state_changed".into(), date.clone());
+                    }
+                } else {
+                    let n: u32 = st.get("nightly_misses").and_then(|v| v.parse().ok()).unwrap_or(0) + 1;
+                    st.insert("nightly_misses".into(), n.to_string());
+                    if n >= 2 {
+                        let ver = std::process::Command::new(&o.rustc[0]).args(&o.rustc[1..]).arg("-V").output().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
+                        let tomb = root.parent().map(|p| p.join("fixed.txt"));
+                        if let Some(t) = tomb {
+                            let mut text = std::fs::read_to_string(&t).unwrap_or_default();
+                            text.push_str(&format!("{name}\t{date}\t{ver}\t{}\n", st.get("first_seen").cloned().unwrap_or_default()));
+                            let _ = std::fs::write(&t, text);
+                        }
+                        let _ = std::fs::remove_dir_all(d);
+                        eprintln!("REMOVED {name}: no longer reproduces on the newest nightly (twice in a row)");
+                        removed += 1;
+                        continue;
+                    }
+                    st.insert("state".into(), "not-reproducing".into());
+                    st.insert("state_changed".into(), date);
+                }
+            } else {
+                let _ = &mut st;
             }
             crate::triage::write_cfg(&path, &st);
         }
     }
     let _ = std::fs::write(report_dir.join("fixed.txt"), fixed.join("\n"));
     let _ = std::fs::write(report_dir.join("still.txt"), still.join("\n"));
-    eprintln!("verify: {} still reproduce, {} fixed/not reproducing", still.len(), fixed.len());
+    eprintln!("verify: {} still reproduce, {} fixed/not reproducing, {removed} removed from the package", still.len(), fixed.len());
     let _ = std::fs::remove_dir_all(&work);
     0
 }
