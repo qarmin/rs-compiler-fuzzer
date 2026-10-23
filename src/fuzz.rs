@@ -406,7 +406,8 @@ impl Fuzzer<'_> {
         let _ = writeln!(r, "## Toolchain\n```\n{}\n```\n", self.version.trim());
         for (cfg, out) in [base, bad] {
             let _ = writeln!(r, "## `{}`: {}\n", cfg.name, out.describe());
-            let _ = writeln!(r, "```\nrustc case.rs {} {}\n```", crate::runner::COMMON_FLAGS.join(" "), cfg.flags.join(" "));
+            let line = format!("{} {}", crate::runner::shown_flags(&crate::runner::COMMON_FLAGS.iter().map(|s| s.to_string()).collect::<Vec<_>>()), cfg.flags.join(" "));
+            let _ = writeln!(r, "```\n{} case.rs {line}\n```", crate::runner::compiler_for(&line));
             match out {
                 Outcome::CompileFail(e) => {
                     let _ = writeln!(r, "stderr (truncated):\n```\n{}\n```", e.chars().take(6000).collect::<String>());

@@ -111,7 +111,8 @@ impl State<'_> {
         std::fs::write(dir.join("case.rs"), &single).unwrap();
         std::fs::write(dir.join("signature.txt"), format!("{kind}: {sig}")).unwrap();
         let native = &self.o.configs[0];
-        let native_cmd = format!("rustc case.rs {} {} -o case && ./case", crate::runner::COMMON_FLAGS.join(" "), native.flags.join(" ")).replace("  ", " ");
+        let native_line = format!("{} {}", crate::runner::shown_flags(&crate::runner::COMMON_FLAGS.iter().map(|s| s.to_string()).collect::<Vec<_>>()), native.flags.join(" "));
+        let native_cmd = format!("{} case.rs {native_line} -o case && ./case", crate::runner::compiler_for(&native_line)).replace("  ", " ");
         let miri_cmd = "cargo new miri_case && cp case.rs miri_case/src/main.rs && cd miri_case\n\
             MIRIFLAGS=\"-Zmiri-disable-isolation -Zmiri-ignore-leaks\" CARGO_PROFILE_RELEASE_OPT_LEVEL=0 CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS=false \\\n\
             CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=false cargo +nightly miri run --release";

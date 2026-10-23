@@ -47,6 +47,25 @@ pub fn casts_function_address(stderr: &str) -> bool {
     stderr.contains("direct cast of function item") || stderr.contains("function_casts_as_integer") && stderr.contains("warning")
 }
 
+/// The pinned flags as they are shown in reports: without the lint that only guards the test cases.
+pub fn shown_flags(flags: &[String]) -> String {
+    let mut out: Vec<&str> = Vec::new();
+    let mut it = flags.iter().map(String::as_str).peekable();
+    while let Some(f) = it.next() {
+        if f == "--force-warn" && it.peek() == Some(&"function_casts_as_integer") {
+            it.next();
+        } else {
+            out.push(f);
+        }
+    }
+    out.join(" ")
+}
+
+/// `-Z` options are only accepted by nightly: a command that uses one has to say so.
+pub fn compiler_for(flags: &str) -> &'static str {
+    if flags.split_whitespace().any(|f| f.starts_with("-Z")) { "rustc +nightly" } else { "rustc" }
+}
+
 const FN_ADDRESS_MESSAGE: &str = "the program casts a function item into an integer: the address differs on every run";
 
 static COMMON_OVERRIDE: std::sync::Mutex<Option<Vec<String>>> = std::sync::Mutex::new(None);
@@ -274,5 +293,19 @@ mod tests {
             Outcome::Ran { stdout, .. } => assert_eq!(stdout, "3"),
             other => panic!("{}", other.describe()),
         }
+    }
+}
+
+#[cfg(test)]
+mod display_tests {
+    use super::*;
+
+    #[test]
+    fn z_options_get_the_nightly_toolchain_and_the_guard_lint_is_not_shown() {
+        assert_eq!(compiler_for("-C opt-level=3 -Zmir-opt-level=0"), "rustc +nightly");
+        assert_eq!(compiler_for("-C opt-level=3"), "rustc");
+        let flags: Vec<String> = COMMON_FLAGS.iter().map(|s| s.to_string()).collect();
+        let shown = shown_flags(&flags);
+        assert!(!shown.contains("function_casts_as_integer") && shown.contains("--cap-lints allow"), "{shown}");
     }
 }
