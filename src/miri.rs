@@ -34,7 +34,7 @@ impl Miri {
     fn new(work: &Path) -> Miri {
         let proj = work.join("miri_proj");
         std::fs::create_dir_all(proj.join("src")).unwrap();
-        std::fs::write(proj.join("Cargo.toml"), "[package]\nname = \"miri_fuzz\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n# the fuzz configs build with --cap-lints allow; the deny-by-default lints must not fail the build here\n[lints.rust]\noverflowing_literals = \"allow\"\narithmetic_overflow = \"allow\"\nunconditional_panic = \"allow\"\ninvalid_value = \"allow\"\n").unwrap();
+        std::fs::write(proj.join("Cargo.toml"), "[package]\nname = \"miri_fuzz\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n# the project lives below the repository, which is a workspace now: it must not be taken for a member\n[workspace]\n\n# the fuzz configs build with --cap-lints allow; the deny-by-default lints must not fail the build here\n[lints.rust]\noverflowing_literals = \"allow\"\narithmetic_overflow = \"allow\"\nunconditional_panic = \"allow\"\ninvalid_value = \"allow\"\n").unwrap();
         let main = proj.join("src/main.rs");
         Miri { proj, main }
     }
