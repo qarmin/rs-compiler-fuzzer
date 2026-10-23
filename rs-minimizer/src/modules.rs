@@ -136,6 +136,11 @@ pub fn hoist_modules(it: &dyn Oracle, src: &str, keep: &dyn Fn(&str) -> bool, ru
     if names.is_empty() {
         return src.to_string();
     }
+    if names.len() > 12 {
+        // dozens of modules are a batch of independent cases: hoisting them one by one costs an oracle call each and flattens nothing useful
+        info!("{} top-level modules: hoisting skipped (it is meant for a handful)", names.len());
+        return src.to_string();
+    }
     let all = hoist(src, &names);
     if it.check(&all) {
         info!("hoisted the modules {} into the crate root ({} -> {} lines)", names.join(", "), src.lines().count(), all.lines().count());

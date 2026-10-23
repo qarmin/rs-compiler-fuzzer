@@ -1,6 +1,6 @@
 //! The default reduction pipeline. Callers with knowledge of how their programs were produced plug in through `Hook`.
 
-use crate::control::{expired, interrupted, last_run_complete, par_checks, reset_deadline_flag, set_stage};
+use crate::control::{oracle_runs, expired, interrupted, last_run_complete, par_checks, reset_deadline_flag, set_stage};
 use crate::deadcode::remove_dead_code;
 use crate::exprs::{drop_calls, drop_let_bindings, flatten_blocks, simplify_exprs, simplify_let_tuples, simplify_lets, strip_parens};
 use crate::external::{shrinkray, shrinkray_available, treereduce};
@@ -85,6 +85,9 @@ struct Progress {
     lines: usize,
     bytes: usize,
     n: usize,
+    /// oracle calls and time at the previous RESULT line: what a pass cost
+    last_runs: usize,
+    last_at: Instant,
 }
 
 impl Progress {
@@ -110,11 +113,15 @@ impl Progress {
             std::cmp::Ordering::Equal => "same".to_string(),
             std::cmp::Ordering::Greater => format!("+{}", new - old),
         };
+        let runs = oracle_runs();
+        let cost = format!("{} oracle calls in {:.1}s", runs - self.last_runs, self.last_at.elapsed().as_secs_f32());
         if l == self.lines && b == self.bytes {
-            log.push(format!("RESULT [{tool}]: no change ({l} lines, {b} bytes), {:.0}s in total", self.start.elapsed().as_secs_f32()));
+            log.push(format!("RESULT [{tool}]: no change ({l} lines, {b} bytes); cost: {cost}; {:.0}s in total", self.start.elapsed().as_secs_f32()));
         } else {
-            log.push(format!("RESULT [{tool}]: {} -> {l} lines ({}), {} -> {b} bytes ({}), {:.0}s in total", self.lines, delta(self.lines, l), self.bytes, delta(self.bytes, b), self.start.elapsed().as_secs_f32()));
+            log.push(format!("RESULT [{tool}]: {} -> {l} lines ({}), {} -> {b} bytes ({}); cost: {cost}; {:.0}s in total", self.lines, delta(self.lines, l), self.bytes, delta(self.bytes, b), self.start.elapsed().as_secs_f32()));
         }
+        self.last_runs = runs;
+        self.last_at = Instant::now();
         self.lines = l;
         self.bytes = b;
     }
@@ -245,11 +252,12 @@ fn cheap_phase(it: &dyn Oracle, mut cur: String, pr: &mut Progress, log: &mut Re
 
 pub fn minimize(it: &dyn Oracle, src: &str, opts: &Options, log: &mut ReduceLog, hook: Hook) -> String {
     reset_deadline_flag();
+    crate::control::start_clock();
     let start = Instant::now();
     let budget = opts.budget;
     let at = |num: u32, den: u32| start + budget * num / den;
     let mut cur = src.to_string();
-    let mut pr = Progress { start, lines: cur.lines().count(), bytes: cur.len(), n: 0 };
+    let mut pr = Progress { start, lines: cur.lines().count(), bytes: cur.len(), n: 0, last_runs: oracle_runs(), last_at: start };
     info!("reduction starts: {} lines, {} bytes, budget {}s, {} oracle calls at once", pr.lines, pr.bytes, budget.as_secs(), par_checks());
     info!("plan: cheap deletions first, the passes that grow or probe the program only once it has fewer than {BIG_LINES} lines (or {CHEAP_SECS}s have passed)");
 

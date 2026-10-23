@@ -76,16 +76,21 @@ impl Interest {
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("main.rs");
         std::fs::write(&path, src).unwrap();
-        let cfgs = [&self.a, &self.b];
-        let outs = par_map(&cfgs, 2, |c| build_and_run(&self.rustc, &path, &dir.join(format!("bin_{}", c.name)), c, &self.limits));
+        let run = |c: &Config| build_and_run(&self.rustc, &path, &dir.join(format!("bin_{}", c.name)), c, &self.limits);
+        // the reference build first: a candidate that does not even compile and run there is not interesting, and the (usually much
+        // slower) second build is skipped. Most candidates of a reduction are such.
+        let first = run(&self.a);
+        let interesting = if !matches!(first, Outcome::Ran { .. }) {
+            false
+        } else {
+            let second = run(&self.b);
+            match &self.crash_sig {
+                Some(sig) => crate::runner::crash_signature(&second).as_deref() == Some(sig.as_str()),
+                None => matches!(second, Outcome::Ran { .. }) && first.key() != second.key(),
+            }
+        };
         let _ = std::fs::remove_dir_all(&dir);
-        match &self.crash_sig {
-            Some(sig) => matches!(&outs[0], Outcome::Ran { .. }) && crate::runner::crash_signature(&outs[1]).as_deref() == Some(sig.as_str()),
-            None => match (&outs[0], &outs[1]) {
-                (Outcome::Ran { .. }, Outcome::Ran { .. }) => outs[0].key() != outs[1].key(),
-                _ => false,
-            },
-        }
+        interesting
     }
 
     /// Serialise for the `interesting` subcommand used as treereduce's oracle.

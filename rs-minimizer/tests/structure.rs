@@ -179,3 +179,26 @@ fn items_and_their_users_are_deleted_in_chunks_too() {
     assert!(out.contains("mod m5") && !out.contains("mod m6 ") && !out.contains("mod m4 "), "{out}");
     assert!(calls.load(Ordering::Relaxed) < 50, "{} oracle calls", calls.load(Ordering::Relaxed));
 }
+
+#[test]
+fn a_statement_takes_the_lets_that_only_fed_it_with_it() {
+    use rs_minimizer::items::shrink_siblings;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    // 60 chains of four lets that end in an output; only the output of chain 7 matters
+    let mut src = String::from("fn main() {\n    let mut out = Vec::new();\n");
+    for i in 0..60 {
+        src.push_str(&format!("    let a{i} = {i}u32;\n    let b{i} = a{i} + 1;\n    let c{i} = b{i} * 2;\n    out.push(c{i});\n"));
+    }
+    src.push_str("    println!(\"{}\", out[0]);\n}\n");
+    let src = src.replace("out[0]", "out.iter().sum::<u32>() * 0 + out[0]");
+    let calls = AtomicUsize::new(0);
+    // the first push must stay (out[0]); everything else is noise whose chains can go together with their push
+    let o = counting_oracle(&calls, "out.push", 2);
+    check_oracle(&o, &src);
+    calls.store(0, Ordering::Relaxed);
+    rs_minimizer::control::set_parallel(8);
+    let out = shrink_siblings(&o, &src, far());
+    assert_eq!(out.matches("out.push").count(), 1, "{out}");
+    assert!(!out.contains("a30") && !out.contains("c59"), "{out}");
+    assert!(calls.load(Ordering::Relaxed) < 60, "chains removed with their push: {} oracle calls (one statement at a time is 240)", calls.load(Ordering::Relaxed));
+}

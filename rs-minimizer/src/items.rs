@@ -530,40 +530,104 @@ fn list_key(src: &str, list: &[(usize, usize)]) -> u64 {
     h
 }
 
-/// ddmin over one list of siblings: chunks of consecutive siblings are deleted, halving the chunk size.
-fn ddmin_siblings(it: &dyn Oracle, cur: &mut String, mut list: Vec<(usize, usize)>, deadline: Instant) {
-    let width = par_checks();
-    let mut n = (list.len() / 2).max(1);
+/// Name bound by a plain `let name = ..;` / `let mut name = ..;` statement.
+fn let_name(text: &str) -> Option<&str> {
+    let rest = text.strip_prefix("let ")?.trim_start();
+    let rest = rest.strip_prefix("mut ").map(str::trim_start).unwrap_or(rest);
+    let name: &str = &rest[..rest.find(|c: char| !(c.is_alphanumeric() || c == '_')).unwrap_or(rest.len())];
+    (!name.is_empty() && name != "_" && rest[name.len()..].trim_start().starts_with(['=', ':'])).then_some(name)
+}
+
+/// Statements that only existed for the removed ones: a `let x = ..;` whose name no remaining statement behind it mentions. One
+/// oracle call then removes a result together with everything that computed it (a backward slice).
+fn cascade(src: &str, list: &[(usize, usize)], removed: &mut Vec<bool>) {
     loop {
-        let mut i = list.len() as isize - n as isize;
+        let mut changed = false;
+        for j in (0..list.len()).rev() {
+            if removed[j] {
+                continue;
+            }
+            let Some(name) = let_name(&src[list[j].0..list[j].1]) else { continue };
+            let used = (j + 1..list.len()).any(|k| !removed[k] && mentions(&src[list[k].0..list[k].1], name));
+            if !used {
+                removed[j] = true;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+}
+
+/// ddmin over one list of siblings: chunks of consecutive siblings are deleted, halving the chunk size. For statement lists a
+/// deleted statement takes the `let`s that only fed it with it.
+fn ddmin_siblings(it: &dyn Oracle, cur: &mut String, mut list: Vec<(usize, usize)>, with_cascade: bool, deadline: Instant) {
+    let width = par_checks();
+    // what ddmin deletes: all siblings, or for statement lists only the statements that are not plain `let`s (the lets go with
+    // the statements that used them, see `cascade`)
+    let units_of = |cur: &str, list: &[(usize, usize)]| -> Vec<usize> {
+        let roots: Vec<usize> = (0..list.len()).filter(|&j| let_name(&cur[list[j].0..list[j].1]).is_none()).collect();
+        if with_cascade && roots.len() >= 2 { roots } else { (0..list.len()).collect() }
+    };
+    let mut units = units_of(cur, &list);
+    let mut n = (units.len() / 2).max(1);
+    loop {
+        let mut i = units.len() as isize - n as isize;
         while i >= 0 {
             if expired(deadline) {
                 return;
             }
             let starts: Vec<isize> = (0..width as isize).map(|k| i - k * n as isize).take_while(|&s| s >= 0).collect();
-            let cut = |s: isize| {
-                let (a, z) = (list[s as usize].0, list[s as usize + n - 1].1);
-                format!("{}{}", &cur[..a], &cur[z..])
+            let plans: Vec<Vec<bool>> = starts
+                .iter()
+                .map(|&s| {
+                    let mut removed = vec![false; list.len()];
+                    for &u in &units[s as usize..s as usize + n] {
+                        removed[u] = true;
+                    }
+                    if with_cascade {
+                        cascade(cur, &list, &mut removed);
+                    }
+                    removed
+                })
+                .collect();
+            let cut = |removed: &[bool]| {
+                let mut t = cur.clone();
+                for (j, &r) in removed.iter().enumerate().rev() {
+                    if r {
+                        t.replace_range(list[j].0..list[j].1, "");
+                    }
+                }
+                t
             };
-            let cands: Vec<String> = starts.iter().map(|&s| cut(s)).collect();
+            let cands: Vec<String> = plans.iter().map(|p| cut(p)).collect();
             let res = par_map(&cands, width, |c| !c.trim().is_empty() && it.check(c));
             match res.iter().position(|&ok| ok) {
                 Some(p) => {
-                    let s = starts[p] as usize;
-                    let (a, z) = (list[s].0, list[s + n - 1].1);
+                    let removed = &plans[p];
                     *cur = cands[p].clone();
-                    let removed = z - a;
-                    list.drain(s..s + n);
-                    for r in list.iter_mut().skip(s) {
-                        r.0 -= removed;
-                        r.1 -= removed;
+                    let mut shift = 0;
+                    let mut kept: Vec<(usize, usize)> = Vec::new();
+                    for (j, &(a, z)) in list.iter().enumerate() {
+                        if removed[j] {
+                            shift += z - a;
+                        } else {
+                            kept.push((a - shift, z - shift));
+                        }
                     }
-                    i = (s as isize).min(list.len() as isize - n as isize);
+                    list = kept;
+                    if list.len() < 2 {
+                        return;
+                    }
+                    units = units_of(cur, &list);
+                    // the units before the removed ones are the same units
+                    i = starts[p].min(units.len() as isize - n as isize);
                 }
                 None => i = starts.last().copied().unwrap_or(0) - n as isize,
             }
         }
-        if n == 1 || list.len() < 2 {
+        if n == 1 || units.len() < 2 {
             return;
         }
         n = (n / 2).max(1);
@@ -581,11 +645,13 @@ pub fn shrink_siblings(it: &dyn Oracle, src: &str, deadline: Instant) -> String 
         }
         let mut lists = sibling_lists(&cur);
         lists.sort_by_key(|(prio, l)| (*prio, std::cmp::Reverse(l.last().map(|r| r.1).unwrap_or(0) - l.first().map(|r| r.0).unwrap_or(0))));
-        let Some((_, list)) = lists.into_iter().find(|(_, l)| !done.contains(&list_key(&cur, l))) else { break };
+        let Some((prio, list)) = lists.into_iter().find(|(_, l)| !done.contains(&list_key(&cur, l))) else { break };
         done.insert(list_key(&cur, &list));
         let before = cur.len();
-        ddmin_siblings(it, &mut cur, list.clone(), deadline);
+        ddmin_siblings(it, &mut cur, list.clone(), prio == 0, deadline);
         if cur.len() != before {
+            // deleted statements leave empty lines behind; they carry no meaning
+            cur = cur.lines().filter(|l| !l.trim().is_empty()).collect::<Vec<_>>().join("\n") + "\n";
             info!("siblings ({} items or statements in a list): {} -> {} bytes", list.len(), before, cur.len());
             // what is left of the list is finished; the lists nested in its survivors are found by the next round
         }

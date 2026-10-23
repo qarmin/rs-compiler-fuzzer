@@ -24,9 +24,10 @@ pub fn par() -> usize {
     PARALLEL.load(Ordering::Relaxed)
 }
 
-/// Candidates evaluated at once by the built-in passes: an oracle call usually compiles two configurations side by side.
+/// Candidates evaluated at once by the built-in passes: most oracle calls stop after one compilation (a candidate that fails there is
+/// not compiled a second time), and rustc itself is multi-threaded, so a bit more than half of the jobs.
 pub fn par_checks() -> usize {
-    (par() / 2).max(1)
+    (par() * 3 / 4).max(1)
 }
 
 pub fn interrupted() -> bool {
@@ -102,6 +103,21 @@ pub fn rebase_checkpoint(src: &str) {
     info!("[{}] saved as the new baseline (a bigger but simpler program): {} lines, {} bytes ({})", stage(), src.lines().count(), src.len(), path.display());
 }
 
+static LAST_LOG: Mutex<Option<Instant>> = Mutex::new(None);
+static CLOCK: Mutex<Option<Instant>> = Mutex::new(None);
+
+/// Starts the clock that the attempt rate in the improvement lines is measured against.
+pub fn start_clock() {
+    *CLOCK.lock().unwrap() = Some(Instant::now());
+}
+
+/// `attempt 125, 3.4/s`: how many oracle calls were made so far and how fast they go.
+fn attempts() -> String {
+    let runs = ORACLE_RUNS.load(Ordering::Relaxed);
+    let secs = CLOCK.lock().unwrap().map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0).max(0.001);
+    format!("attempt {runs}, {:.1}/s", runs as f64 / secs)
+}
+
 static STAGE: Mutex<String> = Mutex::new(String::new());
 
 /// Name of the pass that is running, shown in front of every improvement it finds.
@@ -117,9 +133,15 @@ fn note_interesting(src: &str) {
     let Some(path) = CHECKPOINT.lock().unwrap().clone() else { return };
     let mut best = BEST.lock().unwrap();
     if best.as_ref().map(|b| src.len() < b.len()).unwrap_or(true) {
-        match best.as_ref() {
-            Some(b) => info!("[{}] smaller program: {} -> {} lines, {} -> {} bytes (saved to {})", stage(), b.lines().count(), src.lines().count(), b.len(), src.len(), path.display()),
-            None => info!("[{}] first interesting program: {} lines, {} bytes (saved to {})", stage(), src.lines().count(), src.len(), path.display()),
+        // a pass that finds many tiny improvements would flood the log: a line when it matters (1% of the program) or every 3 seconds
+        let mut last = LAST_LOG.lock().unwrap();
+        let big = best.as_ref().is_none_or(|b| (b.len() - src.len()) * 100 >= b.len());
+        if big || last.is_none_or(|t| t.elapsed() >= Duration::from_secs(3)) {
+            *last = Some(Instant::now());
+            match best.as_ref() {
+                Some(b) => info!("[{}] smaller program: {} -> {} lines, {} -> {} bytes ({}; saved to {})", stage(), b.lines().count(), src.lines().count(), b.len(), src.len(), attempts(), path.display()),
+                None => info!("[{}] first interesting program: {} lines, {} bytes ({}; saved to {})", stage(), src.lines().count(), src.len(), attempts(), path.display()),
+            }
         }
         write_atomically(&path, src);
         *best = Some(src.to_string());
@@ -138,6 +160,11 @@ static EXTERNAL_RUNNING: AtomicBool = AtomicBool::new(false);
 
 pub fn set_external_running(on: bool) {
     EXTERNAL_RUNNING.store(on, Ordering::Relaxed);
+}
+
+/// Oracle calls that really compiled something so far.
+pub fn oracle_runs() -> usize {
+    ORACLE_RUNS.load(Ordering::Relaxed)
 }
 
 /// Bracket every uncached oracle call with these two (the `Oracle` implementations do).
