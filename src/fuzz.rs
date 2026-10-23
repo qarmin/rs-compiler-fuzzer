@@ -1,6 +1,7 @@
 //! The orchestrator: generate batches, compile them with many configurations, compare, and
 //! shrink any divergence down to the few cases responsible.
 
+use log::{info, warn};
 use crate::batch::{assemble, Assembled, Case};
 use crate::rng::Rng;
 use crate::runner::{crash_signature, build_and_run, check_only, par_map, rustc_cmd, Config, Limits, Outcome};
@@ -434,7 +435,7 @@ impl Fuzzer<'_> {
             std::fs::write(dir.join("signature.txt"), sig).unwrap();
         }
         let tag = match &class { Class::New => "!!", Class::Known(_) => "~~ (known)", Class::Triaged(_) => "~~ (unreported, triaged)" };
-        eprintln!("  {tag} {kind} `{}` vs `{}` -> {}", base.0.name, bad.0.name, dir.display());
+        info!("{tag} {kind} `{}` vs `{}` -> {}", base.0.name, bad.0.name, dir.display());
         dir
     }
 
@@ -456,7 +457,7 @@ impl Fuzzer<'_> {
             };
             let blamed = blamed_cases(&err, &a, Some(&self.work));
             if blamed.is_empty() {
-                eprintln!("  generator error not attributable to a case; aborting batch:\n{}", err.chars().take(1500).collect::<String>());
+                info!("generator error not attributable to a case; aborting batch:\n{}", err.chars().take(1500).collect::<String>());
                 return;
             }
             for c in cases.iter().filter(|c| blamed.contains(&c.id)) {
@@ -483,7 +484,7 @@ impl Fuzzer<'_> {
                         }
                         dropped += blamed.len();
                         cases.retain(|c| !blamed.contains(&c.id));
-                        eprintln!("  late compile error: dropped cases {blamed:?} and recompiling");
+                        info!("late compile error: dropped cases {blamed:?} and recompiling");
                         continue;
                     }
                 }
@@ -500,7 +501,7 @@ impl Fuzzer<'_> {
             .filter(|&i| {
                 let skip = matches!(outs[i], Outcome::CompileTimeout) && !self.o.timeouts_are_findings;
                 if skip {
-                    eprintln!("  (compile of `{}` timed out - inconclusive, not reported; use --timeouts-are-findings)", self.o.configs[i].name);
+                    info!("(compile of `{}` timed out - inconclusive, not reported; use --timeouts-are-findings)", self.o.configs[i].name);
                 }
                 !skip
             })
@@ -533,7 +534,7 @@ impl Fuzzer<'_> {
             let (base, bad) = (&self.o.configs[b], &self.o.configs[i]);
             if let Some(sig) = crash_signature(&outs[i]) {
                 if !self.seen_crashes.insert((bad.name.clone(), sig.clone())) {
-                    eprintln!("  (same crash as before under `{}`: {sig})", bad.name);
+                    info!("(same crash as before under `{}`: {sig})", bad.name);
                     continue;
                 }
             }
@@ -576,8 +577,8 @@ impl Fuzzer<'_> {
 
 pub fn run(o: &Opts) -> i32 {
     let version = rustc_version(&o.rustc);
-    eprintln!("toolchain: {}", version.lines().find(|l| l.starts_with("release") || l.starts_with("rustc")).unwrap_or("?"));
-    eprintln!("configs: {}", o.configs.iter().map(|c| c.name.as_str()).collect::<Vec<_>>().join(", "));
+    info!("toolchain: {}", version.lines().find(|l| l.starts_with("release") || l.starts_with("rustc")).unwrap_or("?"));
+    info!("configs: {}", o.configs.iter().map(|c| c.name.as_str()).collect::<Vec<_>>().join(", "));
     let work = o.out.join("work");
     std::fs::create_dir_all(&work).unwrap();
     let mut f = Fuzzer { o, version, work, findings: 0, known: 0, triaged: 0, hard_deadline: o.duration.map(|d| Instant::now() + d + Duration::from_secs(30 * 60)), seen_crashes: BTreeSet::new() };
@@ -595,7 +596,7 @@ pub fn run(o: &Opts) -> i32 {
             }
             // Do not start a batch that would probably overrun the time budget.
             if o.duration.is_some_and(|d| start.elapsed() + max_batch >= d) && max_batch > Duration::ZERO {
-                eprintln!("time budget reached (longest batch so far {:.0}s)", max_batch.as_secs_f32());
+                info!("time budget reached (longest batch so far {:.0}s)", max_batch.as_secs_f32());
                 stop = true;
                 break;
             }
@@ -611,11 +612,11 @@ pub fn run(o: &Opts) -> i32 {
             break;
         }
         if f.findings >= o.max_findings {
-            eprintln!("max findings reached");
+            info!("max findings reached");
             break;
         }
     }
-    eprintln!("done: {round} rounds in {:.0}s, {} new findings, {} matching known issues, {} triaged-unreported", start.elapsed().as_secs_f32(), f.findings, f.known, f.triaged);
+    info!("done: {round} rounds in {:.0}s, {} new findings, {} matching known issues, {} triaged-unreported", start.elapsed().as_secs_f32(), f.findings, f.known, f.triaged);
     let _ = std::fs::remove_dir_all(&f.work);
     if f.findings > 0 || (o.fail_on_known && f.known > 0) { 2 } else { 0 }
 }
@@ -650,14 +651,14 @@ pub fn canary(o: &Opts) -> i32 {
         }
         let diverges = keys.iter().any(|k| *k != keys[0]);
         detected += diverges as usize;
-        eprintln!("  {} {name}: {}", if diverges { "DIVERGES" } else { "same    " }, shown.join(" "));
+        info!("{} {name}: {}", if diverges { "DIVERGES" } else { "same    " }, shown.join(" "));
     }
     let _ = std::fs::remove_dir_all(&work);
     if detected > 0 {
-        eprintln!("canary: detector works ({detected}/{} known bugs reproduce on this toolchain)", CANARIES.len());
+        info!("canary: detector works ({detected}/{} known bugs reproduce on this toolchain)", CANARIES.len());
         0
     } else {
-        eprintln!("canary: NO known bug reproduced - all fixed on this toolchain, or the detector is broken");
+        info!("canary: NO known bug reproduced - all fixed on this toolchain, or the detector is broken");
         1
     }
 }
@@ -668,11 +669,11 @@ pub fn verify(o: &Opts, root: &Path, report_dir: &Path, label: &str) -> i32 {
     let mut dirs: Vec<PathBuf> = match std::fs::read_dir(root) {
         Ok(rd) => rd.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.join("case.rs").exists() && p.join("repro.cfg").exists() && !std::fs::read_to_string(p.join("repro.cfg")).unwrap_or_default().contains("mode=miri")).collect(),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            eprintln!("verify: nothing stored yet ({} does not exist)", root.display());
+            info!("verify: nothing stored yet ({} does not exist)", root.display());
             return 0;
         }
         Err(e) => {
-            eprintln!("cannot read {}: {e}", root.display());
+            warn!("cannot read {}: {e}", root.display());
             return 1;
         }
     };
@@ -704,10 +705,10 @@ pub fn verify(o: &Opts, root: &Path, report_dir: &Path, label: &str) -> i32 {
     for (d, (diverges, b, x, badname)) in dirs.iter().zip(results) {
         let name = d.file_name().unwrap().to_string_lossy().to_string();
         if diverges {
-            eprintln!("STILL {name} [{badname}] baseline: {b}; bad: {x}");
+            info!("STILL {name} [{badname}] baseline: {b}; bad: {x}");
             still.push(name.clone());
         } else {
-            eprintln!("FIXED {name} [{badname}]");
+            info!("FIXED {name} [{badname}]");
             fixed.push(name.clone());
         }
         // record the result in the finding itself
@@ -738,7 +739,7 @@ pub fn verify(o: &Opts, root: &Path, report_dir: &Path, label: &str) -> i32 {
                             let _ = std::fs::write(&t, text);
                         }
                         let _ = std::fs::remove_dir_all(d);
-                        eprintln!("REMOVED {name}: no longer reproduces on the newest nightly (twice in a row)");
+                        info!("REMOVED {name}: no longer reproduces on the newest nightly (twice in a row)");
                         removed += 1;
                         continue;
                     }
@@ -753,7 +754,7 @@ pub fn verify(o: &Opts, root: &Path, report_dir: &Path, label: &str) -> i32 {
     }
     let _ = std::fs::write(report_dir.join("fixed.txt"), fixed.join("\n"));
     let _ = std::fs::write(report_dir.join("still.txt"), still.join("\n"));
-    eprintln!("verify: {} still reproduce, {} fixed/not reproducing, {removed} removed from the package", still.len(), fixed.len());
+    info!("verify: {} still reproduce, {} fixed/not reproducing, {removed} removed from the package", still.len(), fixed.len());
     let _ = std::fs::remove_dir_all(&work);
     0
 }

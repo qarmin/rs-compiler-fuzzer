@@ -16,7 +16,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - run: rustup toolchain install stable --profile minimal && rustup default stable
-      - run: cargo test --release
+      - run: cargo test --release --workspace
 
   # Short end-to-end run of every strategy on nightly (small batches).
   smoke:

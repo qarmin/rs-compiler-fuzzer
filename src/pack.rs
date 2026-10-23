@@ -9,6 +9,7 @@
 //! versions of the package small (a finding that is seen again only touches `status.cfg`), which keeps
 //! concurrent updates from different jobs cheap to redo.
 
+use log::{info, warn};
 use crate::triage::{read_cfg, write_cfg, Cfg};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -184,11 +185,11 @@ pub fn run(pkg: &Path, adds: &[PathBuf], toolchain: &str, contains: Option<&Path
         let fixed = fixed_keys(pkg);
         for k in std::fs::read_to_string(keys).unwrap_or_default().lines().map(str::trim).filter(|l| !l.is_empty()) {
             if !root.join(k).join("case.rs").exists() && !fixed.contains(k) {
-                eprintln!("MISSING {k}");
+                warn!("MISSING {k}");
                 missing += 1;
             }
         }
-        eprintln!("pack: {} keys missing", missing);
+        info!("pack: {} keys missing", missing);
         return (missing > 0) as i32;
     }
     let date = today();

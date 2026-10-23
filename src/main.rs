@@ -14,8 +14,10 @@ mod pack;
 mod steps;
 mod runner;
 mod triage;
+
 mod strategies;
 
+use log::{error, info, warn};
 use runner::{Config, Limits};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -65,6 +67,23 @@ gen only:
   --case-seed N         generate the single case with this seed
 ";
 
+/// Terminal logger; the long-running local commands also write to `tmp/<command>.log` (appended, no colours).
+fn init_logging(cmd: &str) {
+    use handsome_logger::{ColorChoice, CombinedLogger, Config, TermLogger, TerminalMode, WriteLogger};
+    let mut loggers: Vec<Box<dyn handsome_logger::SharedLogger>> = vec![TermLogger::new(Config::default(), TerminalMode::Mixed, ColorChoice::Auto)];
+    if matches!(cmd, "minimize" | "triage") {
+        let path = PathBuf::from("tmp").join(format!("{cmd}.log"));
+        let file = std::fs::create_dir_all("tmp").and_then(|_| std::fs::OpenOptions::new().create(true).append(true).open(&path));
+        match file {
+            Ok(f) => loggers.push(WriteLogger::new(Config::default(), f)),
+            Err(e) => eprintln!("cannot write the log file {}: {e}", path.display()),
+        }
+    }
+    if let Err(e) = CombinedLogger::init(loggers) {
+        eprintln!("cannot start the logger: {e}");
+    }
+}
+
 fn die(msg: &str) -> ! {
     eprintln!("error: {msg}");
     std::process::exit(1);
@@ -76,6 +95,7 @@ fn main() {
         print!("{HELP}");
         return;
     };
+    init_logging(&cmd);
     let mut seed: Option<u64> = None;
     let mut duration = None;
     let mut rounds = None;
@@ -152,7 +172,7 @@ fn main() {
             "--profile" => profile = val(),
             "--budget" => budget = num(val()),
             "--no-search" => no_search = true,
-            "--search" | "--no-force" if cmd == "minimize" => {}
+            "--search" | "--no-force" | "--no-shrinkray" if cmd == "minimize" => {}
             "--no-reduce" => no_reduce = true,
             "--bisect" => bisect_secs = num(val()),
             "--shard" => shard = val(),
@@ -222,11 +242,11 @@ fn main() {
             let o = triage::TriageOpts { budget: Duration::from_secs(budget), search: !no_search, work: out.join("work"), no_reduce, bisect: Duration::from_secs(bisect_secs), checkpoint: false, force_reduce: false };
             let mut worst = 0;
             for (i, d) in targets.iter().take(limit).enumerate() {
-                eprintln!("[{}/{}] triage {}", i + 1, targets.len().min(limit), d.display());
+                info!("[{}/{}] triage {}", i + 1, targets.len().min(limit), d.display());
                 match triage::triage(&o, d) {
-                    Ok(s) => eprintln!("    {s}"),
+                    Ok(s) => info!("{s}"),
                     Err(e) => {
-                        eprintln!("    triage failed: {e}");
+                        warn!("triage failed: {e}");
                         worst = 1;
                     }
                 }
@@ -243,6 +263,9 @@ fn main() {
             let flag_given = |f: &str| args.iter().any(|a| a == f);
             let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
             let par = if flag_given("--jobs") { jobs } else { cores };
+            if !reduce::shrinkray_available() && !flag_given("--no-shrinkray") {
+                die("shrinkray not found - the built-in passes alone give poor results. Run `just setup` (uses uv when available), set SHRINKRAY=/path/to/shrinkray, or pass --no-shrinkray to go on without it");
+            }
             reduce::set_parallel(par);
             reduce::install_sigint();
             let per_run = if flag_given("--budget") { budget } else { 4 * 3600 };
@@ -251,25 +274,27 @@ fn main() {
             let start = std::time::Instant::now();
             let status_of = |d: &PathBuf| std::fs::read_to_string(d.join("status.cfg")).unwrap_or_default().lines().find_map(|l| l.strip_prefix("min_status=").map(String::from)).unwrap_or_default();
             let lines_now = |d: &PathBuf| std::fs::read_to_string(d.join("reduced.rs")).map(|t| t.lines().count()).unwrap_or(0);
-            eprintln!("minimize {}: {par} parallel jobs, up to {per_run}s per pass over everything, {total}s overall; Ctrl+C once = stop and write everything up, twice = leave at once (reduced.rs is saved on every improvement)", dir.display());
+            info!("minimize {}: {par} parallel jobs on {cores} cores, up to {per_run}s per pass over everything, {total}s overall", dir.display());
+            info!("Ctrl+C once = stop and write everything up, twice = leave at once (reduced.rs is saved on every improvement)");
+            reduce::start_heartbeat(Duration::from_secs(30));
             let mut runs = 0;
             loop {
                 runs += 1;
                 let left = total.saturating_sub(start.elapsed().as_secs());
                 let mut o2 = o.clone_opts();
                 o2.budget = Duration::from_secs(per_run.min(left));
-                eprintln!("--- minimisation run {runs} (reduced.rs now {} lines) ---", lines_now(&dir));
+                info!("--- minimisation run {runs} (reduced.rs now {} lines) ---", lines_now(&dir));
                 match triage::triage(&o2, &dir) {
-                    Ok(s) => eprintln!("    {s}"),
+                    Ok(s) => info!("{s}"),
                     Err(e) => {
-                        eprintln!("    triage failed: {e}");
+                        error!("triage failed: {e}");
                         break;
                     }
                 }
                 let st = status_of(&dir);
-                eprintln!("    minimisation status: {st}; reduced.rs {} lines", lines_now(&dir));
+                info!("minimisation status: {st}; reduced.rs {} lines", lines_now(&dir));
                 if reduce::INTERRUPTED.load(std::sync::atomic::Ordering::Relaxed) {
-                    eprintln!("interrupted - STATUS.md, ISSUE.md, status.cfg and finding.json are written for what was reached");
+                    warn!("interrupted - STATUS.md, ISSUE.md, status.cfg and finding.json are written for what was reached");
                     break;
                 }
                 if st.starts_with("converged") || start.elapsed().as_secs() >= total || runs >= 8 {
@@ -282,7 +307,7 @@ fn main() {
                 }
             }
             let _ = std::fs::remove_dir_all(out.join("work"));
-            eprintln!("done: {}/reduced.rs, ISSUE.md, STATUS.md", dir.display());
+            info!("done: {}/reduced.rs, ISSUE.md, STATUS.md", dir.display());
             std::process::exit(0);
         }
         "retriage" => {
@@ -291,7 +316,7 @@ fn main() {
             let (si, sn) = shard.split_once('/').map(|(a, b)| (a.parse::<usize>().unwrap_or(0), b.parse::<usize>().unwrap_or(1).max(1))).unwrap_or((0, 1));
             let skip: std::collections::HashSet<String> = skip_file.as_ref().and_then(|f| std::fs::read_to_string(f).ok()).map(|t| t.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect()).unwrap_or_default();
             let stale: Vec<PathBuf> = triage::stale_findings(&pkg, &skip).into_iter().filter(|p| pack::name_hash(&p.file_name().unwrap().to_string_lossy()) % sn as u64 == si as u64).collect();
-            eprintln!("retriage: {} stored finding(s) with open checklist steps in shard {shard}", stale.len());
+            info!("retriage: {} stored finding(s) with open checklist steps in shard {shard}", stale.len());
             let mut o = triage::TriageOpts { budget: Duration::from_secs(budget), search: !no_search, work: out.join("work"), no_reduce, bisect: Duration::from_secs(bisect_secs), checkpoint: false, force_reduce: false };
             let start = std::time::Instant::now();
             let max_budget = budget_max.max(budget);
@@ -313,22 +338,22 @@ fn main() {
                 o.budget = Duration::from_secs(b);
                 let bis_needed = triage::open_ids_of(d).iter().any(|i| i.starts_with("bisect") || *i == "pass_bisect");
                 if deadline_secs > 0 && start.elapsed() + Duration::from_secs(budget.min(b) + if bis_needed { bisect_secs + 600 } else { 0 } + 240) > Duration::from_secs(deadline_secs) {
-                    eprintln!("retriage: not enough time left for another finding");
+                    info!("retriage: not enough time left for another finding");
                     break;
                 }
-                eprintln!("retriage: minimisation budget for this finding: {b}s");
-                eprintln!("retriage {}", d.display());
+                info!("retriage: minimisation budget for this finding: {b}s");
+                info!("retriage {}", d.display());
                 match triage::triage(&o, d) {
                     Ok(s) => {
-                        eprintln!("    {s}");
+                        info!("{s}");
                         done += 1;
                         println!("RETRIAGED {}", d.file_name().unwrap().to_string_lossy());
                     }
-                    Err(e) => eprintln!("    failed: {e}"),
+                    Err(e) => warn!("failed: {e}"),
                 }
             }
             let _ = std::fs::remove_dir_all(out.join("work"));
-            eprintln!("retriage: {done} finding(s) updated");
+            info!("retriage: {done} finding(s) updated");
             std::process::exit(0);
         }
         "pack" => {
@@ -374,7 +399,7 @@ fn main() {
             if cmd == "fuzz" && duration.is_none() && rounds.is_none() {
                 rounds = Some(1);
             }
-            eprintln!("seed: {seed}");
+            info!("seed: {seed}");
             let opts = fuzz::Opts {
                 seed,
                 duration,

@@ -1,0 +1,10 @@
+[package]
+name = "rs-minimizer"
+version = "0.1.0"
+edition = "2024"
+description = "Test-case reducer for Rust programs that flattens, unrolls and simplifies code the generic reducers get stuck on"
+
+[dependencies]
+log = "0.4"
+ctrlc = "3"
+handsome_logger = "0.9"

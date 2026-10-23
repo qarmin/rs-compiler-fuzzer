@@ -5,6 +5,7 @@
 //!    rustc/LLVM bug, or at the generator relying on unspecified behaviour.
 //! Findings land in `<out>/miri/<n>_<strategy>_<case>/` (case.rs, report.md, repro.cfg with `mode=miri`).
 
+use log::{info, warn};
 use crate::batch::{assemble, Case};
 use crate::fuzz::{blamed_cases, generate_batch, Opts};
 use crate::rng::Rng;
@@ -159,7 +160,7 @@ impl State<'_> {
         std::fs::write(dir.join("repro.cfg"), cfg).unwrap();
         let status = format!("kind=miri-{kind}\nstate=open\nprogress=0/0\n");
         std::fs::write(dir.join("status.cfg"), status).unwrap();
-        eprintln!("  MIRI {kind}: {sig}  -> {}", dir.display());
+        info!("MIRI {kind}: {sig}  -> {}", dir.display());
     }
 
     fn batch(&mut self, strategy: &'static str, cases: Vec<Case>, batch_seed: u64) {
@@ -177,17 +178,17 @@ impl State<'_> {
             let a = assemble(&refs);
             let t0 = Instant::now();
             let r = self.miri.run(&a.source);
-            eprintln!("  miri attempt {attempt}: {} cases, {} lines, {:.0}s, {}", cases.len(), a.source.lines().count(), t0.elapsed().as_secs_f32(), if r.ok { "ok" } else if r.timed_out { "TIMEOUT" } else { "failed" });
+            info!("miri attempt {attempt}: {} cases, {} lines, {:.0}s, {}", cases.len(), a.source.lines().count(), t0.elapsed().as_secs_f32(), if r.ok { "ok" } else if r.timed_out { "TIMEOUT" } else { "failed" });
             if r.timed_out {
                 // some case is (much) slower under Miri than the rest: find the slow part by splitting into chunks
                 if depth == 0 && cases.len() >= 8 {
-                    eprintln!("  Miri timed out; retrying in 4 chunks (batch seed {batch_seed})");
+                    info!("Miri timed out; retrying in 4 chunks (batch seed {batch_seed})");
                     let chunk = cases.len().div_ceil(4);
                     for part in cases.chunks(chunk) {
                         self.batch_at(strategy, part.to_vec(), batch_seed, 1);
                     }
                 } else {
-                    eprintln!("  Miri timed out on {} cases; skipping them (batch seed {batch_seed})", cases.len());
+                    info!("Miri timed out on {} cases; skipping them (batch seed {batch_seed})", cases.len());
                 }
                 return;
             }
@@ -219,7 +220,7 @@ impl State<'_> {
             let sig = signature(&r.stderr);
             let compile_error = !r.stderr.contains("Undefined Behavior") && !r.stderr.contains("unsupported operation") && (r.stderr.contains("error[E") || r.stderr.contains("could not compile") || r.stderr.lines().any(|l| l.starts_with("error:")) && !r.stderr.contains("the evaluated program"));
             if blamed.is_empty() {
-                eprintln!("  Miri failed, not attributable to a case: {sig}\n{}", r.stderr.chars().take(1500).collect::<String>());
+                warn!("Miri failed, not attributable to a case: {sig}\n{}", r.stderr.chars().take(1500).collect::<String>());
                 return;
             }
             for c in cases.iter().filter(|c| blamed.contains(&c.id)) {
@@ -259,10 +260,10 @@ pub fn run(o: &Opts) -> i32 {
         exec(c, Duration::from_secs(120)).map(|r| r.code == Some(0)).unwrap_or(false)
     };
     if !have {
-        eprintln!("Miri is not installed: rustup component add miri rust-src --toolchain nightly");
+        warn!("Miri is not installed: rustup component add miri rust-src --toolchain nightly");
         return 1;
     }
-    eprintln!("miri mode: configs for the native comparison: {}", o.configs[0].name);
+    info!("miri mode: configs for the native comparison: {}", o.configs[0].name);
     let mut st = State { o, miri: Miri::new(&work), out: o.out.clone(), n: 0, seen: BTreeSet::new(), ub: 0, mismatch: 0, unsupported: 0, generator: 0, versions: tool_versions() };
     let start = Instant::now();
     let mut round = 0u64;
@@ -279,14 +280,14 @@ pub fn run(o: &Opts) -> i32 {
             // Miri is orders of magnitude slower than native code: much smaller batches
             let lines = (o.target_lines.unwrap_or(s.lines.min(miri_cap(s.name))) * o.scale / 100).max(200);
             let t0 = Instant::now();
-            eprintln!("[{}] seed {batch_seed}, ~{lines} lines", s.name);
+            info!("[{}] seed {batch_seed}, ~{lines} lines", s.name);
             let cases = generate_batch(s, batch_seed, lines);
             st.batch(s.name, cases, batch_seed);
             longest = longest.max(t0.elapsed());
         }
         round += 1;
     }
-    eprintln!("miri done: {} rounds in {:.0}s; UB reports {}, Miri-vs-native mismatches {}, unsupported {}, generator compile errors {}", round, start.elapsed().as_secs_f32(), st.ub, st.mismatch, st.unsupported, st.generator);
+    info!("miri done: {} rounds in {:.0}s; UB reports {}, Miri-vs-native mismatches {}, unsupported {}, generator compile errors {}", round, start.elapsed().as_secs_f32(), st.ub, st.mismatch, st.unsupported, st.generator);
     let _ = std::fs::remove_dir_all(&work);
     // unsupported operations are expected for a few constructs; UB and mismatches are the interesting ones
     if st.ub + st.mismatch > 0 {

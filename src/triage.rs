@@ -8,6 +8,7 @@
 //!  5. writes `status.cfg`, `STATUS.md`, `ISSUE.md` and a "Status" block at the top of `report.md`,
 //!     ending in an explicit verdict with the reasons.
 
+use log::info;
 use crate::reduce::{reduce_all, Interest, ReduceLog};
 use crate::steps;
 use crate::runner::{build_and_run, crash_signature, exec, Config, Limits, Outcome};
@@ -566,6 +567,7 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     steps::backfill(&mut old, dir);
     let prev_reduced = std::fs::read_to_string(dir.join("reduced.rs")).ok().filter(|p| !p.trim().is_empty() && p.len() < case.len());
 
+    info!("triage {}: step 1, reproduction matrix on the original program ({} lines)", dir.display(), case.lines().count());
     // 1. reproduction matrix on the original reproducer
     let mut matrix: Vec<(String, String, Repro)> = Vec::new();
     for (ch, ver) in &chans {
@@ -589,7 +591,7 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
         (Some(prev), true) => {
             reduced = prev.clone();
             reduction_kept = true;
-            reduce_log.0.push(format!("minimisation converged earlier ({} lines); not repeated", prev.lines().count()));
+            reduce_log.push(format!("minimisation converged earlier ({} lines); not repeated", prev.lines().count()));
         }
         _ => {
             if let (Some(pc), false) = (&primary, o.no_reduce) {
@@ -598,7 +600,7 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
                     // a finding that is triaged again continues from its earlier (already small) result when that still shows the bug
                     let start_src = match &prev_reduced {
                         Some(prev) if it.check(prev) => {
-                            reduce_log.0.push(format!("continuing from the previously reduced program ({} lines)", prev.lines().count()));
+                            reduce_log.push(format!("continuing from the previously reduced program ({} lines)", prev.lines().count()));
                             continued_from = Some(crate::pack::text_hash(prev));
                             prev.clone()
                         }
@@ -609,22 +611,23 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
                             // the checkpoint overwrites reduced.rs: an earlier result that the reducer could not use is kept aside
                             if let (Some(prev), None) = (&prev_reduced, &continued_from) {
                                 let _ = std::fs::write(dir.join("reduced.rs.bak"), prev);
-                                reduce_log.0.push("the earlier reduced.rs was not interesting under the reducer's limits: saved as reduced.rs.bak".into());
+                                reduce_log.push("the earlier reduced.rs was not interesting under the reducer's limits: saved as reduced.rs.bak");
                             }
                             crate::reduce::set_checkpoint(Some(dir.join("reduced.rs")));
                         }
+                        info!("step 2: reduction from {} lines, {}s budget{}", start_src.lines().count(), o.budget.as_secs(), if o.checkpoint { ", checkpointed to reduced.rs" } else { "" });
                         reduced = reduce_all(&it, &start_src, o.budget, &mut reduce_log);
                         if o.checkpoint {
                             // an interrupted run may hold a smaller program than the pass that was cut short returned
                             if let Some(best) = crate::reduce::best_so_far().filter(|b| b.len() < reduced.len() && it.check(b)) {
-                                reduce_log.0.push(format!("kept the smallest program seen: {} lines", best.lines().count()));
+                                reduce_log.push(format!("kept the smallest program seen: {} lines", best.lines().count()));
                                 reduced = best;
                             }
                             crate::reduce::set_checkpoint(None);
                         }
                         did_reduce = true;
                     } else {
-                        reduce_log.0.push("original no longer interesting under the reducer's stricter limits - not reduced".into());
+                        reduce_log.push("original no longer interesting under the reducer's stricter limits - not reduced");
                     }
                 }
             }
@@ -639,6 +642,7 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
         steps::forget_unhashed(&mut old);
     }
 
+    info!("step 3: shortest command line");
     // 3. flags: reuse the stored shortest command line when the program is the same
     let flags_ctx = |old: &Cfg| steps::current(old, "flags", &rhash, &date).is_some() && old.contains_key("min_bad_flags");
     let flags_reused = flags_ctx(&old);
@@ -663,7 +667,7 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     let mut still = matrix2.iter().any(|m| m.2 == Repro::Yes);
 
     // 3b. the shortest command line that still shows it (the issue shows exactly these flags)
-    if still && !flags_reused {
+    if still && !flags_reused && !crate::reduce::INTERRUPTED.load(std::sync::atomic::Ordering::Relaxed) {
         let yes_channels: Vec<String> = matrix2.iter().filter(|m| m.2 == Repro::Yes).map(|m| m.0.clone()).collect();
         let ok = |base: &Config, bad: &Config| {
             yes_channels.iter().all(|ch| {
@@ -731,6 +735,7 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     let ctx = crate::pack::text_hash(&format!("{reduced}\n{common_txt}|{}|{}", base.flags.join(" "), bad.flags.join(" ")));
     let cur = |id: &str| steps::current(&old, id, &ctx, &date).is_some();
 
+    info!("step 4: MIR vs LLVM, optimisation levels, pass bisection");
     // 4. MIR optimisations or LLVM? (-Zmir-opt-level=0 on nightly: if the difference stays, MIR opts are not the cause)
     let mir_reused = cur("mir_llvm") && old.contains_key("mir_opt");
     let mir_opt = if mir_reused {
@@ -756,7 +761,7 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     let var_reused = cur("opt_levels") && dir.join("variants.txt").exists();
     let variants: Vec<Variant> = if var_reused {
         variants_from_text(&std::fs::read_to_string(dir.join("variants.txt")).unwrap_or_default())
-    } else if let (true, Some(ch)) = (still, &var_chan) {
+    } else if let (true, Some(ch), false) = (still, &var_chan, crate::reduce::INTERRUPTED.load(std::sync::atomic::Ordering::Relaxed)) {
         let rustc = vec!["rustc".to_string(), format!("+{ch}")];
         opt_variants(&rustc, &reduced_path, &base, &bad, &sig, &outputs.as_ref().map(|o| o.0.clone()), &lim, &o.work)
     } else {
@@ -785,6 +790,7 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
         }
     }
 
+    info!("step 5: Miri");
     // 5. Miri (only meaningful for wrong-code findings)
     let ub_reused = !crash && still && cur("ub_check") && old.contains_key("miri");
     let (m, miri_agrees) = if crash || !still {
@@ -810,16 +816,18 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
         (m, agrees)
     };
 
+    info!("step 6: upstream search");
     // 6. upstream search (repeated after two weeks)
     let search_reused = cur("upstream") && dir.join("search.txt").exists();
     let search = if search_reused {
         search_from_text(&std::fs::read_to_string(dir.join("search.txt")).unwrap_or_default())
-    } else if o.search {
+    } else if o.search && !crate::reduce::INTERRUPTED.load(std::sync::atomic::Ordering::Relaxed) {
         upstream_search(&reduced, &bad, &sig)
     } else {
         Search { note: "NOT PERFORMED (disabled)".into(), ..Default::default() }
     };
 
+    info!("step 7: regression range (bisect budget {}s)", o.bisect.as_secs());
     // 7. regression range: only the parts that are still open
     let prior = std::fs::read_to_string(dir.join("bisect.txt")).ok().map(|t| crate::bisect::Bisect::from_text(&t)).or_else(|| crate::bisect::Bisect::from_legacy(&old));
     let prior_known = prior.is_some();
@@ -833,6 +841,7 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     }
     let _ = std::fs::write(dir.join("bisect.txt"), bis.to_text());
 
+    info!("step 8: writing the checklist and the issue draft");
     // 8. how settled is the minimisation? (the daily job keeps going until two runs agree)
     let min_runs = if reduction_kept { prev_runs } else if did_reduce { prev_runs + 1 } else { prev_runs };
     let complete = did_reduce && crate::reduce::last_run_complete();
@@ -1118,8 +1127,8 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
         };
         entries.push(Entry { flags: bad.flags.join(" "), text: if crash { crash_err.clone() } else { show_out(b) }, fails: true });
     }
-    let culprit_variants: Vec<Variant> = culprit.iter().filter(|c| c.n > 0).flat_map(|c| [c.good.clone(), c.bad.clone()]).collect();
-    for v in variants.iter().chain(culprit_variants.iter()) {
+    // the opt-bisect runs only tell us which pass is to blame (the sentence below); their commands are not part of the issue
+    for v in variants.iter() {
         if entries.iter().any(|e| e.flags == v.flags) {
             continue;
         }

@@ -1,0 +1,180 @@
+//! Process-wide state of a reduction run: Ctrl+C, parallelism, the on-disk checkpoint of the best program and the progress
+//! counters. One reduction runs at a time per process.
+
+use log::{error, info, warn};
+use std::path::PathBuf;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::thread;
+use std::time::{Duration, Instant};
+
+static DEADLINE_HIT: AtomicBool = AtomicBool::new(false);
+
+/// Set by Ctrl+C (see `install_ctrlc`): every pass stops at its next deadline check.
+pub static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
+static PARALLEL: AtomicUsize = AtomicUsize::new(4);
+
+/// Parallel oracle calls of the passes (and Shrink Ray's workers).
+pub fn set_parallel(n: usize) {
+    PARALLEL.store(n.max(1), Ordering::Relaxed);
+}
+
+pub fn par() -> usize {
+    PARALLEL.load(Ordering::Relaxed)
+}
+
+/// Candidates evaluated at once by the built-in passes: an oracle call usually compiles two configurations side by side.
+pub fn par_checks() -> usize {
+    (par() / 2).max(1)
+}
+
+pub fn interrupted() -> bool {
+    INTERRUPTED.load(Ordering::Relaxed)
+}
+
+pub fn expired(deadline: Instant) -> bool {
+    let e = interrupted() || Instant::now() >= deadline;
+    if e {
+        DEADLINE_HIT.store(true, Ordering::Relaxed);
+    }
+    e
+}
+
+/// Called by the external reducers that stop at a deadline.
+pub fn mark_deadline_hit() {
+    DEADLINE_HIT.store(true, Ordering::Relaxed);
+}
+
+/// Forgets an earlier deadline hit: call before a new reduction.
+pub fn reset_deadline_flag() {
+    DEADLINE_HIT.store(false, Ordering::Relaxed);
+}
+
+/// True when the last reduction finished every stage before its deadlines (so its result is a local minimum of all passes).
+pub fn last_run_complete() -> bool {
+    !DEADLINE_HIT.load(Ordering::Relaxed)
+}
+
+/// First Ctrl+C: stop reducing and write everything up; second Ctrl+C: leave at once (the checkpoint is on disk).
+pub fn install_ctrlc() {
+    let res = ctrlc::set_handler(|| {
+        if INTERRUPTED.swap(true, Ordering::SeqCst) {
+            warn!("Ctrl+C again - leaving at once (the checkpoint holds the best program found so far)");
+            std::process::exit(130);
+        }
+        warn!("Ctrl+C caught - finishing the running oracle calls, then writing up (press Ctrl+C again to leave at once)");
+    });
+    if let Err(e) = res {
+        error!("cannot install the Ctrl+C handler: {e}");
+    }
+}
+
+/// The smallest program seen so far that still shows the bug, and where to keep a copy of it on disk.
+static BEST: Mutex<Option<String>> = Mutex::new(None);
+static CHECKPOINT: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+/// Every time the oracle accepts a program that is smaller than the best one so far it is written to `path` (atomically), so
+/// that a killed run loses nothing. `None` switches this off.
+pub fn set_checkpoint(path: Option<PathBuf>) {
+    *BEST.lock().unwrap() = None;
+    *CHECKPOINT.lock().unwrap() = path;
+}
+
+/// The best (smallest) interesting program recorded since `set_checkpoint`.
+pub fn best_so_far() -> Option<String> {
+    BEST.lock().unwrap().clone()
+}
+
+fn write_atomically(path: &std::path::Path, src: &str) {
+    let tmp = path.with_extension("rs.tmp");
+    if std::fs::write(&tmp, src).is_ok() {
+        let _ = std::fs::rename(&tmp, path);
+    }
+}
+
+/// An accepted program that is bigger than the best one (macros expanded): it becomes the baseline and is written to disk, so
+/// that the file always holds the form every later step works on.
+pub fn rebase_checkpoint(src: &str) {
+    let Some(path) = CHECKPOINT.lock().unwrap().clone() else { return };
+    write_atomically(&path, src);
+    *BEST.lock().unwrap() = Some(src.to_string());
+    info!("[{}] saved as the new baseline (a bigger but simpler program): {} lines, {} bytes ({})", stage(), src.lines().count(), src.len(), path.display());
+}
+
+static STAGE: Mutex<String> = Mutex::new(String::new());
+
+/// Name of the pass that is running, shown in front of every improvement it finds.
+pub fn set_stage(name: &str) {
+    *STAGE.lock().unwrap() = name.to_string();
+}
+
+fn stage() -> String {
+    STAGE.lock().unwrap().clone()
+}
+
+fn note_interesting(src: &str) {
+    let Some(path) = CHECKPOINT.lock().unwrap().clone() else { return };
+    let mut best = BEST.lock().unwrap();
+    if best.as_ref().map(|b| src.len() < b.len()).unwrap_or(true) {
+        match best.as_ref() {
+            Some(b) => info!("[{}] smaller program: {} -> {} lines, {} -> {} bytes (saved to {})", stage(), b.lines().count(), src.lines().count(), b.len(), src.len(), path.display()),
+            None => info!("[{}] first interesting program: {} lines, {} bytes (saved to {})", stage(), src.lines().count(), src.len(), path.display()),
+        }
+        write_atomically(&path, src);
+        *best = Some(src.to_string());
+    }
+}
+
+/// Used by external reducers that find smaller programs on their own (Shrink Ray rewrites a file we poll).
+pub fn note_external_result(src: &str) {
+    note_interesting(src);
+}
+
+static ORACLE_RUNS: AtomicUsize = AtomicUsize::new(0);
+static ORACLE_HITS: AtomicUsize = AtomicUsize::new(0);
+static ORACLE_ACTIVE: AtomicUsize = AtomicUsize::new(0);
+static EXTERNAL_RUNNING: AtomicBool = AtomicBool::new(false);
+
+pub fn set_external_running(on: bool) {
+    EXTERNAL_RUNNING.store(on, Ordering::Relaxed);
+}
+
+/// Bracket every uncached oracle call with these two (the `Oracle` implementations do).
+pub fn oracle_started() {
+    ORACLE_ACTIVE.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn oracle_finished(src: &str, interesting: bool) {
+    ORACLE_ACTIVE.fetch_sub(1, Ordering::Relaxed);
+    ORACLE_RUNS.fetch_add(1, Ordering::Relaxed);
+    if interesting {
+        ORACLE_HITS.fetch_add(1, Ordering::Relaxed);
+        note_interesting(src);
+    }
+}
+
+/// Logs a one-line sign of life every `every` until the process ends, so a long silent pass is visibly working.
+pub fn start_heartbeat(every: Duration) {
+    let start = Instant::now();
+    thread::spawn(move || {
+        let mut last_runs = 0;
+        loop {
+            thread::sleep(every);
+            let runs = ORACLE_RUNS.load(Ordering::Relaxed);
+            let best = BEST.lock().unwrap().as_ref().map(|b| b.lines().count());
+            info!(
+                "alive {}s: {} oracle runs (+{} in the last {}s), {} interesting, {} running now{}, best so far {}",
+                start.elapsed().as_secs(),
+                runs,
+                runs - last_runs,
+                every.as_secs(),
+                ORACLE_HITS.load(Ordering::Relaxed),
+                ORACLE_ACTIVE.load(Ordering::Relaxed),
+                if EXTERNAL_RUNNING.load(Ordering::Relaxed) { " (+ the external reducer's own workers, not counted)" } else { "" },
+                best.map(|l| format!("{l} lines")).unwrap_or_else(|| "(nothing yet)".into()),
+            );
+            last_runs = runs;
+        }
+    });
+}
