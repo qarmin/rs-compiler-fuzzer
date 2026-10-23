@@ -1,6 +1,6 @@
 //! The default reduction pipeline. Callers with knowledge of how their programs were produced plug in through `Hook`.
 
-use crate::control::{oracle_runs, expired, interrupted, last_run_complete, par_checks, reset_deadline_flag, set_stage};
+use crate::control::{expired, interrupted, last_run_complete, oracle_runs, par, par_checks, reset_deadline_flag, set_stage};
 use crate::deadcode::remove_dead_code;
 use crate::exprs::{drop_calls, drop_let_bindings, flatten_blocks, simplify_exprs, simplify_let_tuples, simplify_lets, strip_parens};
 use crate::external::{shrinkray, shrinkray_available, treereduce};
@@ -91,6 +91,9 @@ struct Progress {
     /// oracle calls and time at the previous RESULT line: what a pass cost
     last_runs: usize,
     last_at: Instant,
+    initial: (usize, usize),
+    /// what each pass removed (bytes, may be negative for passes that grow the program), summed over the run
+    gains: Vec<(String, i64, usize)>,
 }
 
 impl Progress {
@@ -123,10 +126,42 @@ impl Progress {
         } else {
             log.push(format!("RESULT [{tool}]: {} -> {l} lines ({}), {} -> {b} bytes ({}); cost: {cost}; {:.0}s in total", self.lines, delta(self.lines, l), self.bytes, delta(self.bytes, b), self.start.elapsed().as_secs_f32()));
         }
+        let removed = self.bytes as i64 - b as i64;
+        match self.gains.iter_mut().find(|g| &g.0 == tool) {
+            Some(g) => {
+                g.1 += removed;
+                g.2 += runs - self.last_runs;
+            }
+            None => self.gains.push((tool.to_string(), removed, runs - self.last_runs)),
+        }
         self.last_runs = runs;
         self.last_at = Instant::now();
         self.lines = l;
         self.bytes = b;
+    }
+}
+
+impl Progress {
+    /// The last words of a run: from what to what, how long, how much work, and who did the shrinking.
+    fn summary(&self, log: &mut ReduceLog, finished: bool) {
+        let (l0, b0) = self.initial;
+        let pct = |a: usize, b: usize| if a == 0 { 0.0 } else { 100.0 * (a as f64 - b as f64) / a as f64 };
+        let secs = self.start.elapsed().as_secs_f64().max(0.001);
+        let runs = oracle_runs();
+        log.push(format!(
+            "SUMMARY{}: {l0} lines / {b0} bytes -> {} lines / {} bytes ({:.1}% fewer lines, {:.1}% fewer bytes) in {:.0}s; {runs} oracle calls ({:.1}/s)",
+            if finished { "" } else { " (interrupted)" },
+            self.lines,
+            self.bytes,
+            pct(l0, self.lines),
+            pct(b0, self.bytes),
+            secs,
+            runs as f64 / secs
+        ));
+        let mut by_gain: Vec<&(String, i64, usize)> = self.gains.iter().filter(|g| g.1 != 0).collect();
+        by_gain.sort_by_key(|g| std::cmp::Reverse(g.1.abs()));
+        let top: Vec<String> = by_gain.iter().take(6).map(|g| format!("{} {}{} bytes ({} calls)", g.0.trim_start_matches("rs-minimizer: "), if g.1 > 0 { "-" } else { "+" }, g.1.abs(), g.2)).collect();
+        log.push(format!("SUMMARY biggest contributions: {}", top.join("; ")));
     }
 }
 
@@ -280,7 +315,14 @@ pub fn minimize(it: &dyn Oracle, src: &str, opts: &Options, log: &mut ReduceLog,
     let budget = opts.budget;
     let at = |num: u32, den: u32| start + budget * num / den;
     let mut cur = src.to_string();
-    let mut pr = Progress { start, lines: cur.lines().count(), bytes: cur.len(), n: 0, last_runs: oracle_runs(), last_at: start };
+    let mut pr = Progress { start, lines: cur.lines().count(), bytes: cur.len(), n: 0, last_runs: oracle_runs(), last_at: start, initial: (cur.lines().count(), cur.len()), gains: Vec::new() };
+    info!("system: {}", crate::control::describe_system());
+    info!(
+        "tools: shrinkray {}, treereduce-rust {}, compiler for the passes: {}",
+        if opts.use_shrinkray && shrinkray_available() { "used" } else { "not used" },
+        if opts.use_treereduce { "used when installed" } else { "off" },
+        if opts.rustc.is_empty() { "none (the passes that compile are off)".to_string() } else { opts.rustc.join(" ") }
+    );
     info!("reduction starts: {} lines, {} bytes, budget {}s, {} oracle calls at once", pr.lines, pr.bytes, budget.as_secs(), par_checks());
     // a bug that shows in some runs only (addresses, timing, load) makes every verdict a coin toss: say so before spending hours
     let stable = (0..3).filter(|_| it.recheck(&cur)).count();
@@ -365,7 +407,7 @@ pub fn minimize(it: &dyn Oracle, src: &str, opts: &Options, log: &mut ReduceLog,
         pr.step("treereduce-rust, then our own passes once more (they have the last word)");
         pr.pass("treereduce-rust");
         let before = cur.clone();
-        cur = treereduce(it, &cur, at(39, 40), par_checks(), 3);
+        cur = treereduce(it, &cur, at(39, 40), par(), 3);
         pr.result(log, "treereduce-rust", &cur);
         if cur != before {
             // the tree-based edits make new cleanups possible: our own passes have the last word
@@ -378,6 +420,7 @@ pub fn minimize(it: &dyn Oracle, src: &str, opts: &Options, log: &mut ReduceLog,
 
     if interrupted() {
         log.push("interrupted, final polish skipped");
+        pr.summary(log, false);
         return cur;
     }
     pr.step("final polish: parentheses, caller's cosmetics, rustfmt");
@@ -387,6 +430,7 @@ pub fn minimize(it: &dyn Oracle, src: &str, opts: &Options, log: &mut ReduceLog,
     pr.pass("rustfmt");
     cur = format_if_interesting(it, &cur);
     pr.result(log, "polish", &cur);
+    pr.summary(log, true);
     cur
 }
 

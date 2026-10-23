@@ -221,18 +221,23 @@ pub fn shrink_cases(it: &dyn Oracle, src: &str, deadline: Instant) -> String {
     }
     let mut keep: Vec<usize> = (0..mods.len()).collect();
     let mut n = keep.len().div_ceil(2);
+    let width = par_checks();
     while n >= 1 {
         let mut i = 0;
         while i < keep.len() && keep.len() > 1 {
             if expired(deadline) {
                 return build(&keep);
             }
-            let end = (i + n).min(keep.len());
-            let cand: Vec<usize> = keep[..i].iter().chain(keep[end..].iter()).copied().collect();
-            if !cand.is_empty() && it.check(&build(&cand)) {
-                keep = cand;
-            } else {
-                i += n;
+            // chunks i, i+n, i+2n, ... are tried at the same time; the first one that works is dropped
+            let starts: Vec<usize> = (0..width).map(|k| i + k * n).take_while(|&s| s < keep.len()).collect();
+            let cands: Vec<Vec<usize>> = starts.iter().map(|&s| keep[..s].iter().chain(keep[(s + n).min(keep.len())..].iter()).copied().collect()).collect();
+            let res = par_map(&cands, width, |c| !c.is_empty() && it.check(&build(c)));
+            match res.iter().position(|&ok| ok) {
+                Some(p) => {
+                    keep = cands[p].clone();
+                    i = starts[p];
+                }
+                None => i += width * n,
             }
         }
         if n == 1 {

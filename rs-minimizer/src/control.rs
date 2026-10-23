@@ -37,7 +37,7 @@ pub fn shuffled<T>(items: &mut [T], seed: u64) {
     }
 }
 
-static PARALLEL: AtomicUsize = AtomicUsize::new(4);
+static PARALLEL: AtomicUsize = AtomicUsize::new(0);
 
 /// Parallel oracle calls of the passes (and Shrink Ray's workers).
 pub fn set_parallel(n: usize) {
@@ -45,7 +45,35 @@ pub fn set_parallel(n: usize) {
 }
 
 pub fn par() -> usize {
-    PARALLEL.load(Ordering::Relaxed)
+    match PARALLEL.load(Ordering::Relaxed) {
+        // never set: all the cores there are
+        0 => cores(),
+        n => n,
+    }
+}
+
+pub fn cores() -> usize {
+    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4)
+}
+
+fn meminfo_gb(key: &str) -> Option<f64> {
+    let text = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let kb: f64 = text.lines().find(|l| l.starts_with(key))?.split_whitespace().nth(1)?.parse().ok()?;
+    Some(kb / 1024.0 / 1024.0)
+}
+
+/// What the run has to work with: cores, memory, load, and how many oracle calls and external workers run at once.
+pub fn describe_system() -> String {
+    let load = std::fs::read_to_string("/proc/loadavg").ok().and_then(|t| t.split_whitespace().next().map(String::from)).unwrap_or_else(|| "?".into());
+    format!(
+        "{} cores, {:.1} GB RAM ({:.1} GB free), load {load}; {} oracle calls at once (each starts rustc, which is multi-threaded itself), {} workers for Shrink Ray, {} for treereduce-rust",
+        cores(),
+        meminfo_gb("MemTotal:").unwrap_or(0.0),
+        meminfo_gb("MemAvailable:").unwrap_or(0.0),
+        par_checks(),
+        par(),
+        par()
+    )
 }
 
 /// Candidates evaluated at once by the built-in passes: most oracle calls stop after one compilation (a candidate that fails there is

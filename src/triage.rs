@@ -623,7 +623,9 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
                         let mut round_src = start_src.clone();
                         let mut last_unchanged = false;
                         let mut effort = 0usize;
+                        let mut rounds_done = 0usize;
                         for round in 1..=12 {
+                            rounds_done = round;
                             rs_minimizer::control::set_effort(effort);
                             let left = o.budget.saturating_sub(t0.elapsed());
                             let mut out = reduce_all(&it, &round_src, left, &mut reduce_log);
@@ -656,6 +658,20 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
                         }
                         rs_minimizer::control::set_effort(0);
                         reduced = round_src;
+                        let describe = |t: &str| format!("{} lines / {} bytes", t.lines().count(), t.len());
+                        let line = format!(
+                            "REDUCTION of {}: original {} -> {}{} -> now {} ({:.1}% fewer bytes than the original), {} rounds, {}s of {}s",
+                            dir.display(),
+                            describe(&case),
+                            if continued_from.is_some() && prev_reduced.is_some() { "stored " } else { "start " },
+                            describe(&start_src),
+                            describe(&reduced),
+                            100.0 * (case.len() as f64 - reduced.len() as f64) / case.len().max(1) as f64,
+                            rounds_done,
+                            t0.elapsed().as_secs(),
+                            o.budget.as_secs()
+                        );
+                        reduce_log.push(line);
                         if last_unchanged {
                             continued_from = Some(crate::pack::text_hash(&reduced));
                         }

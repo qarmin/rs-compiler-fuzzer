@@ -10,28 +10,52 @@ use std::time::Instant;
 /// Pass 2: `let name: ty = EXPR;`  ->  `let name: ty = 0;` (or `false`)
 pub fn simplify_lets(it: &dyn Oracle, src: &str, deadline: Instant) -> String {
     let mut lines: Vec<String> = src.lines().map(String::from).collect();
-    for i in 0..lines.len() {
-        if expired(deadline) {
-            break;
-        }
+    // the line that would replace line `i` (the right-hand side by a literal), if it is such a `let`
+    let replacement = |lines: &[String], i: usize| -> Option<String> {
         let l = lines[i].trim_start();
-        let Some(rest) = l.strip_prefix("let ") else { continue };
-        let Some((head, expr)) = rest.split_once(" = ") else { continue };
-        let Some((_, ty)) = head.split_once(": ") else { continue };
+        let rest = l.strip_prefix("let ")?;
+        let (head, expr) = rest.split_once(" = ")?;
+        let (_, ty) = head.split_once(": ")?;
         if !expr.trim_end().ends_with(';') || expr.trim() == "0;" {
-            continue;
+            return None;
         }
         let lit = match ty.trim() {
             "bool" => "false",
             t if t.starts_with('f') => "0.0",
             t if t.starts_with(|c: char| c == 'i' || c == 'u') => "0",
-            _ => continue,
+            _ => return None,
         };
         let indent = &lines[i][..lines[i].len() - lines[i].trim_start().len()];
-        let mut cand = lines.clone();
-        cand[i] = format!("{indent}let {head} = {lit};");
-        if it.check(&cand.join("\n")) {
-            lines = cand;
+        Some(format!("{indent}let {head} = {lit};"))
+    };
+    let width = par_checks();
+    let mut todo: Vec<usize> = (0..lines.len()).collect();
+    // several lines are tried at once (against the same text); the first that works is kept, the rest is tried again
+    while !todo.is_empty() {
+        if expired(deadline) {
+            break;
+        }
+        let batch: Vec<usize> = todo.iter().copied().filter(|&i| replacement(&lines, i).is_some()).take(width).collect();
+        if batch.is_empty() {
+            break;
+        }
+        let cands: Vec<Vec<String>> = batch
+            .iter()
+            .map(|&i| {
+                let mut c = lines.clone();
+                c[i] = replacement(&lines, i).unwrap();
+                c
+            })
+            .collect();
+        let res = par_map(&cands, width, |c| it.check(&c.join("\n")));
+        let last = *batch.last().unwrap();
+        match res.iter().position(|&ok| ok) {
+            Some(p) => {
+                lines = cands[p].clone();
+                // lines up to the accepted one are done (those before it failed); the ones behind it come again
+                todo.retain(|&i| i > batch[p]);
+            }
+            None => todo.retain(|&i| i > last),
         }
     }
     lines.join("\n")
