@@ -38,6 +38,7 @@ USAGE:
   rs-compiler-fuzzer retriage --pkg DIR  triage again (in place) every stored finding with an older fuzzer_id (--shard I/N, --limit N, --deadline SECS, --budget, --bisect; --finding NAME: just that one, minimised again)
   rs-compiler-fuzzer pack --pkg DIR     merge finding directories (--add DIR, repeatable) into an unpacked package, rebuild INDEX.md
                             (--toolchain NAME records where they were found; --contains KEYS_FILE checks that keys are present)
+  rs-compiler-fuzzer reduce FILE.rs --test CMD    reduce any Rust file while CMD (given the candidate path, exit 0 = still interesting) succeeds; --help for the options
   rs-compiler-fuzzer interesting --cfg FILE --file F   oracle for external reducers (exit 0 = still interesting)
   rs-compiler-fuzzer list               list strategies and default configurations
 
@@ -95,6 +96,10 @@ fn main() {
         print!("{HELP}");
         return;
     };
+    if cmd == "reduce" {
+        // the standalone reducer of any Rust file (its own logger, its own options)
+        std::process::exit(rs_minimizer::cli::run(args[1..].to_vec()));
+    }
     init_logging(&cmd);
     let mut seed: Option<u64> = None;
     let mut duration = None;

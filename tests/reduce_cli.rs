@@ -22,7 +22,8 @@ fn reduces_with_a_test_script_and_keeps_what_the_script_needs() {
     Command::new("chmod").arg("+x").arg(&script).status().unwrap();
     let out = dir.join("out.rs");
     let log = dir.join("run.log");
-    let status = Command::new(env!("CARGO_BIN_EXE_rs-minimizer"))
+    let status = Command::new(env!("CARGO_BIN_EXE_rs-compiler-fuzzer"))
+        .arg("reduce")
         .arg(&input)
         .args(["--test", &script.display().to_string(), "-o", &out.display().to_string(), "--budget", "60", "--jobs", "4", "--rustc", "", "--no-shrinkray", "--no-treereduce", "--log", &log.display().to_string()])
         .status()
@@ -43,15 +44,15 @@ fn refuses_an_input_the_script_rejects() {
     let script = dir.join("check.sh");
     std::fs::write(&script, "#!/bin/sh\nexit 1\n").unwrap();
     Command::new("chmod").arg("+x").arg(&script).status().unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_rs-minimizer")).arg(&input).args(["--test", &script.display().to_string()]).output().unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_rs-compiler-fuzzer")).arg("reduce").arg(&input).args(["--test", &script.display().to_string()]).output().unwrap();
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("nothing to reduce"));
 }
 
 #[test]
 fn help_and_usage_errors() {
-    let help = Command::new(env!("CARGO_BIN_EXE_rs-minimizer")).arg("--help").output().unwrap();
+    let help = Command::new(env!("CARGO_BIN_EXE_rs-compiler-fuzzer")).args(["reduce", "--help"]).output().unwrap();
     assert!(help.status.success() && String::from_utf8_lossy(&help.stdout).contains("USAGE"));
-    let bad = Command::new(env!("CARGO_BIN_EXE_rs-minimizer")).output().unwrap();
+    let bad = Command::new(env!("CARGO_BIN_EXE_rs-compiler-fuzzer")).arg("reduce").output().unwrap();
     assert!(!bad.status.success());
 }

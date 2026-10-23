@@ -1,7 +1,31 @@
 # Rust Compiler Fuzzer
 
 A differential fuzzer that looks for **miscompilations** (and compiler crashes/hangs) in `rustc`/LLVM.
-Program generation and orchestration are both written in Rust (std only, no dependencies).
+Program generation and orchestration are both written in Rust (a handful of small crates: `log`, `handsome_logger`, `ctrlc`, two demanglers).
+
+## Quick start
+
+Needs `rustup` with a nightly toolchain (`rustup toolchain install nightly`); nothing else.
+
+```bash
+cargo install --git https://github.com/qarmin/rs-compiler-fuzzer --locked
+
+# 10 minutes on nightly, all strategies; findings (if any) land in ./fuzz-out/findings/
+rs-compiler-fuzzer fuzz --rustc "rustc +nightly" --duration 600 --profile fast
+```
+
+Exit code `0` = nothing new, `2` = new findings. Every finding is a directory with `case.rs` (a standalone reproducer),
+`report.md` (commands and outputs) and `repro.cfg`. Smaller or longer runs: `--duration`, `--strategies arith,loops`, `--scale 50`;
+`rs-compiler-fuzzer --help` lists everything. Already-known upstream bugs are filtered out (`known-bugs.txt`).
+
+The reducer is a tool of its own and works on any Rust file, e.g. an ICE:
+
+```bash
+# check.sh gets the candidate path as its last argument and exits 0 while the problem shows
+rs-compiler-fuzzer reduce ice.rs --test ./check.sh -o small.rs
+```
+
+Details: [`rs-minimizer`](rs-minimizer/README.md).
 
 ## How it works
 

@@ -57,7 +57,7 @@ test:
 # reduce any Rust file with the standalone minimizer: just reduce ice.rs ./check.sh (check.sh exits 0 while the problem shows)
 [group('findings')]
 reduce file test *args:
-    cargo run --release -p rs-minimizer -- {{file}} --test {{test}} {{args}}
+    cargo run --release -- reduce {{file}} --test {{test}} {{args}}
 
 ## install
 

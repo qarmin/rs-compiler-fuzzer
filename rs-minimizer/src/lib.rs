@@ -4,6 +4,7 @@
 //!
 //! The reduction is described by an [`Oracle`]: "is this program still showing the problem?".
 
+pub mod cli;
 pub mod control;
 pub mod deadcode;
 pub mod diag;

@@ -1,17 +1,17 @@
 use handsome_logger::{ColorChoice, CombinedLogger, Config, TermLogger, TerminalMode, WriteLogger};
-use rs_minimizer::control::{install_ctrlc, set_checkpoint, set_parallel, start_heartbeat};
-use rs_minimizer::{Cached, Options, ReduceLog, minimize, script_predicate};
+use crate::control::{install_ctrlc, set_checkpoint, set_parallel, start_heartbeat};
+use crate::{Cached, Options, ReduceLog, minimize, script_predicate};
 use std::path::PathBuf;
 use std::time::Duration;
 
 const HELP: &str = "\
-rs-minimizer - reduce a Rust program while a test command keeps succeeding
+reduce - reduce a Rust program while a test command keeps succeeding
 
 USAGE:
-  rs-minimizer INPUT.rs --test CMD [options]
+  rs-compiler-fuzzer reduce INPUT.rs --test CMD [options]
 
 The test command gets the path of a candidate file as its last argument and exits with 0 when the candidate still shows the
-problem. Example: rs-minimizer ice.rs --test ./check.sh -o small.rs
+problem. Example: rs-compiler-fuzzer reduce ice.rs --test ./check.sh -o small.rs
 
 OPTIONS:
   --test CMD         test command (split at spaces); required
@@ -29,8 +29,8 @@ fn die(msg: &str) -> ! {
     std::process::exit(1);
 }
 
-fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+/// The command line of the standalone reducer (`args` without the program name); returns the exit code.
+pub fn run(args: Vec<String>) -> i32 {
     let (mut input, mut test, mut output, mut log_file) = (None::<PathBuf>, None::<String>, None::<PathBuf>, None::<PathBuf>);
     let mut budget = 600u64;
     let mut jobs = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
@@ -42,7 +42,7 @@ fn main() {
         match a.as_str() {
             "-h" | "--help" => {
                 print!("{HELP}");
-                return;
+                return 0;
             }
             "--test" => test = Some(val()),
             "-o" | "--output" => output = Some(PathBuf::from(val())),
@@ -79,7 +79,7 @@ fn main() {
     oracle.work = work.clone();
     oracle.external = Some(command.iter().map(|c| std::path::absolute(c).ok().filter(|p| p.exists()).map(|p| p.display().to_string()).unwrap_or_else(|| c.clone())).collect());
 
-    use rs_minimizer::Oracle;
+    use crate::Oracle;
     if !oracle.check(&src) {
         die("the test command does not succeed on the input: nothing to reduce");
     }
@@ -96,4 +96,5 @@ fn main() {
     let _ = std::fs::write(&output, &result);
     let _ = std::fs::remove_dir_all(&work);
     log::info!("done: {} -> {} lines, written to {}", src.lines().count(), result.lines().count(), output.display());
+    0
 }

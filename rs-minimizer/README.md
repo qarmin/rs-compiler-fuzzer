@@ -3,7 +3,7 @@
 Test-case reducer for Rust programs. It does what Shrink Ray, treereduce and C-Vise do badly on generated or machine-renamed code, and drives them as external tools on top.
 
 ```
-rs-minimizer INPUT.rs --test ./check.sh -o small.rs
+rs-compiler-fuzzer reduce INPUT.rs --test ./check.sh -o small.rs
 ```
 
 `check.sh` gets the path of a candidate as its last argument and exits with 0 while the problem (miscompilation, ICE, a lint, ...) is still there. The result is also the checkpoint: it is rewritten on every improvement, Ctrl+C once stops and keeps it, twice leaves at once.

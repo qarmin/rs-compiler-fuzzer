@@ -26,5 +26,5 @@ CFG
 printf '#!/bin/sh\nexec %s/target/release/rs-compiler-fuzzer interesting --cfg %s/%s/interest.cfg --file "$1"\n' "$PWD" "$PWD" "$out" > "$out/test.sh"
 chmod +x "$out/test.sh"
 start=$(date +%s)
-./target/release/rs-minimizer "$dir/case.rs" --test "$PWD/$out/test.sh" -o "$out/min.rs" --budget "$budget" --jobs "$(nproc)" --rustc "rustc +nightly" --log "$out/run.log" "$@" > "$out/stdout.log" 2>&1 || echo "FAILED: $name" >> tmp/min/summary.txt
+./target/release/rs-compiler-fuzzer reduce "$dir/case.rs" --test "$PWD/$out/test.sh" -o "$out/min.rs" --budget "$budget" --jobs "$(nproc)" --rustc "rustc +nightly" --log "$out/run.log" "$@" > "$out/stdout.log" 2>&1 || echo "FAILED: $name" >> tmp/min/summary.txt
 printf '%s: %s -> %s lines, %ss\n' "$name" "$(wc -l < "$dir/case.rs")" "$(wc -l < "$out/min.rs" 2>/dev/null || echo '?')" "$(( $(date +%s) - start ))" >> tmp/min/summary.txt
