@@ -151,7 +151,7 @@ impl State<'_> {
                 let _ = writeln!(is, "Running it under Miri:\n```\n{miri_cmd}\n```\nprints\n```\n{}\n```\n", detail.chars().take(4000).collect::<String>().trim());
             }
         }
-        let _ = writeln!(is, "### Meta\n\n```\n{}\n{}\n```\n\nProblem was found by a rust fuzzer (created by an LLM) - https://github.com/qarmin/rs-compiler-fuzzer", self.versions.0, self.versions.1);
+        let _ = writeln!(is, "### Meta\n\n```\n{}\n{}\n```\n\nProblem was found by and minimized by rust fuzzer(created by llm) - https://github.com/qarmin/rs-compiler-fuzzer", self.versions.0, self.versions.1);
         std::fs::write(dir.join("ISSUE.md"), is).unwrap();
 
                 let mut st = String::new();

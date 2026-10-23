@@ -13,7 +13,7 @@ pub fn format_if_interesting(it: &dyn Oracle, src: &str) -> String {
     let _ = std::fs::create_dir_all(&dir);
     let f = dir.join("x.rs");
     std::fs::write(&f, src).unwrap();
-    let ok = Command::new("rustfmt").args(["--edition", "2021", "--config", "max_width=140,use_small_heuristics=Max"]).arg(&f).status().map(|s| s.success()).unwrap_or(false);
+    let ok = Command::new("rustfmt").args(["--edition", "2021", "--config", "max_width=140,use_small_heuristics=Max"]).arg(&f).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().map(|s| s.success()).unwrap_or(false);
     let res = if ok { std::fs::read_to_string(&f).unwrap_or_default() } else { String::new() };
     let _ = std::fs::remove_dir_all(&dir);
     if !res.is_empty() && it.check(&res) { res } else { src.to_string() }

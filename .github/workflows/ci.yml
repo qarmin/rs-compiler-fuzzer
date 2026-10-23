@@ -15,7 +15,8 @@ jobs:
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v6
-      - run: rustup toolchain install stable --profile minimal && rustup default stable
+      # nightly: the reducer tests use `-Z treat-err-as-bug` (a missing toolchain would be installed by rustup in the middle of the parallel tests)
+      - run: rustup toolchain install stable nightly --profile minimal && rustup default stable
       - run: cargo test --release --workspace
 
   # Short end-to-end run of every strategy on nightly (small batches).

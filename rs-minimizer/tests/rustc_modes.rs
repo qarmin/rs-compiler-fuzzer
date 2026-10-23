@@ -2,7 +2,9 @@ use rs_minimizer::rustc_oracle::{Mode, Spec, crash_signature, detect};
 use std::time::Duration;
 
 fn spec(flags: &[&str], mode: Mode) -> Spec {
-    Spec { rustc: vec!["rustc".into(), "+nightly".into()], flags: flags.iter().map(|s| s.to_string()).collect(), mode, compile_timeout: Duration::from_secs(120), run_timeout: Duration::from_secs(20) }
+    // only `-Z` options need nightly
+    let nightly = flags.contains(&"-Z");
+    Spec { rustc: if nightly { vec!["rustc".into(), "+nightly".into()] } else { vec!["rustc".into()] }, flags: flags.iter().map(|s| s.to_string()).collect(), mode, compile_timeout: Duration::from_secs(120), run_timeout: Duration::from_secs(20) }
 }
 
 const WRONG_TYPE: &str = "fn main() {\n    let x: u32 = \"a\";\n}\n";

@@ -61,6 +61,7 @@ fn text_of(o: &std::process::Output) -> String {
     format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr))
 }
 
+/// `extra` may name the compiler (`--rustc`); the default is the plain `rustc`: only the test that needs `-Z` asks for nightly.
 fn reduce(dir: &std::path::Path, source: &str, extra: &[&str]) -> (std::process::Output, String) {
     let input = dir.join("in.rs");
     std::fs::write(&input, source).unwrap();
@@ -68,7 +69,7 @@ fn reduce(dir: &std::path::Path, source: &str, extra: &[&str]) -> (std::process:
     let o = Command::new(env!("CARGO_BIN_EXE_rs-compiler-fuzzer"))
         .arg("reduce")
         .arg(&input)
-        .args(["--rustc", "rustc +nightly", "-o"])
+        .args(["--rustc", if extra.contains(&"-Z treat-err-as-bug=1") { "rustc +nightly" } else { "rustc" }, "-o"])
         .arg(&out)
         .args(["--budget", "60", "--jobs", "4", "--no-shrinkray", "--no-treereduce"])
         .args(extra)
@@ -84,7 +85,7 @@ const NOISY_ERROR: &str = "use std::collections::HashMap;\nfn helper(a: u32) -> 
 fn a_compile_error_is_found_and_reduced_without_a_script() {
     let dir = scratch("error");
     let (o, result) = reduce(&dir, NOISY_ERROR, &[]);
-    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert!(o.status.success(), "{}", text_of(&o));
     assert!(text_of(&o).contains("E0308"), "the detected error is announced:\n{}", text_of(&o));
     assert!(result.contains("\"text\"") && result.lines().count() <= 3, "{result}");
     assert!(!result.contains("helper") && !result.contains("HashMap"), "{result}");
@@ -94,7 +95,7 @@ fn a_compile_error_is_found_and_reduced_without_a_script() {
 fn a_compiler_crash_is_found_by_its_flags_and_kept() {
     let dir = scratch("ice");
     let (o, result) = reduce(&dir, NOISY_ERROR, &["--flags", "-Z treat-err-as-bug=1"]);
-    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert!(o.status.success(), "{}", text_of(&o));
     assert!(text_of(&o).contains("the compiler crashes"), "{}", text_of(&o));
     assert!(result.contains("\"text\"") && result.lines().count() <= 3, "{result}");
 }
@@ -104,7 +105,7 @@ fn two_builds_that_disagree_are_reduced_to_what_makes_them_disagree() {
     let dir = scratch("vs");
     let src = "fn unused() -> u32 { 5 }\nfn main() {\n    let v: Vec<u32> = (0..5).collect();\n    println!(\"{}\", v.len());\n    println!(\"{}\", cfg!(debug_assertions));\n}\n";
     let (o, result) = reduce(&dir, src, &["--flags", "-C debug-assertions=off", "--vs", "-C debug-assertions=on"]);
-    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert!(o.status.success(), "{}", text_of(&o));
     assert!(result.contains("debug_assertions") && !result.contains("unused") && !result.contains("collect"), "{result}");
 }
 
