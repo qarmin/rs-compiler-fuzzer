@@ -61,9 +61,9 @@ pub fn shown_flags(flags: &[String]) -> String {
     out.join(" ")
 }
 
-/// `-Z` options are only accepted by nightly: a command that uses one has to say so.
-pub fn compiler_for(flags: &str) -> &'static str {
-    if flags.split_whitespace().any(|f| f.starts_with("-Z")) { "rustc +nightly" } else { "rustc" }
+/// Every command in a report names the nightly toolchain: `-Z` options need it and the others behave the same, so one form fits all.
+pub fn compiler_for(_flags: &str) -> &'static str {
+    "rustc +nightly"
 }
 
 const FN_ADDRESS_MESSAGE: &str = "the program casts a function item into an integer: the address differs on every run";
@@ -301,9 +301,9 @@ mod display_tests {
     use super::*;
 
     #[test]
-    fn z_options_get_the_nightly_toolchain_and_the_guard_lint_is_not_shown() {
+    fn every_command_names_nightly_and_the_guard_lint_is_not_shown() {
         assert_eq!(compiler_for("-C opt-level=3 -Zmir-opt-level=0"), "rustc +nightly");
-        assert_eq!(compiler_for("-C opt-level=3"), "rustc");
+        assert_eq!(compiler_for("-C opt-level=3"), "rustc +nightly");
         let flags: Vec<String> = COMMON_FLAGS.iter().map(|s| s.to_string()).collect();
         let shown = shown_flags(&flags);
         assert!(!shown.contains("function_casts_as_integer") && shown.contains("--cap-lints allow"), "{shown}");
