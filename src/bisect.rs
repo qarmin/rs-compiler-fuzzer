@@ -424,6 +424,12 @@ fn nightly_search(cx: &mut Ctx, part: &mut Part) {
     }
 }
 
+/// cargo-bisect-rustc names the commit twice ("Regression in <commit>" and "regressed commit: <commit>"): keep the second.
+pub fn tidy_pr_lines(lines: &[String]) -> Vec<String> {
+    let named = lines.iter().any(|l| l.contains("regressed commit:"));
+    lines.iter().filter(|l| !(named && l.trim_start_matches("- ").starts_with("Regression in"))).cloned().collect()
+}
+
 /// Narrow a one-day nightly range down to the commit/PR with `cargo bisect-rustc` (needs it installed;
 /// without it, or when it runs out of time, the part stays open and the dates are the answer).
 fn pr_search(src: &Path, base: &Config, bad: &Config, sig: &Option<String>, work: &Path, start: &str, end: &str, budget: Duration, part: &mut Part) {
@@ -470,6 +476,7 @@ fn pr_search(src: &Path, base: &Config, bad: &Config, sig: &Option<String>, work
         }
     }
     res.dedup();
+    let res = tidy_pr_lines(&res);
     if res.is_empty() {
         let tail: Vec<&str> = text.lines().rev().filter(|l| !l.trim().is_empty()).take(2).collect();
         let why = tail.into_iter().rev().collect::<Vec<_>>().join(" / ").chars().take(200).collect::<String>();
@@ -484,6 +491,7 @@ fn pr_search(src: &Path, base: &Config, bad: &Config, sig: &Option<String>, work
         }
         return;
     }
+    let mut res = res;
     res.truncate(8);
     part.summary = format!("pr: {}", res[0].trim_start_matches("- "));
     part.lines = res;

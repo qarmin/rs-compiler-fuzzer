@@ -311,10 +311,32 @@ fn variants_from_text(t: &str) -> Vec<Variant> {
 /// What a run printed, as shown in the issue.
 fn show_out(o: &Outcome) -> String {
     match o {
-        Outcome::Ran { stdout, code, .. } if stdout.trim().is_empty() => {
-            if *code == Some(0) { "(no output)".to_string() } else { format!("(no output, exit code {:?})", code) }
+        Outcome::Ran { stdout, code, signal, .. } => {
+            // how the process ended is part of the result: a crash by a signal (`exit code None`) is not a normal exit
+            let ended = match (code, signal) {
+                (_, Some(s)) => {
+                    let name = match s {
+                        4 => " (SIGILL)",
+                        6 => " (SIGABRT)",
+                        7 => " (SIGBUS)",
+                        8 => " (SIGFPE)",
+                        9 => " (SIGKILL)",
+                        11 => " (SIGSEGV)",
+                        _ => "",
+                    };
+                    format!("killed by signal {s}{name}")
+                }
+                (Some(0), None) => String::new(),
+                (Some(c), None) => format!("exit code {c}"),
+                (None, None) => "terminated abnormally".to_string(),
+            };
+            match (stdout.trim().is_empty(), ended.is_empty()) {
+                (true, true) => "(no output)".to_string(),
+                (true, false) => format!("(no output, {ended})"),
+                (false, true) => stdout.trim().to_string(),
+                (false, false) => format!("{}\n({ended})", stdout.trim()),
+            }
         }
-        Outcome::Ran { stdout, .. } => stdout.trim().to_string(),
         other => other.describe(),
     }
 }
@@ -364,16 +386,24 @@ fn opt_variants(rustc: &[String], src: &Path, base: &Config, bad: &Config, sig: 
         c.flags = with_flag(&groups, "opt-level=", vec!["-C".to_string(), format!("opt-level={l}")]).into_iter().flatten().collect();
         cfgs.push((rustc.to_vec(), c));
     }
+    let _ = base;
+    let id = std::process::id();
+    let mut outs = crate::runner::par_map(&cfgs, 3, |(r, c)| build_and_run(r, src, &work.join(format!("var_{id}_{}", c.name)), c, lim));
+    // The MIR levels are tried on top of -C opt-level=3 when that level shows the bug too (it is the level a reader expects, and
+    // maintainers ask for `-Zmir-opt-level=0 -Copt-level=3`); otherwise on top of the failing configuration.
+    let opt3_bug = cfgs.iter().zip(&outs).any(|((_, c), o)| c.name == "opt-3" && variant_of(o, sig, reference).0);
+    let mir_groups = if opt3_bug { flag_groups(&cfgs.iter().find(|(_, c)| c.name == "opt-3").map(|(_, c)| c.flags.clone()).unwrap_or_default()) } else { groups.clone() };
     // MIR optimisation levels need the nightly compiler
+    let mut mir_cfgs: Vec<(Vec<String>, Config)> = Vec::new();
     for l in ["0", "1", "2", "3"] {
         let mut c = bad.clone();
         c.name = format!("mir{l}");
-        c.flags = with_flag(&groups, "mir-opt-level=", vec![format!("-Zmir-opt-level={l}")]).into_iter().flatten().collect();
-        cfgs.push((vec!["rustc".to_string(), "+nightly".to_string()], c));
+        c.flags = with_flag(&mir_groups, "mir-opt-level=", vec![format!("-Zmir-opt-level={l}")]).into_iter().flatten().collect();
+        mir_cfgs.push((vec!["rustc".to_string(), "+nightly".to_string()], c));
     }
-    let _ = base;
-    let id = std::process::id();
-    let outs = crate::runner::par_map(&cfgs, 3, |(r, c)| build_and_run(r, src, &work.join(format!("var_{id}_{}", c.name)), c, lim));
+    let mir_outs = crate::runner::par_map(&mir_cfgs, 3, |(r, c)| build_and_run(r, src, &work.join(format!("var_{id}_{}", c.name)), c, lim));
+    cfgs.extend(mir_cfgs);
+    outs.extend(mir_outs);
     cfgs.iter()
         .zip(outs)
         .filter_map(|((_, c), o)| {
@@ -384,6 +414,55 @@ fn opt_variants(rustc: &[String], src: &Path, base: &Config, bad: &Config, sig: 
             Some(Variant { flags: c.flags.join(" "), bug, out })
         })
         .collect()
+}
+
+/// The value of `-C opt-level=V` (`mir == false`) or `-Zmir-opt-level=V` in a flag string, and the flags with that value cut out.
+fn split_level(flags: &str, mir: bool) -> Option<(String, String)> {
+    let (pre, key) = if mir { ("-Z", "mir-opt-level=") } else { ("-C", "opt-level=") };
+    let toks: Vec<&str> = flags.split_whitespace().collect();
+    for (i, t) in toks.iter().enumerate() {
+        let bare = t.strip_prefix(pre).unwrap_or(t);
+        if let Some(v) = bare.strip_prefix(key) {
+            let mut out: Vec<String> = toks.iter().map(|x| x.to_string()).collect();
+            out[i] = format!("{}{key}@", if t.starts_with(pre) { pre } else { "" });
+            return Some((out.join(" "), v.to_string()));
+        }
+    }
+    None
+}
+
+/// Commands that differ only in one optimisation level (and have the same output) become one command with a comment:
+/// `rustc reduced.rs -C opt-level=3   # Same with opt-level=2/s`. The representative is `-C opt-level=3` / `-Zmir-opt-level=0`
+/// when they are among the siblings. Returns (flags to show, comment).
+fn compress_siblings(all: &[String]) -> Vec<(String, String)> {
+    let mut items: Vec<(String, String)> = all.iter().map(|f| (f.clone(), String::new())).collect();
+    for mir in [true, false] {
+        let (name, prefer) = if mir { ("mir-opt-level=", "0") } else { ("opt-level=", "3") };
+        let mut clusters: Vec<(String, Vec<(usize, String)>)> = Vec::new();
+        for (i, (f, c)) in items.iter().enumerate() {
+            if !c.is_empty() {
+                continue;
+            }
+            if let Some((tpl, v)) = split_level(f, mir) {
+                match clusters.iter_mut().find(|(t, _)| *t == tpl) {
+                    Some(cl) => cl.1.push((i, v)),
+                    None => clusters.push((tpl, vec![(i, v)])),
+                }
+            }
+        }
+        let mut drop: Vec<usize> = Vec::new();
+        for (_, members) in clusters.iter().filter(|(_, m)| m.len() > 1) {
+            let rep = members.iter().position(|(_, v)| v == prefer).unwrap_or(0);
+            let others: Vec<&str> = members.iter().enumerate().filter(|(k, _)| *k != rep).map(|(_, (_, v))| v.as_str()).collect();
+            items[members[rep].0].1 = format!("Same with {name}{}", others.join("/"));
+            drop.extend(members.iter().enumerate().filter(|(k, _)| *k != rep).map(|(_, (i, _))| *i));
+        }
+        drop.sort_unstable();
+        for i in drop.into_iter().rev() {
+            items.remove(i);
+        }
+    }
+    items
 }
 
 /// The culprit found by bisecting the optimisation passes.
@@ -993,7 +1072,7 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
         keep(&mut st, "pass_bisect");
     } else {
         match &culprit {
-            Some(c) if c.n > 0 => put(&mut st, "pass_bisect", "done", &ctx, format!("first {} pass that matters: #{} of {}: {} on {}", c.kind.to_uppercase(), c.n, c.total, c.name, c.target)),
+            Some(c) if c.n > 0 => put(&mut st, "pass_bisect", "done", &ctx, format!("first {} pass that matters: {} of {}: {} on {}", c.kind.to_uppercase(), c.n, c.total, c.name, c.target)),
             Some(c) => put(&mut st, "pass_bisect", "done", &ctx, format!("tried, {} pass bisection could not isolate a pass: {}", c.kind, c.note)),
             None if still => put(&mut st, "pass_bisect", "n/a", &ctx, "neither MIR nor LLVM could be determined as the cause".into()),
             None => put(&mut st, "pass_bisect", "todo", &ctx, "needs a reproducing program first".into()),
@@ -1219,16 +1298,22 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
         let mut groups: Vec<(String, bool, Vec<String>)> = Vec::new();
         for e in &entries {
             let key = if crash && e.fails { "\u{0}fail".to_string() } else { e.text.clone() };
-            let command = if crash && e.fails { vcmd(&e.flags) } else { format!("{}; ./reduced", vcmd(&e.flags)) };
             match groups.iter_mut().find(|g| g.0 == key) {
-                Some(g) => g.2.push(command),
-                None => groups.push((key, crash && e.fails, vec![command])),
+                Some(g) => g.2.push(e.flags.clone()),
+                None => groups.push((key, crash && e.fails, vec![e.flags.clone()])),
             }
         }
-        for (i, (key, is_fail, cmds)) in groups.iter().enumerate() {
+        for (i, (key, is_fail, all_flags)) in groups.iter().enumerate() {
             let lead = match i { 0 => "Rust compiled with", 1 => "but compiled with", _ => "and compiled with" };
             let text = if *is_fail { crash_err.as_str() } else { key.as_str() };
             let verb = if *is_fail { "fails with" } else if crash { "compiles and prints" } else { "prints" };
+            // siblings that differ in one optimisation level only share one command and a comment
+            let shown: Vec<(String, String)> = compress_siblings(all_flags)
+                .into_iter()
+                .map(|(f, c)| (if crash && *is_fail { vcmd(&f) } else { format!("{}; ./reduced", vcmd(&f)) }, c))
+                .collect();
+            let width = shown.iter().filter(|(_, c)| !c.is_empty()).map(|(cmd, _)| cmd.len()).max().unwrap_or(0);
+            let cmds: Vec<String> = shown.iter().map(|(cmd, c)| if c.is_empty() { cmd.clone() } else { format!("{cmd:<width$} # {c}") }).collect();
             if crash && !*is_fail && text == "(no output)" {
                 let _ = writeln!(is, "{lead}\n```\n{}\n```\nthe program builds and runs without errors.\n", cmds.join("\n"));
             } else {
@@ -1239,7 +1324,7 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     if let Some(c) = culprit.as_ref().filter(|c| c.n > 0) {
         let what = if c.kind == "llvm" { "LLVM pass" } else { "MIR pass" };
         let limit = if c.kind == "llvm" { "-C llvm-args=-opt-bisect-limit" } else { "-Zmir-opt-bisect-limit" };
-        let _ = writeln!(is, "Bisecting the optimization passes with `{limit}`: the first {what} that changes the result is pass #{} of {}, `{}` on `{}`.\n", c.n, c.total, c.name, c.target);
+        let _ = writeln!(is, "Bisecting the optimization passes with `{limit}`: the first {what} that changes the result is pass {} of {}, `{}` on `{}`.\n", c.n, c.total, c.name, c.target);
     }
     // Miri is a required step of every finding; its output only belongs here when the program has no `unsafe` and Miri still complains
     if !m.report.is_empty() && !reduced.contains("unsafe") {
@@ -1255,7 +1340,7 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     }
     if bis.pr.lines.iter().any(|l| l.contains("rust-lang/rust")) {
         let _ = writeln!(is, "\nBisected with `cargo bisect-rustc`:\n");
-        for l in &bis.pr.lines {
+        for l in &crate::bisect::tidy_pr_lines(&bis.pr.lines) {
             let _ = writeln!(is, "{l}");
         }
     }
@@ -1318,4 +1403,27 @@ pub fn stale_findings(pkg: &Path, skip: &std::collections::HashSet<String>) -> V
         .collect();
     v.sort();
     v.into_iter().map(|x| x.3).collect()
+}
+
+#[cfg(test)]
+mod sibling_tests {
+    use super::*;
+
+    #[test]
+    fn levels_that_behave_alike_share_one_command() {
+        let flags: Vec<String> = ["-C opt-level=2", "-C opt-level=3", "-C opt-level=s", "-C opt-level=3 -Zmir-opt-level=0", "-C opt-level=3 -Zmir-opt-level=1", "-C opt-level=3 -Zmir-opt-level=2"].iter().map(|s| s.to_string()).collect();
+        let out = compress_siblings(&flags);
+        assert_eq!(out.len(), 2, "{out:?}");
+        assert_eq!(out[0], ("-C opt-level=3".to_string(), "Same with opt-level=2/s".to_string()));
+        assert_eq!(out[1], ("-C opt-level=3 -Zmir-opt-level=0".to_string(), "Same with mir-opt-level=1/2".to_string()));
+        // a different opt-level only: nothing to merge
+        let single: Vec<String> = vec!["-C opt-level=1".into(), "-C debuginfo=2".into()];
+        assert_eq!(compress_siblings(&single).len(), 2);
+    }
+
+    #[test]
+    fn the_commit_is_named_once() {
+        let l: Vec<String> = vec!["- Regression in [f20a92e](u)".into(), "- searched commit range: [a...b](u)".into(), "- regressed commit: [f20a92e](u)".into()];
+        assert_eq!(crate::bisect::tidy_pr_lines(&l).len(), 2);
+    }
 }

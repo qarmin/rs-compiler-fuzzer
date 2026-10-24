@@ -115,6 +115,11 @@ triage dir *args: build
 bisect dir secs="3000": build
     {{bin}} triage --dir {{dir}} --no-reduce --no-search --bisect {{secs}}
 
+# import hand-made reproducers: DIR holds NAME.rs + NAME.txt pairs (any depth; the txt is the failing rustc command line); results in ./import-out/imported/<key>/
+[group('findings')]
+import dir *args: doctor-quick build
+    {{bin}} import --todo {{dir}} --out import-out --bisect 1500 --budget 900 --budget-max 7200 {{args}}
+
 # show the issue draft of a finding
 [group('findings')]
 issue dir:
@@ -142,7 +147,7 @@ open:
 #   just fuzz-full arith,loops --duration 3600 # all configs incl. the slow ones, for an hour
 # Findings land in ./fuzz-out; `just fuzz-minimize` turns the stored ones into reduced reproducers.
 
-# all configurations except LTO, slow ones (cgu1) included
+# all configurations except LTO and codegen-units=1 (those need --lto)
 [group('fuzz')]
 fuzz-full strategies="all" *args: doctor-quick build
     {{bin}} fuzz --strategies {{strategies}} --profile full --jobs {{jobs}} --out fuzz-out {{args}}

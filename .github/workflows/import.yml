@@ -1,0 +1,139 @@
+name: import
+
+# Things found by hand enter the pipeline here. The `Nightly` release may hold a `todo.zip` with pairs `NAME.rs` + `NAME.txt`
+# at any depth: the program, and the rustc command line that shows the problem (`rustc +nightly x.rs -C opt-level=3 -C lto=fat`;
+# an optional second line `ref: rustc ...` names the reference build, otherwise it is derived by dropping the optimisation flags).
+# Every pair that still shows the problem becomes a normal finding: reproduction on every channel, minimisation, shortest flags,
+# Miri, regression range, upstream search, issue draft - and is merged into findings.zip. Handled pairs are removed from
+# todo.zip (pairs that do not show the problem any more are listed in the job summary and kept in the job's artifact).
+# Unusual flags (LTO, codegen-units, -Z options) are fine here: they are the point of this workflow.
+on:
+  schedule:
+    - cron: "10 2 * * *"
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "Pairs per run"
+        default: "6"
+      reduce_seconds:
+        description: "Reduction time per finding (at least)"
+        default: "900"
+      reduce_max_seconds:
+        description: "Longest minimisation of one finding"
+        default: "5400"
+      bisect_seconds:
+        description: "Regression-range time per finding"
+        default: "1500"
+
+permissions:
+  contents: write
+  actions: read
+
+# shares the group with retriage: both would otherwise work on the package at the same time
+concurrency:
+  group: retriage
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RELEASE: Nightly
+
+jobs:
+  import:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 130
+    steps:
+      - uses: actions/checkout@v6
+      - name: Is there anything to import?
+        id: todo
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p todo pkg
+          if gh release download "$RELEASE" --repo "$GITHUB_REPOSITORY" --pattern todo.zip --dir . 2>/dev/null; then
+            unzip -q -o todo.zip -d todo
+            n=$(find todo -name '*.rs' | wc -l)
+            echo "found=$([ "$n" -gt 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+            echo "todo.zip: $n program(s)"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "no todo.zip in the $RELEASE release"
+          fi
+      - name: Cache the reducers (cargo-bisect-rustc)
+        if: steps.todo.outputs.found == 'true'
+        uses: actions/cache@v6
+        with:
+          path: ~/.cargo/bin/cargo-bisect-rustc
+          key: reducers-${{ runner.os }}-v1
+      - name: Toolchains and tools
+        if: steps.todo.outputs.found == 'true'
+        run: |
+          for c in stable beta nightly; do rustup toolchain install $c --profile minimal; done
+          rustup component add miri rust-src --toolchain nightly || echo "miri unavailable on this nightly"
+          [ -x "$HOME/.cargo/bin/cargo-bisect-rustc" ] || cargo +stable install cargo-bisect-rustc --locked || echo "cargo-bisect-rustc unavailable"
+      - name: Build
+        if: steps.todo.outputs.found == 'true'
+        run: cargo +stable build --release
+      - name: Download the package (to recognise findings that are stored already)
+        if: steps.todo.outputs.found == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release download "$RELEASE" --repo "$GITHUB_REPOSITORY" --pattern findings.zip --dir . 2>/dev/null; then unzip -q -o findings.zip -d pkg; fi
+          ls pkg/findings 2>/dev/null | wc -l | sed 's/$/ stored findings/'
+
+      - name: Import one pair at a time; store each result and remove the pair from todo.zip right away
+        if: steps.todo.outputs.found == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+          LIMIT: ${{ inputs.limit || '6' }}
+          REDUCE: ${{ inputs.reduce_seconds || '900' }}
+          REDUCE_MAX: ${{ inputs.reduce_max_seconds || '5400' }}
+          BISECT: ${{ inputs.bisect_seconds || '1500' }}
+        run: |
+          export BIN=$PWD/target/release/rs-compiler-fuzzer TOOLCHAIN=import
+          end=$((SECONDS + 103 * 60)); : > handled.txt; mkdir -p unreproduced
+          imported=0; skipped=0
+          {
+            echo "### import"
+            echo '| pair | result |'
+            echo '|---|---|'
+          } >> "$GITHUB_STEP_SUMMARY"
+          for i in $(seq 1 "$LIMIT"); do
+            [ $((end - SECONDS)) -lt 1200 ] && { echo "no time left for another pair"; break; }
+            "$BIN" import --todo todo --pkg pkg --skip handled.txt --limit 1 --budget "$REDUCE" --budget-max "$REDUCE_MAX" --deadline $((end - SECONDS)) --bisect "$BISECT" --out import-out | tee one.txt
+            line=$(grep -E '^(IMPORTED|EXISTS|NOREPRO) ' one.txt | head -n1)
+            [ -z "$line" ] && { echo "nothing (more) to import"; break; }
+            kind=${line%% *}
+            case "$kind" in
+              IMPORTED)
+                key=$(cut -d' ' -f2 <<<"$line"); stem=$(cut -d' ' -f3- <<<"$line")
+                rm -rf upd && mkdir -p "upd/$key" && cp -r "import-out/imported/$key/." "upd/$key/"
+                export KEYS_FILE=$PWD/stored-keys.txt ADD_DIRS=upd
+                tools/release_sync.sh tools/store_mutator.sh
+                imported=$((imported + 1)); echo "| \`$stem\` | stored as \`$key\` |" >> "$GITHUB_STEP_SUMMARY" ;;
+              EXISTS)
+                key=$(cut -d' ' -f2 <<<"$line"); stem=$(cut -d' ' -f3- <<<"$line")
+                echo "| \`$stem\` | already stored as \`$key\` |" >> "$GITHUB_STEP_SUMMARY" ;;
+              NOREPRO)
+                stem=$(sed -E 's/^NOREPRO (.*) :: .*/\1/' <<<"$line"); why=$(sed -E 's/^NOREPRO .* :: //' <<<"$line")
+                mkdir -p "unreproduced/$(dirname "$stem")"; cp "todo/$stem.rs" "todo/$stem.txt" "unreproduced/$(dirname "$stem")/" 2>/dev/null || true
+                skipped=$((skipped + 1)); echo "| \`$stem\` | **does not show the problem**: ${why//|/\\|} |" >> "$GITHUB_STEP_SUMMARY" ;;
+            esac
+            echo "$stem" >> handled.txt
+            unset KEYS_FILE ADD_DIRS
+            ASSET=todo.zip DONE_FILE=$PWD/handled.txt tools/release_sync.sh tools/todo_mutator.sh
+          done
+          echo "imported: $imported, not reproduced: $skipped" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: import
+          path: |
+            unreproduced
+            upd
+            handled.txt
+          if-no-files-found: ignore
+          retention-days: 30

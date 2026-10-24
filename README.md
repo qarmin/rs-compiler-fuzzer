@@ -72,7 +72,7 @@ Details: [`rs-minimizer`](rs-minimizer/README.md).
 ### Profiles
 
 - `--profile full` (default): every configuration.
-- `--profile fast`: skips the slowest builds (fat/thin LTO, `codegen-units=1`).
+- `--profile fast`: skips the slowest builds. Thin/fat LTO and `codegen-units=1` are not compared at all unless `--lto` is given.
 - `--configs a,b,c` / `--config NAME=FLAGS` pick or add configurations; `rs-compiler-fuzzer list` shows all.
 
 ### Where findings go
@@ -285,9 +285,22 @@ The result is not uploaded: copy the directory into the release package (or open
 ```
 just fuzz-lto                         # every strategy, with the LTO configurations CI never runs
 just fuzz-lto-only memory,shapes 5    # O0 vs O3 vs thin / thin+checks / fat LTO, 5 rounds
-just fuzz-full arith,loops --duration 3600   # all configs incl. slow ones (cgu1)
+just fuzz-full arith,loops --duration 3600   # all configs except LTO and cgu1
 just fuzz-one shapes 42               # one strategy, repeatable seed
 just canary                           # known bugs reproduce on this toolchain? (with LTO)
 just miri | just stdlib-selfcheck     # Miri over generated programs / generator self-check
 just fuzz-minimize                    # minimise everything found into fuzz-out/
 ```
+
+## Importing hand-made reproducers (`todo.zip`, workflow `import`)
+
+Put a `todo.zip` into the `Nightly` release: pairs `NAME.rs` + `NAME.txt` at any depth. `NAME.rs` is the program, `NAME.txt` the full rustc
+command line that shows the problem, e.g. `rustc +nightly x.rs -C opt-level=3 -C lto=fat -C codegen-units=1; ./x` (everything after `;`, the
+source file and `-o` are ignored; `+channel` picks the toolchain, nightly by default). An optional second line `ref: rustc ...` is the reference
+build; without it the reference is derived by dropping the optimisation flags (opt-level, LTO, codegen-units, llvm-args, target-cpu, `-Z`) and
+trying `-C opt-level=0`, then the defaults. A compiler crash only needs a reference that compiles and runs. Executables only.
+
+The `import` workflow (daily at 02:10 UTC and by hand) takes each pair that still shows the problem through the whole pipeline - reproduction on
+every channel, minimisation, shortest flags, opt levels, Miri, regression range, upstream search, ISSUE.md - and merges the result into
+`findings.zip` (`manual__<flags>__<hash>`); the pair is then removed from `todo.zip`. Pairs that do not show the problem are listed in the job
+summary and kept in the job's artifact `import`. Locally: `just import DIR` (results in `import-out/imported/`, copy them into your package).
