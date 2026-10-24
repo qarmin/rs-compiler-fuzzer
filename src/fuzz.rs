@@ -66,7 +66,7 @@ fn cpu_level() -> u8 {
 
 static LTO: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// LTO configurations are far too heavy for the CI jobs: only with `--lto`.
+/// LTO and `codegen-units=1` configurations are far too heavy for the CI jobs: only with `--lto`.
 pub fn set_lto(on: bool) {
     LTO.store(on, std::sync::atomic::Ordering::Relaxed);
 }
@@ -98,9 +98,10 @@ pub fn default_configs(nightly: bool) -> Vec<Config> {
     if level >= 4 {
         v.push(Config::new("O3-v4", "-C opt-level=3 -C target-cpu=x86-64-v4"));
     }
-    v.push(Config::new("O2-cgu1", "-C opt-level=2 -C codegen-units=1").slow());
-    v.push(Config::new("O3-cgu1", "-C opt-level=3 -C codegen-units=1").slow());
+    // the slow builds (one codegen unit, LTO) only with `--lto`: they dominate the compile time of a job
     if LTO.load(std::sync::atomic::Ordering::Relaxed) {
+        v.push(Config::new("O2-cgu1", "-C opt-level=2 -C codegen-units=1").slow());
+        v.push(Config::new("O3-cgu1", "-C opt-level=3 -C codegen-units=1").slow());
         v.push(Config::new("O3-lto-thin", "-C opt-level=3 -C lto=thin").slow());
         // rust-lang/rust#164536: thin LTO together with overflow checks broke a round trip
         v.push(Config::new("O3-lto-thin-checks", "-C opt-level=3 -C lto=thin -C overflow-checks=on -C debug-assertions=on").slow());

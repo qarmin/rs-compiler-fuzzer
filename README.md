@@ -72,7 +72,7 @@ Details: [`rs-minimizer`](rs-minimizer/README.md).
 ### Profiles
 
 - `--profile full` (default): every configuration.
-- `--profile fast`: skips the slowest builds (fat/thin LTO, `codegen-units=1`).
+- `--profile fast`: skips the slowest builds. Thin/fat LTO and `codegen-units=1` are not compared at all unless `--lto` is given.
 - `--configs a,b,c` / `--config NAME=FLAGS` pick or add configurations; `rs-compiler-fuzzer list` shows all.
 
 ### Where findings go
@@ -285,7 +285,7 @@ The result is not uploaded: copy the directory into the release package (or open
 ```
 just fuzz-lto                         # every strategy, with the LTO configurations CI never runs
 just fuzz-lto-only memory,shapes 5    # O0 vs O3 vs thin / thin+checks / fat LTO, 5 rounds
-just fuzz-full arith,loops --duration 3600   # all configs incl. slow ones (cgu1)
+just fuzz-full arith,loops --duration 3600   # all configs except LTO and cgu1
 just fuzz-one shapes 42               # one strategy, repeatable seed
 just canary                           # known bugs reproduce on this toolchain? (with LTO)
 just miri | just stdlib-selfcheck     # Miri over generated programs / generator self-check

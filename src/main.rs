@@ -52,7 +52,7 @@ OPTIONS:
   --out DIR             output directory for findings (default fuzz-out)
   --jobs N              configurations compiled in parallel (default: cores/2)
   --rustc \"CMD\"         rustc command, e.g. \"rustc +nightly\" (default: rustc)
-  --lto                 also compare thin/fat LTO builds (off by default: too heavy for CI)
+  --lto                 also compare the slow builds: thin/fat LTO and codegen-units=1 (off by default: too heavy for CI)
   --profile fast|full   fast = skip the slowest configs (fat/thin LTO, one codegen unit); default full
   --configs a,b,c       use only these named configurations (first = baseline)
   --config NAME=FLAGS   add a custom configuration (repeatable)

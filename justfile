@@ -142,7 +142,7 @@ open:
 #   just fuzz-full arith,loops --duration 3600 # all configs incl. the slow ones, for an hour
 # Findings land in ./fuzz-out; `just fuzz-minimize` turns the stored ones into reduced reproducers.
 
-# all configurations except LTO, slow ones (cgu1) included
+# all configurations except LTO and codegen-units=1 (those need --lto)
 [group('fuzz')]
 fuzz-full strategies="all" *args: doctor-quick build
     {{bin}} fuzz --strategies {{strategies}} --profile full --jobs {{jobs}} --out fuzz-out {{args}}

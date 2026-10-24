@@ -356,6 +356,34 @@ pub fn write_index(pkg: &Path) {
             let _ = writeln!(s, "- not bisected yet ({}): {}", todo.len(), list(&todo));
         }
     }
+    // the optimisation pass that makes the difference (opt-bisect), for searching by pass: gvn, instcombine, loop-vectorize, ...
+    {
+        let mut by_pass: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+        let mut none: Vec<String> = Vec::new();
+        for (k, _) in &rows {
+            let t = std::fs::read_to_string(root.join(k).join("culprit.txt")).unwrap_or_default();
+            let get = |key: &str| t.lines().find_map(|l| l.strip_prefix(key)).unwrap_or("").trim().to_string();
+            let (kind, name) = (get("kind="), get("name="));
+            if name.is_empty() || get("n=").parse::<usize>().unwrap_or(0) == 0 {
+                none.push(k.clone());
+            } else {
+                by_pass.entry(format!("{} `{}`", if kind == "mir" { "MIR" } else { "LLVM" }, name)).or_default().push(k.clone());
+            }
+        }
+        if !by_pass.is_empty() {
+            let list = |v: &[String]| v.iter().map(|k| format!("`{k}`")).collect::<Vec<_>>().join(", ");
+            let _ = writeln!(s, "\n## Grouped by the optimisation pass that causes it\n\nThe first pass whose execution changes the result (`-C llvm-args=-opt-bisect-limit` / `-Zmir-opt-bisect-limit`).\n");
+            let mut groups: Vec<(&String, &mut Vec<String>)> = by_pass.iter_mut().collect();
+            groups.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then(a.0.cmp(b.0)));
+            for (pass, ks) in groups {
+                ks.sort();
+                let _ = writeln!(s, "- {pass} ({}): {}", ks.len(), list(ks));
+            }
+            if !none.is_empty() {
+                let _ = writeln!(s, "- no pass found yet / not applicable ({}): {}", none.len(), list(&none));
+            }
+        }
+    }
     let gone = std::fs::read_to_string(pkg.join("fixed.txt")).unwrap_or_default();
     if !gone.trim().is_empty() {
         let _ = writeln!(s, "\n## Removed: no longer reproduce on the newest nightly\n\n| finding | removed | checked with | first seen |\n|---|---|---|---|");
