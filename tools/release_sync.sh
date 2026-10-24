@@ -12,12 +12,13 @@
 #      in between 4's check and the rename would have overwritten us) -> otherwise redo from 1
 #
 # usage: BIN=path/to/rs-compiler-fuzzer [KEYS_FILE=file] release_sync.sh '<mutator shell snippet, gets $PKG>'
+# ASSET (optional): another asset of the release than findings.zip (then KEYS_FILE must not be set).
 # KEYS_FILE (optional): file the mutator fills with the finding keys it stored; they are verified at the end.
 set -u
 MUTATOR=${1:?mutator snippet}
 REPO=${GITHUB_REPOSITORY:?}
 TAG=${RELEASE:-Nightly}
-NAME=findings.zip
+NAME=${ASSET:-findings.zip}   # ASSET=todo.zip: the same dance for the list of things to import
 BIN=${BIN:-./target/release/rs-compiler-fuzzer}
 ATTEMPTS=${ATTEMPTS:-8}
 WORK=$(mktemp -d); trap 'rm -rf "$WORK"' EXIT
@@ -35,6 +36,8 @@ fetch() { # fetch <asset id> <dest dir>: unpack findings into dest
 }
 
 pack_zip() { # pack_zip <dir> <zip>: deterministic archive
+  # zip refuses to pack nothing (an emptied todo.zip)
+  [ -z "$(find "$1" -type f -print -quit)" ] && : > "$1/.empty"
   (cd "$1" && find . -type f -print | LC_ALL=C sort | xargs -r touch -d '2000-01-01 00:00:00 UTC' && rm -f "$2" && find . -type f -print | LC_ALL=C sort | zip -q -X -@ "$2")
 }
 

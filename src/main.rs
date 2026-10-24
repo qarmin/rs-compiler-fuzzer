@@ -5,6 +5,7 @@
 
 mod batch;
 mod fuzz;
+mod import;
 mod rng;
 mod reduce;
 mod bisect;
@@ -35,6 +36,8 @@ USAGE:
                             (--bisect SECS: find the first stable release / nightly that has the bug; --dirs ROOT: every finding below ROOT; --budget SECS reduction time per finding; --no-search; --no-reduce; --limit N)
   rs-compiler-fuzzer minimize DIR       local, long minimisation of one stored finding on all cores (--jobs N, --budget SECS per run, --deadline SECS overall,
                             --bisect SECS, --search, --no-force = skip a finding that already converged, --ui auto|tui|basic: dashboard with a size graph and the last diff in a terminal, plain log otherwise); Ctrl+C keeps the best program and rewrites ISSUE.md/STATUS.md/finding.json; run it again to continue
+  rs-compiler-fuzzer import --todo DIR   findings from NAME.rs + NAME.txt pairs (the rustc command line that fails; `ref:` line = reference) become normal findings and are triaged
+                            (--out DIR gets <key>/ per finding; --skip FILE stems already handled; --pkg DIR skips keys already stored; --limit, --budget, --deadline, --bisect as for retriage)
   rs-compiler-fuzzer retriage --pkg DIR  triage again (in place) every stored finding with an older fuzzer_id (--shard I/N, --limit N, --deadline SECS, --budget, --bisect; --finding NAME: just that one, minimised again)
   rs-compiler-fuzzer pack --pkg DIR     merge finding directories (--add DIR, repeatable) into an unpacked package, rebuild INDEX.md
                             (--toolchain NAME records where they were found; --contains KEYS_FILE checks that keys are present)
@@ -148,6 +151,7 @@ fn main() {
     let mut strategy: Option<String> = None;
     let mut case_seed: Option<u64> = None;
     let mut gen_out: Option<PathBuf> = None;
+    let mut todo_dir: Option<PathBuf> = None;
 
     let mut it = args.iter().skip(1);
     while let Some(a) = it.next() {
@@ -184,6 +188,7 @@ fn main() {
             "--profile" => profile = val(),
             "--budget" => budget = num(val()),
             "--lto" => fuzz::set_lto(true),
+            "--todo" => todo_dir = Some(PathBuf::from(val())),
             "--no-search" => no_search = true,
             "--search" | "--no-force" if cmd == "minimize" => {}
             "--no-reduce" => no_reduce = true,
@@ -337,6 +342,61 @@ fn main() {
                 };
                 rs_minimizer::ui::stop(&[size, format!("written: {0}/reduced.rs, {0}/ISSUE.md, {0}/STATUS.md; log: tmp/minimize.log, rejected candidates: tmp/minimize.rejected.log", dir.display())]);
             }
+            std::process::exit(0);
+        }
+        "import" => {
+            let root = todo_dir.unwrap_or_else(|| die("import needs --todo DIR (the unpacked todo.zip)"));
+            let skip: std::collections::HashSet<String> = skip_file.as_ref().and_then(|f| std::fs::read_to_string(f).ok()).map(|t| t.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect()).unwrap_or_default();
+            let stems: Vec<String> = import::list_pairs(&root).into_iter().filter(|s| !skip.contains(s)).collect();
+            eprintln!("import: {} pair(s) of .rs + .txt waiting in {}", stems.len(), root.display());
+            let found_dir = out.join("imported");
+            let work = out.join("work");
+            let start = std::time::Instant::now();
+            let mut n = 0;
+            for stem in stems.iter().take(limit) {
+                let left = if deadline_secs > 0 { deadline_secs.saturating_sub(start.elapsed().as_secs()) } else { u64::MAX };
+                if left < 900 {
+                    eprintln!("import: not enough time left for {stem}");
+                    println!("DEFERRED {stem}");
+                    continue;
+                }
+                eprintln!("import: {stem}");
+                match import::prepare(&root, stem, &found_dir, &work) {
+                    Err(e) => {
+                        eprintln!("    cannot import: {e}");
+                        println!("NOREPRO {stem} :: {e}");
+                    }
+                    Ok(import::Outcome2::NotReproduced(why)) => {
+                        eprintln!("    does not show the problem: {why}");
+                        println!("NOREPRO {stem} :: {why}");
+                    }
+                    Ok(import::Outcome2::Ready(key, dir)) => {
+                        if pkg.as_ref().map(|p| p.join("findings").join(&key).join("case.rs").exists()).unwrap_or(false) {
+                            eprintln!("    {key} is stored already");
+                            println!("EXISTS {key} {stem}");
+                            let _ = std::fs::remove_dir_all(&dir);
+                            continue;
+                        }
+                        // minimisation gets what is left of the time, but never less than --budget
+                        let reserve = bisect_secs + 900;
+                        let b = if left == u64::MAX { budget.max(budget_max) } else { left.saturating_sub(reserve).clamp(60, budget_max.max(budget)) };
+                        let o = triage::TriageOpts { budget: Duration::from_secs(b), search: !no_search, work: work.clone(), no_reduce, bisect: Duration::from_secs(bisect_secs), checkpoint: false, force_reduce: false };
+                        match triage::triage(&o, &dir) {
+                            Ok(s) => {
+                                eprintln!("    {s}");
+                                println!("IMPORTED {key} {stem}");
+                                n += 1;
+                            }
+                            Err(e) => {
+                                eprintln!("    triage failed: {e}");
+                                println!("IMPORTED {key} {stem}");
+                            }
+                        }
+                    }
+                }
+            }
+            let _ = std::fs::remove_dir_all(&work);
+            eprintln!("import: {n} finding(s) triaged");
             std::process::exit(0);
         }
         "retriage" => {

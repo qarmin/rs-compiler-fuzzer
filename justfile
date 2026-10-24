@@ -115,6 +115,11 @@ triage dir *args: build
 bisect dir secs="3000": build
     {{bin}} triage --dir {{dir}} --no-reduce --no-search --bisect {{secs}}
 
+# import hand-made reproducers: DIR holds NAME.rs + NAME.txt pairs (any depth; the txt is the failing rustc command line); results in ./import-out/imported/<key>/
+[group('findings')]
+import dir *args: doctor-quick build
+    {{bin}} import --todo {{dir}} --out import-out --bisect 1500 --budget 900 --budget-max 7200 {{args}}
+
 # show the issue draft of a finding
 [group('findings')]
 issue dir:
