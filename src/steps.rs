@@ -30,7 +30,7 @@ pub const STEPS: &[Step] = &[
     Step { id: "minimize_cases", title: "Batch reduced to the cases that matter (a single case if one is enough)", version: 1, code: false, max_age_days: 0 },
     Step { id: "minimized", title: "Code minimised (every pass finished, a second run changed nothing)", version: REDUCE_VERSION, code: false, max_age_days: 0 },
     Step { id: "flags", title: "Shortest command line (fewest flags that still show it)", version: 1, code: true, max_age_days: 0 },
-    Step { id: "opt_levels", title: "Other optimisation levels (and -Zmir-opt-level=0) tried, results grouped in the issue", version: 2, code: true, max_age_days: 0 },
+    Step { id: "opt_levels", title: "Other optimisation levels (and -Zmir-opt-level=0) tried, results grouped in the issue", version: 3, code: true, max_age_days: 0 },
     Step { id: "ub_check", title: "Checked for undefined behaviour (Miri)", version: 2, code: true, max_age_days: 0 },
     Step { id: "mir_llvm", title: "MIR optimisations or LLVM? (-Zmir-opt-level=0)", version: 1, code: true, max_age_days: 0 },
     Step { id: "pass_bisect", title: "Culprit optimisation pass found by bisecting the LLVM / MIR passes (nightly)", version: 1, code: true, max_age_days: 0 },
