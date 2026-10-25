@@ -210,6 +210,16 @@ pub fn differs(a: &Outcome, b: &Outcome, ca: &Config, cb: &Config) -> bool {
         return false;
     }
     if checks_of(ca) != checks_of(cb) {
+        // The side with more checks panics (exit code 101) where the other one goes on, and its output stops where the panic
+        // happened: the checks did what they are for. The message cannot be relied on (a program may silence the panic hook).
+        let more = |x: (bool, bool), y: (bool, bool)| x.0 >= y.0 && x.1 >= y.1 && x != y;
+        let cut_short = |strict: &Outcome, lax: &Outcome| match (strict, lax) {
+            (Outcome::Ran { code: Some(101), stdout: s1, .. }, Outcome::Ran { code: Some(0), stdout: s2, .. }) => s2.starts_with(s1.as_str()),
+            _ => false,
+        };
+        if (more(checks_of(ca), checks_of(cb)) && cut_short(a, b)) || (more(checks_of(cb), checks_of(ca)) && cut_short(b, a)) {
+            return false;
+        }
         let says = |o: &Outcome| matches!(o, Outcome::Ran { stderr, .. } if stderr.contains("with overflow") || stderr.contains("unsafe precondition") || stderr.contains("debug_assert") || stderr.contains("assertion failed: self.is_char_boundary"));
         if says(a) || says(b) {
             return false;
@@ -360,9 +370,13 @@ mod overflow_tests {
         let panic = ran(101, "thread 'main' panicked: attempt to add with overflow");
         assert!(!differs(&ran(0, ""), &panic, &off, &on));
         // the same outputs with the same checks are a real difference
+        // a program that silences the panic hook leaves no message: the exit code and the cut-short output decide
+        assert!(!differs(&ran(0, ""), &ran(101, ""), &off, &on));
         let other = Config::new("O3", "-C opt-level=3");
         assert!(differs(&ran(0, ""), &panic, &off, &other));
-        // a different panic with checks on is still reported
-        assert!(differs(&ran(0, ""), &ran(101, "index out of bounds"), &off, &on));
+        // output that is not a prefix of the other one is a real difference even with a panic
+        let printed = |code: i32, out: &str| Outcome::Ran { code: Some(code), signal: None, stdout: out.to_string(), stderr: String::new() };
+        assert!(differs(&printed(0, "A\nB\n"), &printed(101, "X\n"), &off, &on));
+        assert!(!differs(&printed(0, "A\nB\n"), &printed(101, "A\n"), &off, &on));
     }
 }

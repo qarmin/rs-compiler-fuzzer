@@ -41,7 +41,7 @@ impl TriageOpts {
 /// Version of the triage / minimisation logic. Bump it by hand whenever the results of `triage` get
 /// better (smarter reduction, more exact regression range, ...): every stored finding with a smaller
 /// `fuzzer_id` is then triaged again by the `retriage` job and replaced in the package.
-pub const FUZZER_ID: u32 = 5;
+pub const FUZZER_ID: u32 = 6;
 
 pub type Cfg = BTreeMap<String, String>;
 
@@ -130,7 +130,7 @@ fn miri(src: &str, work: &Path) -> MiriResult {
     let dir = work.join(format!("miri_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("src")).unwrap();
-    std::fs::write(dir.join("Cargo.toml"), "[package]\nname = \"miri_check\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n# below the repository (a workspace): not a member\n[workspace]\n").unwrap();
+    std::fs::write(dir.join("Cargo.toml"), "[package]\nname = \"miri_check\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n# the findings build with --cap-lints allow: deny-by-default lints must not stop Miri\n[lints.rust]\noverflowing_literals = \"allow\"\narithmetic_overflow = \"allow\"\nunconditional_panic = \"allow\"\ninvalid_value = \"allow\"\n\n# below the repository (a workspace): not a member\n[workspace]\n").unwrap();
     std::fs::write(dir.join("src/main.rs"), format!("#![allow(warnings)]\n{src}")).unwrap();
     let mut c = Command::new("cargo");
     c.args(["+nightly", "miri", "run", "-q"]).current_dir(&dir).env("MIRIFLAGS", "-Zmiri-disable-isolation -Zmiri-ignore-leaks").env("CARGO_PROFILE_DEV_OVERFLOW_CHECKS", "false").env("CARGO_PROFILE_DEV_DEBUG_ASSERTIONS", "false");
@@ -143,7 +143,10 @@ fn miri(src: &str, work: &Path) -> MiriResult {
             let e = r.stderr;
             let first = e.lines().find(|l| l.contains("Undefined Behavior") || l.contains("panicked") || l.starts_with("error")).unwrap_or("").trim().to_string();
             let v = if e.contains("Undefined Behavior") { "ub" } else if e.contains("panicked") || e.contains("overflow") { "panic" } else { "error" };
-            MiriResult { verdict: v.into(), detail: first, stdout: String::from_utf8_lossy(&r.stdout).into_owned(), report: e.lines().take(40).collect::<Vec<_>>().join("\n") }
+            // the program did not even build for Miri (a lint, a type error): that says nothing about the program, keep it out of the issue
+            let not_built = v == "error" && (e.contains("could not compile") || e.contains("aborting due to"));
+            let report = if not_built { String::new() } else { e.lines().take(40).collect::<Vec<_>>().join("\n") };
+            MiriResult { verdict: v.into(), detail: if not_built { format!("did not build for Miri: {first}") } else { first }, stdout: String::from_utf8_lossy(&r.stdout).into_owned(), report }
         }
         Err(e) => MiriResult { verdict: "error".into(), detail: e.to_string(), stdout: String::new(), report: String::new() },
     }
