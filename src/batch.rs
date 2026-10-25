@@ -90,7 +90,7 @@ pub fn assemble(cases: &[&Case]) -> Assembled {
     s.push_str(
         "macro_rules! go { ($id:literal, $m:ident) => {{\n    let mut h = H::new();\n    let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| $m::run(&mut h))).is_ok();\n    report($id, ok, &h);\n}}; }\n",
     );
-    s.push_str("fn main() {\n    std::panic::set_hook(Box::new(|_| {}));\n");
+    s.push_str("fn main() {\n");
     for c in cases {
         writeln!(s, "    go!({}, case_{});", c.id, c.id).unwrap();
     }
