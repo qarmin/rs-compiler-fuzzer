@@ -170,7 +170,7 @@ by hand. The `*-checks` configs and `PANIC` lines can also point at a generator 
   the same asset; otherwise (another job wrote meanwhile) it backs off and redoes the merge on the fresh package.
   The merge (`pack`) is idempotent and the archive is deterministic, so unchanged findings produce no diff; at the end the
   keys that were stored are checked in the downloaded result.
-- **Pipeline**: every fuzz job fuzzes for 45 minutes, stores the raw findings in the package, and then spends about an hour
+- **Pipeline**: every fuzz job fuzzes for 3 hours (45 minutes on push), stores the raw findings in the package, and then spends about an hour
   triaging what it found (drop unneeded cases, reduce with Shrink Ray, shortest flags, Miri, exact regression range, GitHub
   search), storing each result as soon as it is ready. `retriage.yml` (when a fuzz/miri run ends, and daily at 01:30 UTC, 4
   shards) continues with everything that has no result yet, an older `fuzzer_id`, or an unsettled minimisation; the first shard also
