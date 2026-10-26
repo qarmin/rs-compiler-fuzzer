@@ -734,9 +734,11 @@ pub fn verify(o: &Opts, root: &Path, report_dir: &Path, label: &str) -> i32 {
             .enumerate()
             .map(|(i, c)| build_and_run(&o.rustc, &src, &work.join(format!("v{}_{n}_{i}", std::process::id())), c, &o.limits))
             .collect();
-        (crate::runner::differs(&r[0], &r[1], &base, &bad), r[0].describe(), r[1].describe(), get("bad_name"))
+        (crate::runner::differs(&r[0], &r[1], &base, &bad), r[0].key() != r[1].key(), r[0].describe(), r[1].describe(), get("bad_name"))
     });
-    for (d, (diverges, b, x, badname)) in dirs.iter().zip(results) {
+    for (d, (diverges, raw_differs, b, x, badname)) in dirs.iter().zip(results) {
+        // the outputs differ, but only the way overflow checks / debug assertions make them differ: not a bug, nothing to wait for
+        let explained = raw_differs && !diverges;
         let name = d.file_name().unwrap().to_string_lossy().to_string();
         if diverges {
             info!("STILL {name} [{badname}] baseline: {b}; bad: {x}");
@@ -764,7 +766,7 @@ pub fn verify(o: &Opts, root: &Path, report_dir: &Path, label: &str) -> i32 {
                 } else {
                     let n: u32 = st.get("nightly_misses").and_then(|v| v.parse().ok()).unwrap_or(0) + 1;
                     st.insert("nightly_misses".into(), n.to_string());
-                    if n >= 2 {
+                    if n >= 2 || explained {
                         let ver = std::process::Command::new(&o.rustc[0]).args(&o.rustc[1..]).arg("-V").output().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
                         let tomb = root.parent().map(|p| p.join("fixed.txt"));
                         if let Some(t) = tomb {
@@ -773,7 +775,7 @@ pub fn verify(o: &Opts, root: &Path, report_dir: &Path, label: &str) -> i32 {
                             let _ = std::fs::write(&t, text);
                         }
                         let _ = std::fs::remove_dir_all(d);
-                        info!("REMOVED {name}: no longer reproduces on the newest nightly (twice in a row)");
+                        info!("REMOVED {name}: {}", if explained { "the difference is explained by overflow checks / debug assertions (not a compiler bug)" } else { "no longer reproduces on the newest nightly (twice in a row)" });
                         removed += 1;
                         continue;
                     }
