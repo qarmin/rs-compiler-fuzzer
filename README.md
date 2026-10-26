@@ -194,9 +194,11 @@ by hand. The `*-checks` configs and `PANIC` lines can also point at a generator 
   regression edges, reproduction per channel, checklist ...), rewritten whenever `status.cfg` changes. When two jobs triaged the same
   finding concurrently, the result with more finished steps wins; the same reduced program found twice is merged (`reduced_hash`).
 - **Self-cleaning package**: the first shard of every `retriage.yml` run re-runs each stored reproducer on the newest nightly (the
-  reference). A finding that no longer reproduces there is marked `not-reproducing`; the next check removes it (two in a row, so one odd
-  run cannot delete anything). Removed findings are listed in `fixed.txt` and in the "Removed" table of `INDEX.md`, and a triage that
-  was running at the time cannot bring them back. There is no separate verify workflow any more: the retriage run does the verification.
+  reference). A finding that no longer reproduces there is moved at once to `old_findings/` (with its own `old_findings/INDEX.md`;
+  `fixed.txt` remembers the key). `findings/` and `INDEX.md` only ever list what still reproduces on the newest nightly. A fixed finding
+  comes back only when the nightly (or an import) shows it again; stable/beta fuzz jobs that find it again, or a triage that was running
+  meanwhile, cannot bring it back. A difference that is just what overflow checks / debug assertions cause is deleted (it was never a bug).
+  There is no separate verify workflow: the retriage run does the verification.
 
 ## Reports
 

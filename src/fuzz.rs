@@ -766,7 +766,8 @@ pub fn verify(o: &Opts, root: &Path, report_dir: &Path, label: &str) -> i32 {
                 } else {
                     let n: u32 = st.get("nightly_misses").and_then(|v| v.parse().ok()).unwrap_or(0) + 1;
                     st.insert("nightly_misses".into(), n.to_string());
-                    if n >= 2 || explained {
+                    // the newest nightly is the reference: one miss moves the finding out of `findings/` (it goes to `old_findings/`)
+                    if n >= 1 {
                         let ver = std::process::Command::new(&o.rustc[0]).args(&o.rustc[1..]).arg("-V").output().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
                         let tomb = root.parent().map(|p| p.join("fixed.txt"));
                         if let Some(t) = tomb {
@@ -774,8 +775,24 @@ pub fn verify(o: &Opts, root: &Path, report_dir: &Path, label: &str) -> i32 {
                             text.push_str(&format!("{name}\t{date}\t{ver}\t{}\n", st.get("first_seen").cloned().unwrap_or_default()));
                             let _ = std::fs::write(&t, text);
                         }
-                        let _ = std::fs::remove_dir_all(d);
-                        info!("REMOVED {name}: {}", if explained { "the difference is explained by overflow checks / debug assertions (not a compiler bug)" } else { "no longer reproduces on the newest nightly (twice in a row)" });
+                        if explained {
+                            // never a compiler bug: nothing worth keeping
+                            let _ = std::fs::remove_dir_all(d);
+                        } else if let Some(pkg) = root.parent() {
+                            // fixed: kept apart from the findings that still reproduce
+                            st.insert("state".into(), "fixed".into());
+                            st.insert("fixed_on".into(), date.clone());
+                            st.insert("fixed_rustc".into(), ver.clone());
+                            crate::triage::write_cfg(&path, &st);
+                            let dest = pkg.join("old_findings").join(&name);
+                            let _ = std::fs::create_dir_all(pkg.join("old_findings"));
+                            let _ = std::fs::remove_dir_all(&dest);
+                            if std::fs::rename(d, &dest).is_err() {
+                                let _ = std::process::Command::new("cp").arg("-r").arg(d).arg(&dest).status();
+                                let _ = std::fs::remove_dir_all(d);
+                            }
+                        }
+                        info!("REMOVED {name}: {}", if explained { "the difference is explained by overflow checks / debug assertions (not a compiler bug)" } else { "no longer reproduces on the newest nightly: moved to old_findings/" });
                         removed += 1;
                         continue;
                     }
