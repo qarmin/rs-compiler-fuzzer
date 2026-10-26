@@ -1347,7 +1347,7 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
             let _ = writeln!(is, "{l}");
         }
     }
-    let _ = writeln!(is, "\nProblem was found by and minimized by rust fuzzer(created by llm) - https://github.com/qarmin/rs-compiler-fuzzer");
+    let _ = writeln!(is, "\nProblem was found by and minimized by rust fuzzer(created by llm) - https://github.com/qarmin/rs-compiler-fuzzer\n\nThe latest findings of the fuzzer can be checked by hand in https://github.com/qarmin/rs-compiler-fuzzer/releases/download/Nightly/findings.zip");
     std::fs::write(dir.join("ISSUE.md"), is).unwrap();
 
     // put the status at the top of report.md (replace an older block)

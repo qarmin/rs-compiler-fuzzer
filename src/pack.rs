@@ -222,10 +222,18 @@ pub fn run(pkg: &Path, adds: &[PathBuf], toolchain: &str, contains: Option<&Path
                 }
             }
             let dest = root.join(&key);
-            // a triage that was running while the finding got removed must not bring it back
-            if toolchain == "retriage" && !dest.join("case.rs").exists() && fixed_keys(pkg).contains(&key) {
-                println!("SKIPPED {key} (removed: no longer reproduces)");
-                continue;
+            // A finding that was fixed (it lives in old_findings/ and in fixed.txt) comes back only when the newest nightly
+            // shows it again; stable or beta finding it again, or a triage that was running meanwhile, must not bring it back.
+            if !dest.join("case.rs").exists() && fixed_keys(pkg).contains(&key) {
+                if toolchain == "nightly" || toolchain == "import" {
+                    let _ = std::fs::remove_dir_all(pkg.join("old_findings").join(&key));
+                    let kept: String = std::fs::read_to_string(pkg.join("fixed.txt")).unwrap_or_default().lines().filter(|l| l.split('\t').next() != Some(key.as_str())).map(|l| format!("{l}\n")).collect();
+                    let _ = std::fs::write(pkg.join("fixed.txt"), kept);
+                    println!("REOPENED {key} (reproduces on the newest nightly again)");
+                } else {
+                    println!("SKIPPED {key} (fixed on the newest nightly)");
+                    continue;
+                }
             }
             let mut st: Cfg;
             if dest.join("case.rs").exists() {
@@ -384,13 +392,24 @@ pub fn write_index(pkg: &Path) {
             }
         }
     }
-    let gone = std::fs::read_to_string(pkg.join("fixed.txt")).unwrap_or_default();
-    if !gone.trim().is_empty() {
-        let _ = writeln!(s, "\n## Removed: no longer reproduce on the newest nightly\n\n| finding | removed | checked with | first seen |\n|---|---|---|---|");
-        for l in gone.lines().rev().take(40) {
-            let c: Vec<&str> = l.split('\t').collect();
-            let _ = writeln!(s, "| `{}` | {} | {} | {} |", c.first().unwrap_or(&""), c.get(1).unwrap_or(&""), c.get(2).unwrap_or(&""), c.get(3).unwrap_or(&""));
-        }
-    }
     std::fs::write(pkg.join("INDEX.md"), s).unwrap();
+    write_old_index(pkg);
+}
+
+/// `old_findings/INDEX.md`: findings that stopped reproducing on the newest nightly (kept apart from the current ones).
+fn write_old_index(pkg: &Path) {
+    let gone = std::fs::read_to_string(pkg.join("fixed.txt")).unwrap_or_default();
+    let dir = pkg.join("old_findings");
+    if gone.trim().is_empty() && !dir.exists() {
+        return;
+    }
+    let _ = std::fs::create_dir_all(&dir);
+    let mut s = String::from("# Old findings\n\nThese stopped reproducing on the newest nightly (most are fixed in LLVM / rustc). They are not triaged any more. A finding that the nightly shows again moves back to `findings/`.\n\n| finding | fixed (first nightly without it) | checked with | first seen | kept |\n|---|---|---|---|---|\n");
+    for l in gone.lines().rev() {
+        let c: Vec<&str> = l.split('\t').collect();
+        let key = c.first().copied().unwrap_or("");
+        let kept = if dir.join(key).join("case.rs").exists() { "yes" } else { "no" };
+        let _ = writeln!(s, "| `{key}` | {} | {} | {} | {kept} |", c.get(1).unwrap_or(&""), c.get(2).unwrap_or(&""), c.get(3).unwrap_or(&""));
+    }
+    let _ = std::fs::write(dir.join("INDEX.md"), s);
 }
