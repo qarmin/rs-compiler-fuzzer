@@ -378,6 +378,23 @@ fn linkify(text: &str) -> String {
         .join(" ")
 }
 
+
+/// The optimisation pass that changes the result: from `culprit.txt`, or - when that file is not there - from the note of the step
+/// `pass_bisect` ("first LLVM pass that matters: 1844 of 1993: stack-coloring on reduced::main"). `None` when no pass was isolated.
+fn pass_of(dir: &Path, st: &Cfg) -> Option<(String, String)> {
+    let t = std::fs::read_to_string(dir.join("culprit.txt")).unwrap_or_default();
+    let get = |key: &str| t.lines().find_map(|l| l.strip_prefix(key)).unwrap_or("").trim().to_string();
+    let (kind, name) = (get("kind="), get("name="));
+    if !name.is_empty() && get("n=").parse::<usize>().unwrap_or(0) > 0 {
+        return Some((kind, name));
+    }
+    let note = crate::steps::get(st, "pass_bisect")?.note;
+    let rest = note.strip_prefix("first ")?;
+    let (kind, rest) = rest.split_once(" pass that matters: ")?;
+    let name = rest.splitn(3, ": ").nth(1)?.split(" on ").next()?.trim().to_string();
+    (!name.is_empty()).then(|| (kind.to_lowercase(), name))
+}
+
 pub fn write_index(pkg: &Path) {
     let root = pkg.join("findings");
     let mut rows: Vec<(String, Cfg)> = std::fs::read_dir(&root)
@@ -458,14 +475,10 @@ pub fn write_index(pkg: &Path) {
     {
         let mut by_pass: std::collections::BTreeMap<String, Vec<String>> = Default::default();
         let mut none: Vec<String> = Vec::new();
-        for (k, _) in &rows {
-            let t = std::fs::read_to_string(root.join(k).join("culprit.txt")).unwrap_or_default();
-            let get = |key: &str| t.lines().find_map(|l| l.strip_prefix(key)).unwrap_or("").trim().to_string();
-            let (kind, name) = (get("kind="), get("name="));
-            if name.is_empty() || get("n=").parse::<usize>().unwrap_or(0) == 0 {
-                none.push(k.clone());
-            } else {
-                by_pass.entry(format!("{} `{}`", if kind == "mir" { "MIR" } else { "LLVM" }, name)).or_default().push(k.clone());
+        for (k, c) in &rows {
+            match pass_of(&root.join(k), c) {
+                Some((kind, name)) => by_pass.entry(format!("{} `{}`", if kind == "mir" { "MIR" } else { "LLVM" }, name)).or_default().push(k.clone()),
+                None => none.push(k.clone()),
             }
         }
         if !by_pass.is_empty() || !none.is_empty() {
@@ -497,15 +510,15 @@ pub fn write_index(pkg: &Path) {
                 None => "not bisected yet".to_string(),
             }
         };
-        let label_pass = |k: &str| -> String {
-            let t = std::fs::read_to_string(root.join(k).join("culprit.txt")).unwrap_or_default();
-            let get = |key: &str| t.lines().find_map(|l| l.strip_prefix(key)).unwrap_or("").trim().to_string();
-            let (kind, name) = (get("kind="), get("name="));
-            if name.is_empty() || get("n=").parse::<usize>().unwrap_or(0) == 0 { "no pass found".to_string() } else { format!("{} `{}`", if kind == "mir" { "MIR" } else { "LLVM" }, name) }
+        let label_pass = |k: &str, c: &Cfg| -> String {
+            match pass_of(&root.join(k), c) {
+                Some((kind, name)) => format!("{} `{}`", if kind == "mir" { "MIR" } else { "LLVM" }, name),
+                None => "no pass found".to_string(),
+            }
         };
         let mut both: std::collections::BTreeMap<(String, String), Vec<String>> = Default::default();
         for (k, c) in &rows {
-            both.entry((label_commit(k, c), label_pass(k))).or_default().push(k.clone());
+            both.entry((label_commit(k, c), label_pass(k, c))).or_default().push(k.clone());
         }
         if !both.is_empty() {
             let _ = writeln!(s, "\n## Grouped by the commit and the optimisation pass together\n\nThe tightest grouping: the same regressing commit and the same first pass that changes the result.\n");
