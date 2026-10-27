@@ -23,23 +23,31 @@ pub struct Step {
 /// Version of the minimiser: bump it when a pass is added or improved. The step `minimized` is then open again and the
 /// convergence count starts from zero (the next runs continue from the previous result).
 /// 2: `print!` is turned back into `println!` at the end
-pub const REDUCE_VERSION: u32 = 4;
+pub const REDUCE_VERSION: u32 = 5;
 
+/// Every step is one atomic result: done, not applicable, or still to do (no partial results are recorded).
+/// 5: the steps were split up (one result per channel, per kind of flag, per kind of level, per search) and every version raised.
 pub const STEPS: &[Step] = &[
-    Step { id: "reproduced", title: "Reproduced on stable, beta and nightly (reduced program)", version: 1, code: true, max_age_days: 0 },
-    Step { id: "minimize_cases", title: "Batch reduced to the cases that matter (a single case if one is enough)", version: 1, code: false, max_age_days: 0 },
+    Step { id: "reproduced_stable", title: "Reproduced on stable (reduced program)", version: 2, code: true, max_age_days: 0 },
+    Step { id: "reproduced_beta", title: "Reproduced on beta (reduced program)", version: 2, code: true, max_age_days: 0 },
+    Step { id: "reproduced_nightly", title: "Reproduced on nightly (reduced program)", version: 2, code: true, max_age_days: 0 },
+    Step { id: "minimize_cases", title: "Batch reduced to the cases that matter (a single case if one is enough)", version: 2, code: false, max_age_days: 0 },
     Step { id: "minimized", title: "Code minimised (every pass finished, a second run changed nothing)", version: REDUCE_VERSION, code: false, max_age_days: 0 },
-    Step { id: "flags", title: "Shortest command line (fewest flags that still show it)", version: 1, code: true, max_age_days: 0 },
-    Step { id: "opt_levels", title: "Other optimisation levels (and -Zmir-opt-level=0) tried, results grouped in the issue", version: 3, code: true, max_age_days: 0 },
-    Step { id: "ub_check", title: "Checked for undefined behaviour (Miri)", version: 2, code: true, max_age_days: 0 },
-    Step { id: "mir_llvm", title: "MIR optimisations or LLVM? (-Zmir-opt-level=0)", version: 1, code: true, max_age_days: 0 },
-    Step { id: "pass_bisect", title: "Culprit optimisation pass found by bisecting the LLVM / MIR passes (nightly)", version: 1, code: true, max_age_days: 0 },
-    Step { id: "regression", title: "Regression or long-standing bug? (decides whether the bisection below applies)", version: 1, code: true, max_age_days: 0 },
-    Step { id: "bisect_stable", title: "Regression: first stable release that has it", version: 2, code: true, max_age_days: 0 },
-    Step { id: "bisect_nightly", title: "Regression: first nightly that has it", version: 2, code: true, max_age_days: 0 },
-    Step { id: "bisect_pr", title: "Regression: offending commit/PR (cargo bisect-rustc; \"not found\" is a result too)", version: 2, code: true, max_age_days: 0 },
-    Step { id: "upstream", title: "Searched upstream for duplicates", version: 1, code: true, max_age_days: 14 },
-    Step { id: "issue_draft", title: "ISSUE.md draft written", version: 1, code: true, max_age_days: 0 },
+    Step { id: "flags_common", title: "Shortest command line: shared flags (edition, lints, checks) reduced", version: 2, code: true, max_age_days: 0 },
+    Step { id: "flags_reference", title: "Shortest command line: reference build reduced", version: 2, code: true, max_age_days: 0 },
+    Step { id: "flags_failing", title: "Shortest command line: failing build reduced", version: 2, code: true, max_age_days: 0 },
+    Step { id: "opt_levels", title: "Other -C opt-level values tried (0, 1, 2, 3, s, z)", version: 4, code: true, max_age_days: 0 },
+    Step { id: "mir_levels", title: "Other -Zmir-opt-level values tried (0, 1, 2, 3; nightly)", version: 2, code: true, max_age_days: 0 },
+    Step { id: "ub_check", title: "Checked for undefined behaviour (Miri)", version: 3, code: true, max_age_days: 0 },
+    Step { id: "mir_llvm", title: "MIR optimisations or LLVM? (-Zmir-opt-level=0)", version: 2, code: true, max_age_days: 0 },
+    Step { id: "pass_bisect", title: "Culprit optimisation pass found by bisecting the LLVM / MIR passes (nightly)", version: 2, code: true, max_age_days: 0 },
+    Step { id: "regression", title: "Regression or long-standing bug? (decides whether the bisection below applies)", version: 2, code: true, max_age_days: 0 },
+    Step { id: "bisect_stable", title: "Regression: first stable release that has it", version: 3, code: true, max_age_days: 0 },
+    Step { id: "bisect_nightly", title: "Regression: first nightly that has it", version: 3, code: true, max_age_days: 0 },
+    Step { id: "bisect_pr", title: "Regression: offending commit/PR (cargo bisect-rustc; \"not found\" is a result too)", version: 3, code: true, max_age_days: 0 },
+    Step { id: "upstream_rust", title: "Searched rust-lang/rust for duplicates", version: 2, code: true, max_age_days: 14 },
+    Step { id: "upstream_llvm", title: "Searched llvm/llvm-project for duplicates", version: 1, code: true, max_age_days: 14 },
+    Step { id: "issue_draft", title: "ISSUE.md draft written", version: 2, code: true, max_age_days: 0 },
 ];
 
 pub fn step(id: &str) -> &'static Step {
@@ -157,7 +165,6 @@ pub fn open_steps(st: &Cfg, today: &str) -> Vec<(&'static str, String)> {
                 None => "not done yet".to_string(),
                 Some(x) if x.version != s.version => "redone: the tool got better at this step".to_string(),
                 Some(x) if s.code && !x.hash.is_empty() && x.hash != h => "redone: the reduced program changed".to_string(),
-                Some(x) if x.status == "partial" => format!("started: {}", x.note),
                 Some(x) if x.status == "failed" => format!("failed: {}", x.note),
                 Some(x) if s.max_age_days > 0 && !matches!(x.status.as_str(), "todo") => format!("older than {} days, repeated", s.max_age_days),
                 Some(x) => if x.note.is_empty() { x.status } else { x.note },
@@ -183,7 +190,6 @@ pub fn checklist_md(st: &Cfg, today: &str) -> String {
             (Some(c), _) if c.status == "done" => ("[x]", c.note.clone(), c.date.clone()),
             (Some(c), _) if c.status == "n/a" => ("[x]", format!("not applicable: {}", c.note), c.date.clone()),
             (Some(c), _) => ("[!]", c.note.clone(), c.date.clone()),
-            (None, Some(x)) if x.status == "partial" => ("[~]", x.note.clone(), x.date.clone()),
             (None, Some(x)) if x.version != def.version => ("[ ]", "to be done again (the tool got better at this step)".to_string(), String::new()),
             (None, Some(x)) if def.code && !x.hash.is_empty() && x.hash != h => ("[ ]", "to be done again (the reduced program changed)".to_string(), String::new()),
             (None, Some(x)) => ("[ ]", x.note.clone(), String::new()),
@@ -222,17 +228,23 @@ pub fn backfill(st: &mut Cfg, dir: &Path) {
     };
     let repro_yes: Vec<String> = st.iter().filter_map(|(k, v)| k.strip_prefix("repro.").filter(|_| v.starts_with("yes")).map(String::from)).collect();
     if !repro_yes.is_empty() {
-        put(st, "reproduced", "done", format!("reproduces on {}", repro_yes.join(", ")));
+        for ch in ["stable", "beta", "nightly"] {
+            if repro_yes.iter().any(|c| c == ch) {
+                put(st, &format!("reproduced_{ch}"), "done", format!("reproduces on {ch}"));
+            }
+        }
     }
     let reg = g(st, "regression");
     let ms = g(st, "min_status");
     if ms.starts_with("converged") {
         put(st, "minimized", "done", ms.clone());
     } else if !ms.is_empty() {
-        put(st, "minimized", "partial", ms.clone());
+        put(st, "minimized", "todo", ms.clone());
     }
     if st.contains_key("min_bad_flags") {
-        put(st, "flags", "done", format!("reference: `{}`, failing: `{}`", g(st, "min_base_flags"), g(st, "min_bad_flags")));
+        put(st, "flags_common", "done", format!("common: `{}`", g(st, "min_common_flags")));
+        put(st, "flags_reference", "done", format!("reference: `{}`", g(st, "min_base_flags")));
+        put(st, "flags_failing", "done", format!("failing: `{}`", g(st, "min_bad_flags")));
     }
     let miri = g(st, "miri");
     if miri.starts_with("ok") {
@@ -247,7 +259,7 @@ pub fn backfill(st: &mut Cfg, dir: &Path) {
         if n <= 1 {
             put(st, "minimize_cases", "done", if n == 0 { "reduced to a plain program".into() } else { "a single case".into() });
         } else {
-            put(st, "minimize_cases", "partial", format!("{n} cases of the batch are still needed together"));
+            put(st, "minimize_cases", "todo", format!("{n} cases of the batch are still needed together"));
         }
     }
     if reg.contains("first bad") {
@@ -269,7 +281,7 @@ pub fn backfill(st: &mut Cfg, dir: &Path) {
     }
     let up = g(st, "upstream_search");
     if !up.is_empty() && up != "not performed" {
-        put(st, "upstream", "done", up);
+        put(st, "upstream_rust", "done", up);
     }
     if dir.join("ISSUE.md").exists() {
         put(st, "issue_draft", "done", String::new());
@@ -302,7 +314,7 @@ mod tests {
     #[test]
     fn a_new_tool_version_reopens_the_step() {
         let mut st = cfg_with("bisect_pr", "done", "aaa", "2026-10-01");
-        let old = st.get("step.bisect_pr").unwrap().replace("v=2", "v=0");
+        let old = st.get("step.bisect_pr").unwrap().replace("v=3", "v=0");
         st.insert("step.bisect_pr".into(), old);
         assert!(current(&st, "bisect_pr", "aaa", "2026-10-02").is_none());
         let open = open_steps(&st, "2026-10-02");
@@ -311,13 +323,13 @@ mod tests {
 
     #[test]
     fn partial_and_failed_steps_are_not_complete_and_the_search_expires() {
-        let st = cfg_with("minimized", "partial", "", "2026-10-01");
+        let st = cfg_with("minimized", "todo", "", "2026-10-01");
         assert!(!is_complete("minimized", &st, "", "2026-10-02"));
         let failed = cfg_with("ub_check", "failed", "aaa", "2026-10-01");
         assert!(has_failure(&failed) && !is_complete("ub_check", &failed, "aaa", "2026-10-02"));
-        let up = cfg_with("upstream", "done", "aaa", "2026-10-01");
-        assert!(is_complete("upstream", &up, "aaa", "2026-10-10"));
-        assert!(!is_complete("upstream", &up, "aaa", "2026-11-01"), "the search is repeated after 14 days");
+        let up = cfg_with("upstream_rust", "done", "aaa", "2026-10-01");
+        assert!(is_complete("upstream_rust", &up, "aaa", "2026-10-10"));
+        assert!(!is_complete("upstream_rust", &up, "aaa", "2026-11-01"), "the search is repeated after 14 days");
     }
 
     #[test]

@@ -228,6 +228,65 @@ pub fn differs(a: &Outcome, b: &Outcome, ca: &Config, cb: &Config) -> bool {
     true
 }
 
+/// `-0.0` -> `0.0`, `-0` -> `0` in program output (numbers only, whole tokens).
+fn without_negative_zero(text: &str) -> String {
+    let c: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < c.len() {
+        let boundary = i == 0 || !(c[i - 1].is_alphanumeric() || c[i - 1] == '.' || c[i - 1] == '_');
+        if c[i] == '-' && boundary && c.get(i + 1) == Some(&'0') {
+            // the number after the minus: only zeros, an optional fraction of zeros, an optional exponent
+            let mut j = i + 1;
+            while c.get(j) == Some(&'0') {
+                j += 1;
+            }
+            if c.get(j) == Some(&'.') {
+                j += 1;
+                while c.get(j) == Some(&'0') {
+                    j += 1;
+                }
+            }
+            if matches!(c.get(j), Some('e') | Some('E')) && c.get(j + 1).map(|x| x.is_ascii_digit() || *x == '-' || *x == '+').unwrap_or(false) {
+                j += 2;
+                while c.get(j).map(|x| x.is_ascii_digit()).unwrap_or(false) {
+                    j += 1;
+                }
+            }
+            let ends = c.get(j).map(|x| !(x.is_alphanumeric() || *x == '.' || *x == '_')).unwrap_or(true);
+            if ends {
+                out.extend(&c[i + 1..j]);
+                i = j;
+                continue;
+            }
+        }
+        out.push(c[i]);
+        i += 1;
+    }
+    out
+}
+
+/// `f32::min` / `f64::max` / `clamp` return either zero when they compare `0.0` and `-0.0` (the documentation says so): a program that
+/// uses them and differs only in the sign of a zero shows no compiler bug.
+fn uses_float_min_max(src: &str) -> bool {
+    (src.contains("f64") || src.contains("f32") || src.contains("T::")) && [".min(", ".max(", "::min", "::max", ".clamp("].iter().any(|p| src.contains(p))
+}
+
+/// [`differs`] for a known program text.
+pub fn differs_src(a: &Outcome, b: &Outcome, ca: &Config, cb: &Config, src: &str) -> bool {
+    if !differs(a, b, ca, cb) {
+        return false;
+    }
+    if uses_float_min_max(src) {
+        if let (Outcome::Ran { code: c1, signal: s1, stdout: o1, .. }, Outcome::Ran { code: c2, signal: s2, stdout: o2, .. }) = (a, b) {
+            if c1 == c2 && s1 == s2 && without_negative_zero(o1) == without_negative_zero(o2) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 #[derive(Clone, Copy)]
 pub struct Limits {
     pub compile: Duration,
@@ -361,6 +420,17 @@ mod overflow_tests {
 
     fn ran(code: i32, stderr: &str) -> Outcome {
         Outcome::Ran { code: Some(code), signal: None, stdout: String::new(), stderr: stderr.to_string() }
+    }
+
+    #[test]
+    fn the_sign_of_a_zero_from_min_or_max_is_no_difference() {
+        let (off, on) = (Config::new("a", ""), Config::new("b", "-C opt-level=3"));
+        let printed = |t: &str| Outcome::Ran { code: Some(0), signal: None, stdout: t.to_string(), stderr: String::new() };
+        let src = "fn main() { let v = [-0f64, 0f64]; println!(\"{:?}\", v.iter().copied().fold(f64::INFINITY, f64::min)) }";
+        assert!(!differs_src(&printed("0.0\n"), &printed("-0.0\n"), &off, &on, src));
+        assert!(differs_src(&printed("0.0\n"), &printed("-0.0\n"), &off, &on, "fn main() { println!(\"{:?}\", (-0f64).abs()) }"), "no min/max in the program: still a difference");
+        assert!(differs_src(&printed("1.0\n"), &printed("-1.0\n"), &off, &on, src), "other values still count");
+        assert!(differs_src(&printed("-0.5\n"), &printed("0.5\n"), &off, &on, src));
     }
 
     #[test]

@@ -734,7 +734,7 @@ pub fn verify(o: &Opts, root: &Path, report_dir: &Path, label: &str) -> i32 {
             .enumerate()
             .map(|(i, c)| build_and_run(&o.rustc, &src, &work.join(format!("v{}_{n}_{i}", std::process::id())), c, &o.limits))
             .collect();
-        (crate::runner::differs(&r[0], &r[1], &base, &bad), r[0].key() != r[1].key(), r[0].describe(), r[1].describe(), get("bad_name"))
+        (crate::runner::differs_src(&r[0], &r[1], &base, &bad, &std::fs::read_to_string(&src).unwrap_or_default()), r[0].key() != r[1].key(), r[0].describe(), r[1].describe(), get("bad_name"))
     });
     for (d, (diverges, raw_differs, b, x, badname)) in dirs.iter().zip(results) {
         // the outputs differ, but only the way overflow checks / debug assertions make them differ: not a bug, nothing to wait for
@@ -756,7 +756,7 @@ pub fn verify(o: &Opts, root: &Path, report_dir: &Path, label: &str) -> i32 {
             st.insert("last_verified".into(), date.clone());
             if label == "nightly" {
                 // the newest nightly is the reference: a bug that is gone there is gone (two checks in a row, so one odd run
-                // cannot delete a finding); fixed findings are removed from the package, a line in `fixed.txt` remembers them
+                // cannot delete a finding); fixed findings move to `old_findings/` of the package
                 if diverges {
                     st.insert("nightly_misses".into(), "0".into());
                     if st.get("state").map(|s| s != "open").unwrap_or(false) {
@@ -769,30 +769,12 @@ pub fn verify(o: &Opts, root: &Path, report_dir: &Path, label: &str) -> i32 {
                     // the newest nightly is the reference: one miss moves the finding out of `findings/` (it goes to `old_findings/`)
                     if n >= 1 {
                         let ver = std::process::Command::new(&o.rustc[0]).args(&o.rustc[1..]).arg("-V").output().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
-                        let tomb = root.parent().map(|p| p.join("fixed.txt"));
-                        if let Some(t) = tomb {
-                            let mut text = std::fs::read_to_string(&t).unwrap_or_default();
-                            text.push_str(&format!("{name}\t{date}\t{ver}\t{}\n", st.get("first_seen").cloned().unwrap_or_default()));
-                            let _ = std::fs::write(&t, text);
-                        }
-                        if explained {
-                            // never a compiler bug: nothing worth keeping
-                            let _ = std::fs::remove_dir_all(d);
-                        } else if let Some(pkg) = root.parent() {
-                            // fixed: kept apart from the findings that still reproduce
-                            st.insert("state".into(), "fixed".into());
-                            st.insert("fixed_on".into(), date.clone());
-                            st.insert("fixed_rustc".into(), ver.clone());
+                        if let Some(pkg) = root.parent() {
+                            // kept apart from the findings that still reproduce (`old_findings/`, with the reason in `state`)
                             crate::triage::write_cfg(&path, &st);
-                            let dest = pkg.join("old_findings").join(&name);
-                            let _ = std::fs::create_dir_all(pkg.join("old_findings"));
-                            let _ = std::fs::remove_dir_all(&dest);
-                            if std::fs::rename(d, &dest).is_err() {
-                                let _ = std::process::Command::new("cp").arg("-r").arg(d).arg(&dest).status();
-                                let _ = std::fs::remove_dir_all(d);
-                            }
+                            crate::pack::archive(pkg, &name, if explained { "not-a-bug (not a compiler difference: overflow checks, debug assertions or the unspecified sign of a zero from float min/max)" } else { "fixed" }, &date, &ver);
                         }
-                        info!("REMOVED {name}: {}", if explained { "the difference is explained by overflow checks / debug assertions (not a compiler bug)" } else { "no longer reproduces on the newest nightly: moved to old_findings/" });
+                        info!("REMOVED {name}: {}", if explained { "the difference is explained by overflow checks / debug assertions / the sign of a zero from float min/max (not a compiler bug)" } else { "no longer reproduces on the newest nightly: moved to old_findings/" });
                         removed += 1;
                         continue;
                     }

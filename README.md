@@ -175,10 +175,15 @@ by hand. The `*-checks` configs and `PANIC` lines can also point at a generator 
   search), storing each result as soon as it is ready. `retriage.yml` (when a fuzz/miri run ends, and daily at 01:30 UTC, 4
   shards) continues with everything that has no result yet, an older `fuzzer_id`, or an unsettled minimisation; the first shard also
   verifies the stored reproducers. Schedule: fuzz ~00:00 Warsaw time (22:00 UTC), retriage 01:30 UTC, Miri 03:00 UTC.
-- **Checklist instead of a verdict** (`src/steps.rs`): every stored finding says which steps are done and which are open -
-  reproduced on stable/beta/nightly, **fully minimised**, shortest command line, Miri (UB) check, MIR-vs-LLVM, regression range
-  (stable / nightly / the PR), upstream search, issue draft, and (manual) reported. `STATUS.md` shows it as `- [x]` / `- [~]` (started) /
-  `- [ ]` / `- [!]` (failed), `INDEX.md` has "steps done" and the next open step, `finding.json` (schema 2) has the same as `steps`.
+- **Checklist instead of a verdict** (`src/steps.rs`): every stored finding says which steps are done and which are open. The 20 steps
+  are atomic - one result each, nothing is recorded half way: reproduced on stable / beta / nightly (three steps), batch reduced to
+  the cases that matter, **fully minimised**, shortest command line (shared flags / reference build / failing build: three steps),
+  `-C opt-level` values, `-Zmir-opt-level` values, Miri (UB) check, MIR-vs-LLVM, culprit pass, regression or long-standing, first
+  stable, first nightly, offending commit (cargo-bisect-rustc), upstream search in rust-lang/rust and in llvm/llvm-project (two steps),
+  issue draft, and (manual) reported. A step is `done`, `n/a`, `failed` (a negative verdict that needs a human, e.g. Miri finds UB) or
+  open with the reason; there is no "started". A step is never marked done from data an older version of the tool produced, and a
+  search in which one query failed is not a finished search. `STATUS.md` shows `- [x]` / `- [ ]` / `- [!]`, `INDEX.md` has "steps
+  done" and the next open step, `finding.json` (schema 2) has the same as `steps`.
   - *Fully minimised* means: one run finished every pass before its deadlines (`complete once`) and the next run, started from that
     result, changed nothing (`converged`); at most 6 runs.
   - **Steps are reset when they should be**: every step has a version. When the tool gets better at it (a new reduction pass:
@@ -195,7 +200,7 @@ by hand. The `*-checks` configs and `PANIC` lines can also point at a generator 
   finding concurrently, the result with more finished steps wins; the same reduced program found twice is merged (`reduced_hash`).
 - **Self-cleaning package**: the first shard of every `retriage.yml` run re-runs each stored reproducer on the newest nightly (the
   reference). A finding that no longer reproduces there is moved at once to `old_findings/` (with its own `old_findings/INDEX.md`;
-  `fixed.txt` remembers the key). `findings/` and `INDEX.md` only ever list what still reproduces on the newest nightly. A fixed finding
+  the key stays there even when only a stub is left). `findings/` and `INDEX.md` only ever list what still reproduces on the newest nightly. A fixed finding
   comes back only when the nightly (or an import) shows it again; stable/beta fuzz jobs that find it again, or a triage that was running
   meanwhile, cannot bring it back. A difference that is just what overflow checks / debug assertions cause is deleted (it was never a bug).
   There is no separate verify workflow: the retriage run does the verification.
@@ -253,7 +258,7 @@ atomics, `Mutex`/`RwLock`/`OnceLock`/channels/threads used deterministically, `C
 ## Minimising by hand on a strong machine (`just`)
 
 ```
-just download                                   # findings.zip from the Nightly release -> ./findings, ./INDEX.md, ./fixed.txt
+just download                                   # findings.zip from the Nightly release -> ./findings, ./old_findings, ./INDEX.md
 just open                                       # findings that still have open checklist steps
 just minimize findings/arith__Oz__4a1a1f9e41    # all cores, up to 4 h per pass, repeated until two runs agree (max 12 h / 8 runs)
 just minimize findings/X --jobs 20 --budget 7200 --bisect 3000 --search

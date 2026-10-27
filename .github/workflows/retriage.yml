@@ -22,18 +22,21 @@ on:
         description: "Findings per shard"
         default: "6"
       reduce_seconds:
-        description: "Reduction time per finding"
-        default: "600"
+        description: "Reduction time per finding (at least)"
+        default: "3600"
       reduce_max_seconds:
         description: "Longest minimisation of one finding (it gets what the others in the queue do not need)"
-        default: "6000"
+        default: "18000"
       bisect_seconds:
-        description: "Regression-range time per finding"
-        default: "1500"
+        description: "Regression-range time per finding (stable + nightly searches; cargo-bisect-rustc gets up to two hours on top)"
+        default: "7200"
+      chain:
+        description: "How many runs in a row have been started by this chain (it starts the next run itself while findings are not fully tested; at most 8)"
+        default: "0"
 
 permissions:
   contents: write
-  actions: read
+  actions: write
 
 # one triage run at a time (a second one waits); both would otherwise pick the same findings
 concurrency:
@@ -48,7 +51,7 @@ jobs:
   retriage:
     name: retriage (shard ${{ matrix.shard }})
     runs-on: ubuntu-26.04
-    timeout-minutes: 130
+    timeout-minutes: 355
     strategy:
       fail-fast: false
       matrix:
@@ -70,7 +73,7 @@ jobs:
       - run: cargo +stable build --release
 
       # The newest nightly is the reference: a bug that no longer reproduces there (two checks in a row) is removed from the
-      # package (`fixed.txt` remembers it). This replaces the former separate verify workflow; one shard does it per run.
+      # package (it moves to `old_findings/`). This replaces the former separate verify workflow; one shard does it per run.
       - name: Verify the stored findings on the newest nightly and remove the fixed ones
         if: startsWith(matrix.shard, '0/')
         env:
@@ -98,13 +101,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GITHUB_TOKEN: ${{ github.token }}
           LIMIT: ${{ inputs.limit || '6' }}
-          REDUCE: ${{ inputs.reduce_seconds || '600' }}
-          REDUCE_MAX: ${{ inputs.reduce_max_seconds || '6000' }}
-          BISECT: ${{ inputs.bisect_seconds || '1500' }}
+          REDUCE: ${{ inputs.reduce_seconds || '3600' }}
+          REDUCE_MAX: ${{ inputs.reduce_max_seconds || '18000' }}
+          BISECT: ${{ inputs.bisect_seconds || '7200' }}
         run: |
           export BIN=$PWD/target/release/rs-compiler-fuzzer KEYS_FILE=$PWD/stored-keys.txt TOOLCHAIN=retriage
-          # about 1:50 per job in total (the setup before this step takes ~7 minutes): minimisation may use nearly all of it
-          end=$((SECONDS + 103 * 60)); n=0; : > retriaged-keys.txt
+          # nearly the whole 6 hours a job may run (GitHub's limit): setup ~7 minutes, the last 20 minutes are left for storing the result
+          end=$((SECONDS + 335 * 60)); n=0; : > retriaged-keys.txt
           for i in $(seq 1 "$LIMIT"); do
             # not enough time for another finding (reduction + regression range + reproduction matrix)
             [ $((end - SECONDS)) -lt 900 ] && { echo "no time left for another finding"; break; }
@@ -127,3 +130,42 @@ jobs:
             tmp/*.log
           if-no-files-found: ignore
           retention-days: 14
+
+  # While findings are not fully tested (every step of the checklist done) and this run made progress, start the next run:
+  # nobody has to wait for the next fuzz run or the nightly cron to get the rest of the checklist done.
+  again:
+    name: continue while findings are not fully tested
+    needs: retriage
+    if: always() && needs.retriage.result == 'success'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/download-artifact@v6
+        continue-on-error: true
+        with:
+          pattern: retriage-*
+          path: arts
+      - name: Decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHAIN: ${{ inputs.chain || '0' }}
+          LIMIT: ${{ inputs.limit || '6' }}
+          REDUCE: ${{ inputs.reduce_seconds || '3600' }}
+          REDUCE_MAX: ${{ inputs.reduce_max_seconds || '18000' }}
+          BISECT: ${{ inputs.bisect_seconds || '7200' }}
+        run: |
+          mkdir -p pkg
+          gh release download "$RELEASE" --repo "$GITHUB_REPOSITORY" --pattern findings.zip --dir . 2>/dev/null && unzip -q -o findings.zip -d pkg || true
+          open=0; for f in pkg/findings/*/status.cfg; do [ -f "$f" ] || continue; grep -q '^progress=20/20$' "$f" || open=$((open + 1)); done
+          done_now=$(cat arts/*/retriaged-keys.txt 2>/dev/null | grep -c . || true)
+          echo "findings not fully tested: $open; triaged by this run: $done_now; chain position: $CHAIN"
+          {
+            echo "### continue?"
+            echo "- not fully tested: $open, triaged by this run: $done_now, chain position $CHAIN of 8"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$open" -gt 0 ] && [ "$done_now" -gt 0 ] && [ "$CHAIN" -lt 8 ]; then
+            gh workflow run retriage.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" -f limit="$LIMIT" -f reduce_seconds="$REDUCE" -f reduce_max_seconds="$REDUCE_MAX" -f bisect_seconds="$BISECT" -f chain="$((CHAIN + 1))"
+            echo "- started the next run" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- chain ends here" >> "$GITHUB_STEP_SUMMARY"
+          fi

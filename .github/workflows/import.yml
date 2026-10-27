@@ -17,13 +17,13 @@ on:
         default: "6"
       reduce_seconds:
         description: "Reduction time per finding (at least)"
-        default: "900"
+        default: "3600"
       reduce_max_seconds:
         description: "Longest minimisation of one finding"
-        default: "5400"
+        default: "18000"
       bisect_seconds:
         description: "Regression-range time per finding"
-        default: "1500"
+        default: "7200"
 
 permissions:
   contents: write
@@ -41,7 +41,7 @@ env:
 jobs:
   import:
     runs-on: ubuntu-26.04
-    timeout-minutes: 130
+    timeout-minutes: 355
     steps:
       - uses: actions/checkout@v6
       - name: Is there anything to import?
@@ -88,12 +88,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GITHUB_TOKEN: ${{ github.token }}
           LIMIT: ${{ inputs.limit || '6' }}
-          REDUCE: ${{ inputs.reduce_seconds || '900' }}
-          REDUCE_MAX: ${{ inputs.reduce_max_seconds || '5400' }}
-          BISECT: ${{ inputs.bisect_seconds || '1500' }}
+          REDUCE: ${{ inputs.reduce_seconds || '3600' }}
+          REDUCE_MAX: ${{ inputs.reduce_max_seconds || '18000' }}
+          BISECT: ${{ inputs.bisect_seconds || '7200' }}
         run: |
           export BIN=$PWD/target/release/rs-compiler-fuzzer TOOLCHAIN=import
-          end=$((SECONDS + 103 * 60)); : > handled.txt; mkdir -p unreproduced
+          end=$((SECONDS + 335 * 60)); : > handled.txt; mkdir -p unreproduced
           imported=0; skipped=0
           {
             echo "### import"
