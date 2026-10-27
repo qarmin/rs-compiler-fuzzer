@@ -305,13 +305,30 @@ pub fn run(pkg: &Path, adds: &[PathBuf], toolchain: &str, contains: Option<&Path
                 // the result with more finished checklist steps (then more minimisation runs) wins
                 let better = crate::steps::score(&b, &date) > crate::steps::score(&a, &date);
                 if d.join("reduced.rs").exists() && (better || (!have_reduced && crate::steps::score(&b, &date) == crate::steps::score(&a, &date))) {
-                    for f in ["reduced.rs", "STATUS.md", "ISSUE.md", "ISSUE_TITLE.txt", "report.md", "signature.txt", "known-issues.txt", "bisect.txt", "search.txt"] {
-                        if d.join(f).exists() {
-                            let _ = std::fs::copy(d.join(f), dest.join(f));
+                    // every file the triage wrote (culprit.txt, variants.txt, miri.txt, search_llvm.txt ... included); the identity of the
+                    // finding (case.rs, repro.cfg), its merged status.cfg and finding.json stay as they are
+                    for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+                        let name = e.file_name().to_string_lossy().to_string();
+                        if e.path().is_file() && !["case.rs", "repro.cfg", "status.cfg", "finding.json"].contains(&name.as_str()) {
+                            let _ = std::fs::copy(e.path(), dest.join(&name));
+                        }
+                    }
+                    // results the new triage did not produce (a culprit that is not there any more ...) must not outlive their step
+                    for f in ["culprit.txt", "variants.txt", "miri.txt", "search.txt", "search_llvm.txt", "bisect.txt"] {
+                        if !d.join(f).exists() {
+                            let _ = std::fs::remove_file(dest.join(f));
                         }
                     }
                     for (k, v) in new_st {
                         st.insert(k, v);
+                    }
+                }
+                // whatever the triage found out that the stored copy does not have yet is kept, even when the stored result is the better one
+                // (only for the same reduced program: the files belong to it)
+                let same_program = a.get("reduced_hash").is_some() && a.get("reduced_hash") == b.get("reduced_hash");
+                for f in ["culprit.txt", "variants.txt", "miri.txt", "search.txt", "search_llvm.txt", "bisect.txt"] {
+                    if same_program && d.join(f).exists() && !dest.join(f).exists() {
+                        let _ = std::fs::copy(d.join(f), dest.join(f));
                     }
                 }
             } else {
@@ -451,7 +468,7 @@ pub fn write_index(pkg: &Path) {
                 by_pass.entry(format!("{} `{}`", if kind == "mir" { "MIR" } else { "LLVM" }, name)).or_default().push(k.clone());
             }
         }
-        if !by_pass.is_empty() {
+        if !by_pass.is_empty() || !none.is_empty() {
             let list = |v: &[String]| v.iter().map(|k| format!("`{k}`")).collect::<Vec<_>>().join(", ");
             let _ = writeln!(s, "\n## Grouped by the optimisation pass that causes it\n\nThe first pass whose execution changes the result (`-C llvm-args=-opt-bisect-limit` / `-Zmir-opt-bisect-limit`).\n");
             let mut groups: Vec<(&String, &mut Vec<String>)> = by_pass.iter_mut().collect();
@@ -462,6 +479,41 @@ pub fn write_index(pkg: &Path) {
             }
             if !none.is_empty() {
                 let _ = writeln!(s, "- no pass found yet / not applicable ({}): {}", none.len(), list(&none));
+            }
+        }
+    }
+    // both at once: findings with the same commit AND the same pass are the likeliest to be one bug
+    {
+        let label_commit = |k: &str, c: &Cfg| -> String {
+            let mut c2 = c.clone();
+            crate::steps::backfill(&mut c2, &root.join(k));
+            let pr = c.get("regression_pr").cloned().unwrap_or_default();
+            let commit = pr.split_whitespace().find(|w| w.starts_with("https://github.com/rust-lang/rust/commit/")).map(|u| u.trim_end_matches(|c: char| !c.is_ascii_hexdigit()).to_string());
+            let reg = crate::steps::get(&c2, "regression").map(|x| x.note).unwrap_or_default();
+            match commit {
+                Some(u) => format!("[{}]({u})", u.rsplit('/').next().unwrap_or("").chars().take(10).collect::<String>()),
+                None if reg.starts_with("long-standing") => "long-standing, not a regression".to_string(),
+                None if pr.contains("not found") => "regressed commit not found".to_string(),
+                None => "not bisected yet".to_string(),
+            }
+        };
+        let label_pass = |k: &str| -> String {
+            let t = std::fs::read_to_string(root.join(k).join("culprit.txt")).unwrap_or_default();
+            let get = |key: &str| t.lines().find_map(|l| l.strip_prefix(key)).unwrap_or("").trim().to_string();
+            let (kind, name) = (get("kind="), get("name="));
+            if name.is_empty() || get("n=").parse::<usize>().unwrap_or(0) == 0 { "no pass found".to_string() } else { format!("{} `{}`", if kind == "mir" { "MIR" } else { "LLVM" }, name) }
+        };
+        let mut both: std::collections::BTreeMap<(String, String), Vec<String>> = Default::default();
+        for (k, c) in &rows {
+            both.entry((label_commit(k, c), label_pass(k))).or_default().push(k.clone());
+        }
+        if !both.is_empty() {
+            let _ = writeln!(s, "\n## Grouped by the commit and the optimisation pass together\n\nThe tightest grouping: the same regressing commit and the same first pass that changes the result.\n");
+            let mut groups: Vec<_> = both.into_iter().collect();
+            groups.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then(a.0.cmp(&b.0)));
+            for ((commit, pass), mut ks) in groups {
+                ks.sort();
+                let _ = writeln!(s, "- {commit} + {pass} ({}): {}", ks.len(), ks.iter().map(|k| format!("`{k}`")).collect::<Vec<_>>().join(", "));
             }
         }
     }
