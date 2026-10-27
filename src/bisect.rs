@@ -176,7 +176,7 @@ impl Bisect {
 const OLDEST_STABLE_MINOR: i64 = 56;
 const OLDEST_NIGHTLY: &str = "2021-06-01";
 /// Extra time for `cargo bisect-rustc` once the nightly range is a single day.
-const PR_SECONDS: u64 = 3600;
+pub const PR_SECONDS: u64 = 3600;
 
 fn days_between(from: &str, to: &str) -> i64 {
     let ts = |d: &str| Command::new("date").args(["-u", "-d", d, "+%s"]).output().ok().and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<i64>().ok()).unwrap_or(0);
@@ -295,7 +295,7 @@ fn search(mut lo: i64, mut hi: i64, mut probe: impl FnMut(i64) -> Option<bool>) 
     (lo, hi)
 }
 
-pub fn bisect(src: &Path, base: &Config, bad: &Config, sig: &Option<String>, work: &Path, budget: Duration, want: Want, stable_reproduces: bool, nightly_reproduces: bool, prior: &Bisect) -> Bisect {
+pub fn bisect(src: &Path, base: &Config, bad: &Config, sig: &Option<String>, work: &Path, budget: Duration, pr_budget: Duration, want: Want, stable_reproduces: bool, nightly_reproduces: bool, prior: &Bisect) -> Bisect {
     let mut cx = Ctx { src, base, bad, sig, work, deadline: Instant::now() + budget, notes: Vec::new(), results: Default::default() };
     let mut out = prior.clone();
     out.notes.clear();
@@ -321,7 +321,7 @@ pub fn bisect(src: &Path, base: &Config, bad: &Config, sig: &Option<String>, wor
     if want.pr {
         out.pr = Part::default();
         match out.nightly.range.clone() {
-            Some((gt, bt)) => pr_search(src, base, bad, sig, work, &gt, &bt, Duration::from_secs(PR_SECONDS), &mut out.pr),
+            Some((gt, bt)) => pr_search(src, base, bad, sig, work, &gt, &bt, pr_budget, &mut out.pr),
             None if out.nightly.na => {
                 out.pr.na = true;
                 out.pr.note = "does not reproduce on nightly".into();

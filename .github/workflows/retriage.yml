@@ -30,10 +30,13 @@ on:
       bisect_seconds:
         description: "Regression-range time per finding (stable + nightly searches; cargo-bisect-rustc gets up to an hour on top)"
         default: "3000"
+      chain:
+        description: "How many runs in a row have been started by this chain (it starts the next run itself while findings are not fully tested; at most 8)"
+        default: "0"
 
 permissions:
   contents: write
-  actions: read
+  actions: write
 
 # one triage run at a time (a second one waits); both would otherwise pick the same findings
 concurrency:
@@ -127,3 +130,42 @@ jobs:
             tmp/*.log
           if-no-files-found: ignore
           retention-days: 14
+
+  # While findings are not fully tested (every step of the checklist done) and this run made progress, start the next run:
+  # nobody has to wait for the next fuzz run or the nightly cron to get the rest of the checklist done.
+  again:
+    name: continue while findings are not fully tested
+    needs: retriage
+    if: always() && needs.retriage.result == 'success'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/download-artifact@v6
+        continue-on-error: true
+        with:
+          pattern: retriage-*
+          path: arts
+      - name: Decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHAIN: ${{ inputs.chain || '0' }}
+          LIMIT: ${{ inputs.limit || '6' }}
+          REDUCE: ${{ inputs.reduce_seconds || '1200' }}
+          REDUCE_MAX: ${{ inputs.reduce_max_seconds || '6000' }}
+          BISECT: ${{ inputs.bisect_seconds || '3000' }}
+        run: |
+          mkdir -p pkg
+          gh release download "$RELEASE" --repo "$GITHUB_REPOSITORY" --pattern findings.zip --dir . 2>/dev/null && unzip -q -o findings.zip -d pkg || true
+          open=0; for f in pkg/findings/*/status.cfg; do [ -f "$f" ] || continue; grep -q '^progress=20/20$' "$f" || open=$((open + 1)); done
+          done_now=$(cat arts/*/retriaged-keys.txt 2>/dev/null | grep -c . || true)
+          echo "findings not fully tested: $open; triaged by this run: $done_now; chain position: $CHAIN"
+          {
+            echo "### continue?"
+            echo "- not fully tested: $open, triaged by this run: $done_now, chain position $CHAIN of 8"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$open" -gt 0 ] && [ "$done_now" -gt 0 ] && [ "$CHAIN" -lt 8 ]; then
+            gh workflow run retriage.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" -f limit="$LIMIT" -f reduce_seconds="$REDUCE" -f reduce_max_seconds="$REDUCE_MAX" -f bisect_seconds="$BISECT" -f chain="$((CHAIN + 1))"
+            echo "- started the next run" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- chain ends here" >> "$GITHUB_STEP_SUMMARY"
+          fi

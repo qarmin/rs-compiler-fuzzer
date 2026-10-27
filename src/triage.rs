@@ -30,12 +30,19 @@ pub struct TriageOpts {
     pub checkpoint: bool,
     /// reduce again even when an earlier run converged (a stronger machine / longer time may get further)
     pub force_reduce: bool,
+    /// the whole run has to be over by then (a CI job): bisections get what is left, nothing starts that cannot finish
+    pub deadline: Option<std::time::Instant>,
 }
 
 impl TriageOpts {
     pub fn clone_opts(&self) -> TriageOpts {
         self.clone()
     }
+}
+
+/// Seconds until the run's hard deadline (a very large number when there is none).
+fn left_secs(o: &TriageOpts) -> u64 {
+    o.deadline.map(|d| d.saturating_duration_since(std::time::Instant::now()).as_secs()).unwrap_or(u64::MAX / 4)
 }
 
 /// Version of the triage / minimisation logic. Bump it by hand whenever the results of `triage` get
@@ -949,7 +956,7 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     let cul_reused = cur("pass_bisect") && dir.join("culprit.txt").exists();
     let culprit: Option<Culprit> = if cul_reused {
         Some(culprit_from_text(&std::fs::read_to_string(dir.join("culprit.txt")).unwrap_or_default()))
-    } else if let (true, Some(k), false) = (still, culprit_kind, crate::reduce::INTERRUPTED.load(std::sync::atomic::Ordering::Relaxed)) {
+    } else if let (true, Some(k), false, true) = (still, culprit_kind, crate::reduce::INTERRUPTED.load(std::sync::atomic::Ordering::Relaxed), left_secs(o) > 900) {
         Some(pass_bisect(k, &reduced_path, &base, &bad, &sig, &lim, &o.work))
     } else {
         None
@@ -1029,7 +1036,13 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
         let yes = |ch: &str| matrix2.iter().any(|m| m.0 == ch && m.2 == Repro::Yes);
         let want = crate::bisect::Want { stable: !prior_known || !cur("bisect_stable"), nightly: !prior_known || !cur("bisect_nightly"), pr: !prior_known || !cur("bisect_pr") };
         if want.stable || want.nightly || want.pr {
-            bis = crate::bisect::bisect(&reduced_path, &base, &bad, &sig, &o.work, o.bisect, want, yes("stable"), yes("nightly"), &bis);
+            let left = left_secs(o);
+            // the stable / nightly searches get up to 60 % of what is left, cargo-bisect-rustc up to 35 %; with less than 5 minutes the steps stay open
+            if left > 300 {
+                let b1 = o.bisect.min(Duration::from_secs(left * 6 / 10));
+                let b2 = Duration::from_secs(crate::bisect::PR_SECONDS).min(Duration::from_secs(left * 35 / 100));
+                bis = crate::bisect::bisect(&reduced_path, &base, &bad, &sig, &o.work, b1, b2, want, yes("stable"), yes("nightly"), &bis);
+            }
         }
     }
     let _ = std::fs::write(dir.join("bisect.txt"), bis.to_text());

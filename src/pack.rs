@@ -378,22 +378,32 @@ pub fn write_index(pkg: &Path) {
     };
     rows.sort_by(|a, b| rank(&a.1, &a.0).cmp(&rank(&b.1, &b.0)).then(a.0.cmp(&b.0)));
     let mut s = String::from("# Stored findings\n\nOne row per distinct finding. Every directory under `findings/` has `finding.json` (with the checklist), `STATUS.md` (checklist, reproduction per channel, minimisation, UB check, upstream search) and, once triaged, `reduced.rs` + `ISSUE.md`. The checklist says what was done and what is still open; steps are redone when the tool gets better at them or when the reduced program changes.\n\n");
-    let _ = writeln!(s, "| steps done | open steps | state | class | finding | kind | reduced lines | minimisation | seen | last seen | upstream |\n|---|---|---|---|---|---|---|---|---|---|---|");
-    for (k, c) in &rows {
+    let finished = |k: &str, c: &Cfg| {
         let mut c2 = c.clone();
         crate::steps::backfill(&mut c2, &root.join(k));
-        let g = |n: &str| c.get(n).cloned().unwrap_or_else(|| "-".into());
-        let (done, total) = crate::steps::progress(&c2, &today);
-        let open = crate::steps::open_steps(&c2, &today);
-        let _ = &open;
-        let next = { let ids = crate::steps::open_ids(&c2, &today); if ids.is_empty() { "none - ready for a human to review and report".to_string() } else { ids.join(", ") } };
-        let up = std::fs::read_to_string(root.join(k).join("known-issues.txt")).map(|t| linkify(&t)).unwrap_or_else(|_| linkify(&g("upstream_search")));
-        let _ = writeln!(s, "| {done}/{total} | {} | {} | {} | `{k}` | {} | {} | {} | {}x | {} | {} |", next.replace('|', "/"), g("state"), g("class"), g("kind"), g("reduced_lines"), g("min_status"), g("times_seen"), g("last_seen"), up);
-    }
+        let (d, t) = crate::steps::progress(&c2, &today);
+        d == t
+    };
+    let (full, partial): (Vec<(String, Cfg)>, Vec<(String, Cfg)>) = rows.iter().cloned().partition(|(k, c)| finished(k, c));
+    let table = |s: &mut String, set: &[(String, Cfg)]| {
+        let _ = writeln!(s, "| steps done | open steps | state | class | finding | kind | reduced lines | minimisation | seen | last seen | upstream |\n|---|---|---|---|---|---|---|---|---|---|---|");
+        for (k, c) in set {
+            let mut c2 = c.clone();
+            crate::steps::backfill(&mut c2, &root.join(k));
+            let g = |n: &str| c.get(n).cloned().unwrap_or_else(|| "-".into());
+            let (done, total) = crate::steps::progress(&c2, &today);
+            let next = { let ids = crate::steps::open_ids(&c2, &today); if ids.is_empty() { "none - ready for a human to review and report".to_string() } else { ids.join(", ") } };
+            let up = std::fs::read_to_string(root.join(k).join("known-issues.txt")).map(|t| linkify(&t)).unwrap_or_else(|_| linkify(&g("upstream_search")));
+            let _ = writeln!(s, "| {done}/{total} | {} | {} | {} | `{k}` | {} | {} | {} | {}x | {} | {} |", next.replace('|', "/"), g("state"), g("class"), g("kind"), g("reduced_lines"), g("min_status"), g("times_seen"), g("last_seen"), up);
+        }
+    };
     for (k, _) in &rows {
         write_finding_json(&root.join(k));
     }
-    let _ = writeln!(s, "\n{} findings.", rows.len());
+    let _ = writeln!(s, "## Fully tested ({} finding(s), every step done)\n\nThese are the ones to review and report. Everything below this table (the groupings by commit and by pass) is about them only.\n", full.len());
+    table(&mut s, &full);
+    // what follows is only about the findings with every step done
+    let rows = full.clone();
     // what to report together: findings grouped by the commit that regressed them
     {
         let mut by_commit: std::collections::BTreeMap<String, Vec<String>> = Default::default();
@@ -455,6 +465,8 @@ pub fn write_index(pkg: &Path) {
             }
         }
     }
+    let _ = writeln!(s, "\n## Not fully tested yet ({} finding(s))\n\nThe checklist is not complete for these: the next retriage runs work on them, closest to completion first. Do not report them yet.\n", partial.len());
+    table(&mut s, &partial);
     std::fs::write(pkg.join("INDEX.md"), s).unwrap();
     write_old_index(pkg);
 }

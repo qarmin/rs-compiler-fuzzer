@@ -261,7 +261,7 @@ fn main() {
             if targets.is_empty() {
                 die("triage needs --dir DIR or --dirs ROOT");
             }
-            let o = triage::TriageOpts { budget: Duration::from_secs(budget), search: !no_search, work: out.join("work"), no_reduce, bisect: Duration::from_secs(bisect_secs), checkpoint: false, force_reduce: false };
+            let o = triage::TriageOpts { budget: Duration::from_secs(budget), search: !no_search, work: out.join("work"), no_reduce, bisect: Duration::from_secs(bisect_secs), checkpoint: false, force_reduce: false, deadline: None };
             let mut worst = 0;
             for (i, d) in targets.iter().take(limit).enumerate() {
                 info!("[{}/{}] triage {}", i + 1, targets.len().min(limit), d.display());
@@ -289,7 +289,7 @@ fn main() {
             reduce::install_sigint();
             let per_run = if flag_given("--budget") { budget } else { 4 * 3600 };
             let total = if deadline_secs > 0 { deadline_secs } else { 12 * 3600 };
-            let o = triage::TriageOpts { budget: Duration::from_secs(per_run), search: !no_search && flag_given("--search"), work: out.join("work"), no_reduce, bisect: Duration::from_secs(bisect_secs), checkpoint: true, force_reduce: !flag_given("--no-force") };
+            let o = triage::TriageOpts { budget: Duration::from_secs(per_run), search: !no_search && flag_given("--search"), work: out.join("work"), no_reduce, bisect: Duration::from_secs(bisect_secs), checkpoint: true, force_reduce: !flag_given("--no-force"), deadline: None };
             let start = std::time::Instant::now();
             let status_of = |d: &PathBuf| std::fs::read_to_string(d.join("status.cfg")).unwrap_or_default().lines().find_map(|l| l.strip_prefix("min_status=").map(String::from)).unwrap_or_default();
             let lines_now = |d: &PathBuf| std::fs::read_to_string(d.join("reduced.rs")).map(|t| t.lines().count()).unwrap_or(0);
@@ -380,7 +380,7 @@ fn main() {
                         // minimisation gets what is left of the time, but never less than --budget
                         let reserve = bisect_secs + 900;
                         let b = if left == u64::MAX { budget.max(budget_max) } else { left.saturating_sub(reserve).clamp(60, budget_max.max(budget)) };
-                        let o = triage::TriageOpts { budget: Duration::from_secs(b), search: !no_search, work: work.clone(), no_reduce, bisect: Duration::from_secs(bisect_secs), checkpoint: false, force_reduce: false };
+                        let o = triage::TriageOpts { budget: Duration::from_secs(b), search: !no_search, work: work.clone(), no_reduce, bisect: Duration::from_secs(bisect_secs), checkpoint: false, force_reduce: false, deadline: None };
                         match triage::triage(&o, &dir) {
                             Ok(s) => {
                                 eprintln!("    {s}");
@@ -414,7 +414,7 @@ fn main() {
                 stale = vec![dir];
             }
             info!("retriage: {} stored finding(s) with open checklist steps in shard {shard}", stale.len());
-            let mut o = triage::TriageOpts { budget: Duration::from_secs(budget), search: !no_search, work: out.join("work"), no_reduce, bisect: Duration::from_secs(bisect_secs), checkpoint: false, force_reduce: finding.is_some() };
+            let mut o = triage::TriageOpts { budget: Duration::from_secs(budget), search: !no_search, work: out.join("work"), no_reduce, bisect: Duration::from_secs(bisect_secs), checkpoint: false, force_reduce: finding.is_some(), deadline: if deadline_secs > 0 { Some(std::time::Instant::now() + Duration::from_secs(deadline_secs)) } else { None } };
             let start = std::time::Instant::now();
             let max_budget = budget_max.max(budget);
             let mut done = 0;
@@ -446,11 +446,14 @@ fn main() {
                 };
                 let _ = mins;
                 o.budget = Duration::from_secs(b);
-                let bis_needed = triage::open_ids_of(d).iter().any(|i| i.starts_with("bisect") || *i == "pass_bisect");
-                if deadline_secs > 0 && start.elapsed() + Duration::from_secs(budget.min(b) + if bis_needed { bisect_secs + 600 } else { 0 } + 240) > Duration::from_secs(deadline_secs) {
-                    info!("retriage: not enough time left for another finding");
+                // a finding is started whenever 20 minutes are left: the minimisation gets less then, and every search inside `triage`
+                // is cut to what is left (a step that did not get its time stays open for the next run)
+                if deadline_secs > 0 && remaining < 1200 {
+                    info!("retriage: {remaining}s left, not enough for another finding");
                     break;
                 }
+                let b = if deadline_secs > 0 { b.min(remaining.saturating_sub(900)).max(60) } else { b };
+                o.budget = Duration::from_secs(b);
                 info!("retriage: minimisation budget for this finding: {b}s");
                 info!("retriage {}", d.display());
                 match triage::triage(&o, d) {
