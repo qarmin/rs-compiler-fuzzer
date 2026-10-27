@@ -112,7 +112,7 @@ pub fn reproduces(rustc: &[String], src: &Path, base: &Config, bad: &Config, sig
     }
     let yes = match sig {
         Some(s) => matches!(a, Outcome::Ran { .. }) && crash_signature(&b).as_deref() == Some(s.as_str()),
-        None => matches!((&a, &b), (Outcome::Ran { .. }, Outcome::Ran { .. })) && crate::runner::differs(&a, &b, base, bad),
+        None => matches!((&a, &b), (Outcome::Ran { .. }, Outcome::Ran { .. })) && crate::runner::differs_src(&a, &b, base, bad, &std::fs::read_to_string(src).unwrap_or_default()),
     };
     (if yes { Repro::Yes } else { Repro::No }, a, b)
 }

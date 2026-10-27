@@ -98,7 +98,7 @@ jobs:
     name: fuzz (${{ matrix.toolchain }}, ${{ matrix.name }})
     needs: [plan, prepare]
     runs-on: ubuntu-26.04
-    timeout-minutes: 340   # ~7 min setup + 180 min fuzzing (+ up to 30 min to finish minimising) + ~62 min triage
+    timeout-minutes: 355   # ~7 min setup + 180 min fuzzing (+ up to 30 min to finish minimising) + up to ~120 min triage (GitHub's limit is 6 h)
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
@@ -165,10 +165,10 @@ jobs:
           export BIN=$PWD/target/release/rs-compiler-fuzzer KEYS_FILE=$PWD/stored-keys-raw.txt ADD_DIRS="$adds"
           tools/release_sync.sh tools/store_mutator.sh
 
-      - name: Triage and store each finding (about an hour; every result is stored right away)
+      - name: Triage and store each finding (up to two hours; every result is stored right away)
         if: always()
         continue-on-error: true
-        timeout-minutes: 75
+        timeout-minutes: 130
         env:
           GH_TOKEN: ${{ github.token }}
           GITHUB_TOKEN: ${{ github.token }}
@@ -176,12 +176,12 @@ jobs:
         run: |
           shopt -s nullglob
           export BIN=$PWD/target/release/rs-compiler-fuzzer KEYS_FILE=$PWD/stored-keys.txt
-          end=$((SECONDS + 62 * 60)); n=0
+          end=$((SECONDS + 120 * 60)); n=0
           for d in fuzz-out/findings/*/ fuzz-out/triaged/*/; do
             d=${d%/}
             left=$((end - SECONDS))
-            { [ $n -ge 6 ] || [ $left -lt 900 ]; } && { echo "stopping triage (n=$n, ${left}s left); retriage.yml continues with the rest"; break; }
-            part=$(( left / 3 )); [ $part -gt 1500 ] && part=1500
+            { [ $n -ge 12 ] || [ $left -lt 900 ]; } && { echo "stopping triage (n=$n, ${left}s left); retriage.yml continues with the rest"; break; }
+            part=$(( left / 3 )); [ $part -gt 3600 ] && part=3600
             "$BIN" triage --dir "$d" --budget $part --bisect $part --out triage-out || true
             ADD_DIRS="$d" tools/release_sync.sh tools/store_mutator.sh || true
             n=$((n + 1))

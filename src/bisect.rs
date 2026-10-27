@@ -176,7 +176,7 @@ impl Bisect {
 const OLDEST_STABLE_MINOR: i64 = 56;
 const OLDEST_NIGHTLY: &str = "2021-06-01";
 /// Extra time for `cargo bisect-rustc` once the nightly range is a single day.
-pub const PR_SECONDS: u64 = 3600;
+pub const PR_SECONDS: u64 = 7200;
 
 fn days_between(from: &str, to: &str) -> i64 {
     let ts = |d: &str| Command::new("date").args(["-u", "-d", d, "+%s"]).output().ok().and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<i64>().ok()).unwrap_or(0);

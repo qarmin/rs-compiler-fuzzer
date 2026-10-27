@@ -734,7 +734,7 @@ pub fn verify(o: &Opts, root: &Path, report_dir: &Path, label: &str) -> i32 {
             .enumerate()
             .map(|(i, c)| build_and_run(&o.rustc, &src, &work.join(format!("v{}_{n}_{i}", std::process::id())), c, &o.limits))
             .collect();
-        (crate::runner::differs(&r[0], &r[1], &base, &bad), r[0].key() != r[1].key(), r[0].describe(), r[1].describe(), get("bad_name"))
+        (crate::runner::differs_src(&r[0], &r[1], &base, &bad, &std::fs::read_to_string(&src).unwrap_or_default()), r[0].key() != r[1].key(), r[0].describe(), r[1].describe(), get("bad_name"))
     });
     for (d, (diverges, raw_differs, b, x, badname)) in dirs.iter().zip(results) {
         // the outputs differ, but only the way overflow checks / debug assertions make them differ: not a bug, nothing to wait for
@@ -772,9 +772,9 @@ pub fn verify(o: &Opts, root: &Path, report_dir: &Path, label: &str) -> i32 {
                         if let Some(pkg) = root.parent() {
                             // kept apart from the findings that still reproduce (`old_findings/`, with the reason in `state`)
                             crate::triage::write_cfg(&path, &st);
-                            crate::pack::archive(pkg, &name, if explained { "not-a-bug (overflow checks / debug assertions)" } else { "fixed" }, &date, &ver);
+                            crate::pack::archive(pkg, &name, if explained { "not-a-bug (not a compiler difference: overflow checks, debug assertions or the unspecified sign of a zero from float min/max)" } else { "fixed" }, &date, &ver);
                         }
-                        info!("REMOVED {name}: {}", if explained { "the difference is explained by overflow checks / debug assertions (not a compiler bug)" } else { "no longer reproduces on the newest nightly: moved to old_findings/" });
+                        info!("REMOVED {name}: {}", if explained { "the difference is explained by overflow checks / debug assertions / the sign of a zero from float min/max (not a compiler bug)" } else { "no longer reproduces on the newest nightly: moved to old_findings/" });
                         removed += 1;
                         continue;
                     }
