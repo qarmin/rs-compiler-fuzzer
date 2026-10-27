@@ -2,7 +2,7 @@ set export := true
 
 # Local helpers: fetch the Nightly findings package and minimise findings by hand on a strong machine.
 #   just doctor                         # is everything installed? (just setup installs what can be)
-#   just download                       # findings.zip -> ./findings, ./INDEX.md, ./fixed.txt
+#   just download                       # findings.zip -> ./findings, ./old_findings, ./INDEX.md
 #   just minimize findings/arith__Oz__4a1a1f9e41
 # Ctrl+C is safe: the smallest program found so far is kept in reduced.rs and ISSUE.md / STATUS.md / status.cfg / finding.json
 # are rewritten for it; run the same command again to continue from there.

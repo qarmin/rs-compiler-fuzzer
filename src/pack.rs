@@ -172,9 +172,68 @@ fn add_word(cfg: &mut Cfg, key: &str, word: &str) {
     }
 }
 
-/// Keys of findings that were removed because they no longer reproduce (`fixed.txt`: key, date, rustc, first seen).
+/// Keys of findings that stopped reproducing (the directories of `old_findings/`).
 pub fn fixed_keys(pkg: &Path) -> std::collections::HashSet<String> {
-    std::fs::read_to_string(pkg.join("fixed.txt")).unwrap_or_default().lines().filter_map(|l| l.split('\t').next()).map(String::from).collect()
+    std::fs::read_dir(pkg.join("old_findings")).into_iter().flatten().flatten().filter(|e| e.path().is_dir()).map(|e| e.file_name().to_string_lossy().to_string()).collect()
+}
+
+fn nightly_version() -> String {
+    std::process::Command::new("rustc").args(["+nightly", "-V"]).output().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default()
+}
+
+/// Move `findings/<key>` to `old_findings/<key>`: it does not show up on the newest nightly any more (`state` says why).
+pub fn archive(pkg: &Path, key: &str, state: &str, date: &str, rustc: &str) {
+    let (from, to) = (pkg.join("findings").join(key), pkg.join("old_findings").join(key));
+    let mut st = read_cfg(&from.join("status.cfg"));
+    st.insert("state".into(), state.into());
+    st.insert("fixed_on".into(), date.into());
+    st.insert("fixed_rustc".into(), rustc.into());
+    write_cfg(&from.join("status.cfg"), &st);
+    let _ = std::fs::create_dir_all(pkg.join("old_findings"));
+    let _ = std::fs::remove_dir_all(&to);
+    if std::fs::rename(&from, &to).is_err() {
+        copy_dir(&from, &to);
+        let _ = std::fs::remove_dir_all(&from);
+    }
+}
+
+/// Sort out the package: the former `fixed.txt` becomes stubs in `old_findings/`, and every finding whose last check on the newest nightly
+/// found nothing moves to `old_findings/` - at once, whoever stored it and whenever the check ran.
+fn migrate(pkg: &Path) {
+    let date = today();
+    if let Ok(text) = std::fs::read_to_string(pkg.join("fixed.txt")) {
+        for l in text.lines() {
+            let c: Vec<&str> = l.split('\t').collect();
+            let Some(key) = c.first().filter(|k| !k.is_empty()) else { continue };
+            if pkg.join("findings").join(key).join("case.rs").exists() || pkg.join("old_findings").join(key).exists() {
+                continue;
+            }
+            let dir = pkg.join("old_findings").join(key);
+            let _ = std::fs::create_dir_all(&dir);
+            let mut st = Cfg::new();
+            st.insert("state".into(), "fixed".into());
+            st.insert("fixed_on".into(), c.get(1).unwrap_or(&"").to_string());
+            st.insert("fixed_rustc".into(), c.get(2).unwrap_or(&"").to_string());
+            st.insert("first_seen".into(), c.get(3).unwrap_or(&"").to_string());
+            st.insert("stub".into(), "yes (only the key was kept)".into());
+            write_cfg(&dir.join("status.cfg"), &st);
+        }
+        let _ = std::fs::remove_file(pkg.join("fixed.txt"));
+    }
+    let mut ver = String::new();
+    let mut keys: Vec<String> = std::fs::read_dir(pkg.join("findings")).into_iter().flatten().flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect();
+    keys.sort();
+    for k in keys {
+        let st = read_cfg(&pkg.join("findings").join(&k).join("status.cfg"));
+        if st.get("repro.nightly").map(String::as_str) == Some("no") {
+            if ver.is_empty() {
+                ver = nightly_version();
+            }
+            let on = st.get("last_verified").cloned().unwrap_or_else(|| date.clone());
+            println!("ARCHIVED {k} (does not reproduce on the newest nightly)");
+            archive(pkg, &k, "fixed", &on, &ver);
+        }
+    }
 }
 
 pub fn run(pkg: &Path, adds: &[PathBuf], toolchain: &str, contains: Option<&Path>) -> i32 {
@@ -227,8 +286,6 @@ pub fn run(pkg: &Path, adds: &[PathBuf], toolchain: &str, contains: Option<&Path
             if !dest.join("case.rs").exists() && fixed_keys(pkg).contains(&key) {
                 if toolchain == "nightly" || toolchain == "import" {
                     let _ = std::fs::remove_dir_all(pkg.join("old_findings").join(&key));
-                    let kept: String = std::fs::read_to_string(pkg.join("fixed.txt")).unwrap_or_default().lines().filter(|l| l.split('\t').next() != Some(key.as_str())).map(|l| format!("{l}\n")).collect();
-                    let _ = std::fs::write(pkg.join("fixed.txt"), kept);
                     println!("REOPENED {key} (reproduces on the newest nightly again)");
                 } else {
                     println!("SKIPPED {key} (fixed on the newest nightly)");
@@ -273,6 +330,11 @@ pub fn run(pkg: &Path, adds: &[PathBuf], toolchain: &str, contains: Option<&Path
             if toolchain != "retriage" {
                 add_word(&mut st, "seen_on", toolchain);
             }
+            if toolchain == "nightly" || toolchain == "import" {
+                // it reproduces on the newest nightly right now
+                st.insert("repro.nightly".into(), "yes".into());
+                st.insert("nightly_misses".into(), "0".into());
+            }
             if st.get("state").map(|s| s == "fixed").unwrap_or(false) {
                 // it is back
                 st.insert("state".into(), "open".into());
@@ -283,6 +345,7 @@ pub fn run(pkg: &Path, adds: &[PathBuf], toolchain: &str, contains: Option<&Path
             println!("PACKED {key}");
         }
     }
+    migrate(pkg);
     write_index(pkg);
     0
 }
@@ -398,18 +461,22 @@ pub fn write_index(pkg: &Path) {
 
 /// `old_findings/INDEX.md`: findings that stopped reproducing on the newest nightly (kept apart from the current ones).
 fn write_old_index(pkg: &Path) {
-    let gone = std::fs::read_to_string(pkg.join("fixed.txt")).unwrap_or_default();
     let dir = pkg.join("old_findings");
-    if gone.trim().is_empty() && !dir.exists() {
+    if !dir.exists() {
         return;
     }
-    let _ = std::fs::create_dir_all(&dir);
-    let mut s = String::from("# Old findings\n\nThese stopped reproducing on the newest nightly (most are fixed in LLVM / rustc). They are not triaged any more. A finding that the nightly shows again moves back to `findings/`.\n\n| finding | fixed (first nightly without it) | checked with | first seen | kept |\n|---|---|---|---|---|\n");
-    for l in gone.lines().rev() {
-        let c: Vec<&str> = l.split('\t').collect();
-        let key = c.first().copied().unwrap_or("");
-        let kept = if dir.join(key).join("case.rs").exists() { "yes" } else { "no" };
-        let _ = writeln!(s, "| `{key}` | {} | {} | {} | {kept} |", c.get(1).unwrap_or(&""), c.get(2).unwrap_or(&""), c.get(3).unwrap_or(&""));
+    let mut rows: Vec<(String, Cfg, bool)> = std::fs::read_dir(&dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .map(|e| (e.file_name().to_string_lossy().to_string(), read_cfg(&e.path().join("status.cfg")), e.path().join("case.rs").exists()))
+        .collect();
+    rows.sort_by(|a, b| b.1.get("fixed_on").cmp(&a.1.get("fixed_on")).then(a.0.cmp(&b.0)));
+    let mut s = String::from("# Old findings\n\nThese stopped reproducing on the newest nightly (most are fixed in LLVM / rustc). They are not triaged any more. A finding that the nightly shows again moves back to `findings/`.\n\n| finding | state | no longer reproduces since | checked with | first seen | files kept |\n|---|---|---|---|---|---|\n");
+    for (k, st, kept) in &rows {
+        let g = |n: &str| st.get(n).cloned().unwrap_or_default();
+        let _ = writeln!(s, "| `{k}` | {} | {} | {} | {} | {} |", g("state"), g("fixed_on"), g("fixed_rustc"), g("first_seen"), if *kept { "yes" } else { "key only" });
     }
     let _ = std::fs::write(dir.join("INDEX.md"), s);
 }

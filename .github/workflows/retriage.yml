@@ -70,7 +70,7 @@ jobs:
       - run: cargo +stable build --release
 
       # The newest nightly is the reference: a bug that no longer reproduces there (two checks in a row) is removed from the
-      # package (`fixed.txt` remembers it). This replaces the former separate verify workflow; one shard does it per run.
+      # package (it moves to `old_findings/`). This replaces the former separate verify workflow; one shard does it per run.
       - name: Verify the stored findings on the newest nightly and remove the fixed ones
         if: startsWith(matrix.shard, '0/')
         env:
