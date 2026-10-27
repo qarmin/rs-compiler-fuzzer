@@ -23,7 +23,7 @@ on:
         default: "5400"
       bisect_seconds:
         description: "Regression-range time per finding"
-        default: "1500"
+        default: "3000"
 
 permissions:
   contents: write
@@ -90,7 +90,7 @@ jobs:
           LIMIT: ${{ inputs.limit || '6' }}
           REDUCE: ${{ inputs.reduce_seconds || '900' }}
           REDUCE_MAX: ${{ inputs.reduce_max_seconds || '5400' }}
-          BISECT: ${{ inputs.bisect_seconds || '1500' }}
+          BISECT: ${{ inputs.bisect_seconds || '3000' }}
         run: |
           export BIN=$PWD/target/release/rs-compiler-fuzzer TOOLCHAIN=import
           end=$((SECONDS + 103 * 60)); : > handled.txt; mkdir -p unreproduced

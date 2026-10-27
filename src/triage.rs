@@ -195,7 +195,8 @@ fn distinctive_methods(src: &str) -> Vec<String> {
     found
 }
 
-fn upstream_search(reduced: &str, bad: &Config, sig: &Option<String>) -> Search {
+/// One repository (`rust-lang/rust` or `llvm/llvm-project`). A query that fails keeps the whole search "not performed": a search with holes is no search.
+fn upstream_search(repo_scope: &str, reduced: &str, bad: &Config, sig: &Option<String>, llvm_pass: &Option<String>) -> Search {
     let mut s = Search::default();
     // is gh usable at all?
     if let Err(e) = gh_issues(&["--repo", "rust-lang/rust", "--limit", "1", "miscompile"]) {
@@ -203,12 +204,16 @@ fn upstream_search(reduced: &str, bad: &Config, sig: &Option<String>) -> Search 
         return s;
     }
     s.performed = true;
+    let failed = std::cell::RefCell::new(Vec::<String>::new());
     let run = |s: &mut Search, repo: &str, label: &str, extra: &[&str], q: &str, state_filter: bool| {
         let mut args: Vec<&str> = vec!["--repo", repo, "--limit", "10"];
         args.extend_from_slice(extra);
         args.push(q);
         match gh_issues(&args) {
-            Err(e) => s.lines.push(format!("- `{repo}` {label} `{q}`: search failed ({e})")),
+            Err(e) => {
+                failed.borrow_mut().push(format!("`{repo}` {label} `{q}`: {e}"));
+                s.lines.push(format!("- `{repo}` {label} `{q}`: search failed ({e})"));
+            }
             Ok(hits) if hits.is_empty() => s.lines.push(format!("- `{repo}` {label} `{q}`: **no issues found**")),
             Ok(hits) => {
                 s.lines.push(format!("- `{repo}` {label} `{q}`: {} result(s)", hits.len()));
@@ -226,8 +231,12 @@ fn upstream_search(reduced: &str, bad: &Config, sig: &Option<String>) -> Search 
         let text = text.trim().chars().take(70).collect::<String>();
         let text = text.trim_end_matches(|c: char| !c.is_alphanumeric()).to_string();
         let q = format!("\"{text}\"");
-        run(&mut s, "rust-lang/rust", "crash text", &[], &q, true);
-        run(&mut s, "llvm/llvm-project", "crash text", &[], &q, true);
+        run(&mut s, repo_scope, "crash text", &[], &q, true);
+    } else if repo_scope == "llvm/llvm-project" {
+        if let Some(pass) = llvm_pass {
+            run(&mut s, repo_scope, "pass + miscompilation", &["--label", "miscompilation"], &format!("\"{pass}\""), true);
+            run(&mut s, repo_scope, "pass", &[], &format!("\"{pass}\" miscompile"), true);
+        }
     } else {
         let flag = bad.flags.iter().find(|f| f.contains("opt-level") || f.contains("lto") || f.contains("target-cpu") || f.contains("mir")).cloned().unwrap_or_default();
         let methods = distinctive_methods(reduced);
@@ -259,8 +268,16 @@ fn upstream_search(reduced: &str, bad: &Config, sig: &Option<String>) -> Search 
                     s.lines.push(format!("    - #{n} [{st}] {title} - {url}"));
                 }
             }
-            Err(e) => s.lines.push(format!("- title scan of I-miscompile issues failed ({e})")),
+            Err(e) => {
+                failed.borrow_mut().push(format!("title scan of I-miscompile issues: {e}"));
+                s.lines.push(format!("- title scan of I-miscompile issues failed ({e})"));
+            }
         }
+    }
+    let failed = failed.into_inner();
+    if !failed.is_empty() {
+        s.performed = false;
+        s.note = format!("NOT COMPLETE: {} quer{} failed ({}); the next run repeats the search", failed.len(), if failed.len() == 1 { "y" } else { "ies" }, failed.join("; ").chars().take(300).collect::<String>());
     }
     s
 }
@@ -800,7 +817,7 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
 
     info!("step 3: shortest command line");
     // 3. flags: reuse the stored shortest command line when the program is the same
-    let flags_ctx = |old: &Cfg| steps::current(old, "flags", &rhash, &date).is_some() && old.contains_key("min_bad_flags");
+    let flags_ctx = |old: &Cfg| ["flags_common", "flags_reference", "flags_failing"].iter().all(|id| steps::current(old, id, &rhash, &date).is_some()) && old.contains_key("min_bad_flags");
     let flags_reused = flags_ctx(&old);
     if flags_reused {
         let g = |k: &str| old.get(k).cloned().unwrap_or_default();
@@ -914,7 +931,7 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
 
     // 4b. the same program at the other optimisation levels (on the channel the issue shows)
     let var_chan = matrix2.iter().find(|m| m.2 == Repro::Yes).map(|m| m.0.clone());
-    let var_reused = cur("opt_levels") && dir.join("variants.txt").exists();
+    let var_reused = cur("opt_levels") && cur("mir_levels") && dir.join("variants.txt").exists();
     let variants: Vec<Variant> = if var_reused {
         variants_from_text(&std::fs::read_to_string(dir.join("variants.txt")).unwrap_or_default())
     } else if let (true, Some(ch), false) = (still, &var_chan, crate::reduce::INTERRUPTED.load(std::sync::atomic::Ordering::Relaxed)) {
@@ -974,13 +991,33 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
 
     info!("step 6: upstream search");
     // 6. upstream search (repeated after two weeks)
-    let search_reused = cur("upstream") && dir.join("search.txt").exists();
-    let search = if search_reused {
+    let llvm_pass = culprit.as_ref().filter(|c| c.kind == "llvm" && c.n > 0).map(|c| c.name.clone());
+    let rust_reused = cur("upstream_rust") && dir.join("search.txt").exists();
+    let llvm_reused = cur("upstream_llvm") && dir.join("search_llvm.txt").exists();
+    let interrupted = crate::reduce::INTERRUPTED.load(std::sync::atomic::Ordering::Relaxed);
+    let search_rust = if rust_reused {
         search_from_text(&std::fs::read_to_string(dir.join("search.txt")).unwrap_or_default())
-    } else if o.search && !crate::reduce::INTERRUPTED.load(std::sync::atomic::Ordering::Relaxed) {
-        upstream_search(&reduced, &bad, &sig)
+    } else if o.search && !interrupted {
+        upstream_search("rust-lang/rust", &reduced, &bad, &sig, &None)
     } else {
         Search { note: "NOT PERFORMED (disabled)".into(), ..Default::default() }
+    };
+    let llvm_applicable = crash || llvm_pass.is_some();
+    let search_llvm = if llvm_reused {
+        search_from_text(&std::fs::read_to_string(dir.join("search_llvm.txt")).unwrap_or_default())
+    } else if !llvm_applicable {
+        Search { note: "not applicable: no LLVM pass was found to be involved".into(), ..Default::default() }
+    } else if o.search && !interrupted {
+        upstream_search("llvm/llvm-project", &reduced, &bad, &sig, &llvm_pass)
+    } else {
+        Search { note: "NOT PERFORMED (disabled)".into(), ..Default::default() }
+    };
+    // both searches, as one for the status files
+    let search = Search {
+        performed: search_rust.performed && (search_llvm.performed || !llvm_applicable),
+        lines: search_rust.lines.iter().chain(search_llvm.lines.iter()).cloned().collect(),
+        possible: search_rust.possible.iter().chain(search_llvm.possible.iter()).cloned().collect(),
+        note: [search_rust.note.clone(), search_llvm.note.clone()].iter().filter(|n| !n.is_empty()).cloned().collect::<Vec<_>>().join(" / "),
     };
 
     info!("step 7: regression range (bisect budget {}s)", o.bisect.as_secs());
@@ -1029,35 +1066,57 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
             steps::set(st, id, s);
         }
     };
-    let yes_list: Vec<String> = matrix2.iter().filter(|m| m.2 == Repro::Yes).map(|m| m.0.clone()).collect();
-    if still {
-        put(&mut st, "reproduced", "done", &ctx, format!("reproduces on {}", yes_list.join(", ")));
-    } else {
-        put(&mut st, "reproduced", "failed", &ctx, "does not reproduce on any installed channel any more".into());
+    // reproduction: one result per channel
+    for (ch, _ver, r) in &matrix2 {
+        let id = format!("reproduced_{ch}");
+        if !steps::STEPS.iter().any(|d| d.id == id) {
+            continue;
+        }
+        match r {
+            Repro::Yes => put(&mut st, &id, "done", &ctx, format!("reproduces on {ch}")),
+            Repro::NotApplicable => put(&mut st, &id, "n/a", &ctx, format!("the options only exist on nightly")),
+            Repro::No if ch == "nightly" => put(&mut st, &id, "failed", &ctx, "does not reproduce on the newest nightly any more (the next verification moves it to old_findings/)".into()),
+            Repro::No => put(&mut st, &id, "done", &ctx, format!("does not reproduce on {ch}")),
+        }
     }
     if !converged {
         let note = if !did_reduce { "not reduced (the reducer did not run or the original was not interesting under its limits)".to_string() } else { format!("{min_status}; run {min_runs} of at most 6") };
-        put(&mut st, "minimized", if did_reduce { "partial" } else { "todo" }, "", note);
+        put(&mut st, "minimized", "todo", "", note);
     } else if rl > 300 {
-        put(&mut st, "minimized", "partial", "", format!("still {rl} lines and no single case shows it on its own: it depends on the size/shape of the whole program (inlining or similar) - needs a longer reduction or a hand investigation"));
+        put(&mut st, "minimized", "todo", "", format!("still {rl} lines and no single case shows it on its own: it depends on the size/shape of the whole program (inlining or similar) - needs a longer reduction or a hand investigation"));
     } else {
         let extra = if rl > 80 { format!(" - but still {rl} lines: reduce further by hand (tools/reduce.py)") } else { String::new() };
         put(&mut st, "minimized", "done", "", format!("{min_status}, {rl} lines after {min_runs} run(s){extra}"));
     }
     if still && flags_reused {
-        keep(&mut st, "flags");
+        for id in ["flags_common", "flags_reference", "flags_failing"] {
+            keep(&mut st, id);
+        }
     } else if still {
-        put(&mut st, "flags", "done", &ctx, format!("reference: {}; failing: {}; common: {}", show_flags(&base.flags.join(" ")), show_flags(&bad.flags.join(" ")), show_flags(&common_txt)));
+        put(&mut st, "flags_common", "done", &ctx, format!("shared flags: {}", show_flags(&common_txt)));
+        put(&mut st, "flags_reference", "done", &ctx, format!("reference: {}", show_flags(&base.flags.join(" "))));
+        put(&mut st, "flags_failing", "done", &ctx, format!("failing: {}", show_flags(&bad.flags.join(" "))));
     } else {
-        put(&mut st, "flags", "todo", &ctx, "needs a reproducing program first".into());
+        for id in ["flags_common", "flags_reference", "flags_failing"] {
+            put(&mut st, id, "todo", &ctx, "needs a reproducing program first".into());
+        }
     }
     if var_reused {
         keep(&mut st, "opt_levels");
+        keep(&mut st, "mir_levels");
     } else if variants.is_empty() {
         put(&mut st, "opt_levels", "todo", &ctx, "needs a reproducing program first".into());
+        put(&mut st, "mir_levels", "todo", &ctx, "needs a reproducing program first".into());
     } else {
-        let list = |bug: bool| variants.iter().filter(|v| v.bug == bug).map(|v| v.flags.clone()).collect::<Vec<_>>().join(", ");
-        put(&mut st, "opt_levels", "done", &ctx, format!("{} levels tried; bug with: {}; not with: {}", variants.len(), list(true), list(false)));
+        // the first six variants are the -C opt-level values, the rest the -Zmir-opt-level values
+        let list = |vs: &[Variant], bug: bool| vs.iter().filter(|v| v.bug == bug).map(|v| v.flags.clone()).collect::<Vec<_>>().join(", ");
+        let (opt, mir) = variants.split_at(variants.len().min(6));
+        put(&mut st, "opt_levels", "done", &ctx, format!("{} levels tried; bug with: {}; not with: {}", opt.len(), list(opt, true), list(opt, false)));
+        if mir.is_empty() {
+            put(&mut st, "mir_levels", "todo", &ctx, "no nightly compiler available for -Zmir-opt-level".into());
+        } else {
+            put(&mut st, "mir_levels", "done", &ctx, format!("{} levels tried; bug with: {}; not with: {}", mir.len(), list(mir, true), list(mir, false)));
+        }
     }
     if ub_reused {
         keep(&mut st, "ub_check");
@@ -1065,10 +1124,10 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     match m.verdict.as_str() {
         "ok" => put(&mut st, "ub_check", "done", &ctx, "Miri found no undefined behaviour".into()),
         "ub" => put(&mut st, "ub_check", "failed", &ctx, format!("Miri reports undefined behaviour: {}", m.detail)),
-        "panic" => put(&mut st, "ub_check", "partial", &ctx, format!("the program panics under Miri (arithmetic overflow?): {}", m.detail)),
+        "panic" => put(&mut st, "ub_check", "failed", &ctx, format!("the program panics under Miri (arithmetic overflow?): {}", m.detail)),
         "skipped" if crash => put(&mut st, "ub_check", "n/a", &ctx, "compiler crash: there is no program output to check".into()),
         "skipped" => put(&mut st, "ub_check", "todo", &ctx, m.detail.clone()),
-        _ => put(&mut st, "ub_check", "partial", &ctx, format!("Miri could not decide: {}", m.detail)),
+        _ => put(&mut st, "ub_check", "todo", &ctx, format!("Miri could not decide: {}", m.detail)),
     }
     }
     if cul_reused {
@@ -1096,11 +1155,31 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
         if n <= 1 {
             put(&mut st, "minimize_cases", "done", "", if n == 0 { "reduced to a plain program".into() } else { "a single case is enough".into() });
         } else {
-            put(&mut st, "minimize_cases", "partial", "", format!("{n} cases of the batch are still needed together (the bug depends on the size/shape of the whole program)"));
+            put(&mut st, "minimize_cases", "todo", "", format!("{n} cases of the batch are still needed together (the bug depends on the size/shape of the whole program)"));
+        }
+    }
+    for (id, part) in [("bisect_stable", &bis.stable), ("bisect_nightly", &bis.nightly), ("bisect_pr", &bis.pr)] {
+        let ran_here = !o.bisect.is_zero() && still && m.verdict != "ub";
+        if cur(id) && prior_known && !ran_here {
+            keep(&mut st, id);
+        } else if !ran_here {
+            // the search did not run in this pass (disabled, interrupted, or the finding is not eligible): the stored state of the step
+            // stays as it is - a step is never marked done from data that an older version of the tool produced
+        } else if part.na {
+            put(&mut st, id, "n/a", &ctx, part.note.clone());
+        } else if part.done {
+            put(&mut st, id, "done", &ctx, part.summary.clone());
+        } else if cur(id) && prior_known {
+            keep(&mut st, id);
+        } else if !part.note.is_empty() || !part.lines.is_empty() {
+            put(&mut st, id, "todo", &ctx, if part.note.is_empty() { "started, not finished (the next run continues)".to_string() } else { part.note.clone() });
+        } else {
+            put(&mut st, id, "todo", &ctx, if o.bisect.is_zero() { "regression search disabled".into() } else { "not done yet".into() });
         }
     }
     // regression or long-standing? decides whether the bisection applies at all
-    {
+    // only from stable/nightly results of this version of the tool (never from stored data that is open again)
+    if ["bisect_stable", "bisect_nightly"].iter().all(|id| steps::is_complete(id, &st, &ctx, &date)) {
         let reg = |p: &crate::bisect::Part| p.summary.contains("first bad");
         let old_bug = |p: &crate::bisect::Part| p.summary.contains("since <=");
         if reg(&bis.stable) || reg(&bis.nightly) {
@@ -1113,29 +1192,17 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
             put(&mut st, "regression", "todo", &ctx, "needs the stable/nightly search first".into());
         }
     }
-    for (id, part) in [("bisect_stable", &bis.stable), ("bisect_nightly", &bis.nightly), ("bisect_pr", &bis.pr)] {
-        let ran_here = !o.bisect.is_zero() && still && m.verdict != "ub";
-        if cur(id) && prior_known && !ran_here {
+    for (id, reused, sr, applicable) in [("upstream_rust", rust_reused, &search_rust, true), ("upstream_llvm", llvm_reused, &search_llvm, llvm_applicable)] {
+        if reused {
             keep(&mut st, id);
-        } else if part.na {
-            put(&mut st, id, "n/a", &ctx, part.note.clone());
-        } else if part.done {
-            put(&mut st, id, "done", &ctx, part.summary.clone());
-        } else if cur(id) && prior_known {
-            keep(&mut st, id);
-        } else if !part.note.is_empty() || !part.lines.is_empty() {
-            put(&mut st, id, "partial", &ctx, part.note.clone());
+        } else if !applicable {
+            put(&mut st, id, "n/a", &ctx, sr.note.clone());
+        } else if sr.performed {
+            let note = if sr.possible.is_empty() { "no matching issue found".to_string() } else { format!("possible duplicates: {} - read them before reporting", sr.possible.join(" ")) };
+            put(&mut st, id, "done", &ctx, note);
         } else {
-            put(&mut st, id, "todo", &ctx, if o.bisect.is_zero() { "regression search disabled".into() } else { "not done yet".into() });
+            put(&mut st, id, "todo", &ctx, if sr.note.is_empty() { "not performed".into() } else { sr.note.clone() });
         }
-    }
-    if search_reused {
-        keep(&mut st, "upstream");
-    } else if search.performed {
-        let note = if search.possible.is_empty() { "no matching issue found".to_string() } else { format!("possible duplicates: {} - read them before reporting", search.possible.join(" ")) };
-        put(&mut st, "upstream", "done", &ctx, note);
-    } else {
-        put(&mut st, "upstream", "todo", &ctx, if search.note.is_empty() { "not performed".into() } else { search.note.clone() });
     }
     put(&mut st, "issue_draft", if still { "done" } else { "todo" }, &ctx, String::new());
 
@@ -1179,11 +1246,19 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     }
     st.insert("last_verified".into(), date.clone());
     st.entry("state".into()).or_insert_with(|| "open".into());
+    // steps that no longer exist (renamed or split up) leave no trace
+    let stale_keys: Vec<String> = st.keys().filter(|k| k.strip_prefix("step.").map(|id| !steps::STEPS.iter().any(|d| d.id == id)).unwrap_or(false)).cloned().collect();
+    for k in stale_keys {
+        st.remove(&k);
+    }
     let (done_n, total_n) = steps::progress(&st, &date);
     st.insert("progress".into(), format!("{done_n}/{total_n}"));
     write_cfg(&dir.join("status.cfg"), &st);
-    if search.performed {
-        let _ = std::fs::write(dir.join("search.txt"), search_to_text(&search));
+    if search_rust.performed {
+        let _ = std::fs::write(dir.join("search.txt"), search_to_text(&search_rust));
+    }
+    if search_llvm.performed {
+        let _ = std::fs::write(dir.join("search_llvm.txt"), search_to_text(&search_llvm));
     }
     crate::pack::write_finding_json(dir);
 

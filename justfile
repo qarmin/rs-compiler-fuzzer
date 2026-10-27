@@ -108,7 +108,7 @@ minimize-all *dirs: doctor-quick build
 # run the whole checklist again for one finding (reduce for a short time, flags, opt levels, Miri, regression bisection, upstream search)
 [group('findings')]
 triage dir *args: build
-    {{bin}} triage --dir {{dir}} --bisect 1500 --budget 900 {{args}}
+    {{bin}} triage --dir {{dir}} --bisect 3000 --budget 1800 {{args}}
 
 # regression search only (stable / nightly / cargo-bisect-rustc), no minimisation
 [group('findings')]

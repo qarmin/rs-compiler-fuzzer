@@ -176,7 +176,7 @@ impl Bisect {
 const OLDEST_STABLE_MINOR: i64 = 56;
 const OLDEST_NIGHTLY: &str = "2021-06-01";
 /// Extra time for `cargo bisect-rustc` once the nightly range is a single day.
-const PR_SECONDS: u64 = 900;
+const PR_SECONDS: u64 = 3600;
 
 fn days_between(from: &str, to: &str) -> i64 {
     let ts = |d: &str| Command::new("date").args(["-u", "-d", d, "+%s"]).output().ok().and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<i64>().ok()).unwrap_or(0);
@@ -478,6 +478,24 @@ fn pr_search(src: &Path, base: &Config, bad: &Config, sig: &Option<String>, work
     res.dedup();
     let res = tidy_pr_lines(&res);
     if res.is_empty() {
+        // "ERROR: no CI builds available between A and B": the bisection narrowed it down to the commits between A and B, but CI
+        // builds expire, so it cannot go further. The range is still the answer worth reporting.
+        let no_ci = text.lines().find_map(|l| {
+            let rest = l.split("no CI builds available between ").nth(1)?;
+            let mut it = rest.split_whitespace();
+            let a = it.next()?.trim_matches(|c: char| !c.is_ascii_hexdigit()).to_string();
+            let b = it.nth(1)?.trim_matches(|c: char| !c.is_ascii_hexdigit()).to_string();
+            (a.len() >= 7 && b.len() >= 7).then_some((a, b))
+        });
+        if let (Some((a, b)), false) = (no_ci, timed_out) {
+            part.lines = vec![
+                format!("- searched commit range: https://github.com/rust-lang/rust/compare/{a}...{b}"),
+                "- regressed commit not found: cargo-bisect-rustc narrowed the regression to the commits in that range, but the CI builds in between are no longer available (they expire after a while), so it could not go further".to_string(),
+            ];
+            part.summary = "pr: regressed commit not found (CI builds expired); range known".into();
+            part.done = true;
+            return;
+        }
         let tail: Vec<&str> = text.lines().rev().filter(|l| !l.trim().is_empty()).take(2).collect();
         let why = tail.into_iter().rev().collect::<Vec<_>>().join(" / ").chars().take(200).collect::<String>();
         if timed_out {

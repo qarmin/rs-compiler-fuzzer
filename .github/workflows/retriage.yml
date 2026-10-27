@@ -22,14 +22,14 @@ on:
         description: "Findings per shard"
         default: "6"
       reduce_seconds:
-        description: "Reduction time per finding"
-        default: "600"
+        description: "Reduction time per finding (at least)"
+        default: "1200"
       reduce_max_seconds:
         description: "Longest minimisation of one finding (it gets what the others in the queue do not need)"
         default: "6000"
       bisect_seconds:
-        description: "Regression-range time per finding"
-        default: "1500"
+        description: "Regression-range time per finding (stable + nightly searches; cargo-bisect-rustc gets up to an hour on top)"
+        default: "3000"
 
 permissions:
   contents: write
@@ -98,9 +98,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GITHUB_TOKEN: ${{ github.token }}
           LIMIT: ${{ inputs.limit || '6' }}
-          REDUCE: ${{ inputs.reduce_seconds || '600' }}
+          REDUCE: ${{ inputs.reduce_seconds || '1200' }}
           REDUCE_MAX: ${{ inputs.reduce_max_seconds || '6000' }}
-          BISECT: ${{ inputs.bisect_seconds || '1500' }}
+          BISECT: ${{ inputs.bisect_seconds || '3000' }}
         run: |
           export BIN=$PWD/target/release/rs-compiler-fuzzer KEYS_FILE=$PWD/stored-keys.txt TOOLCHAIN=retriage
           # about 1:50 per job in total (the setup before this step takes ~7 minutes): minimisation may use nearly all of it
