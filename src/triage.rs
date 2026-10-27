@@ -1341,11 +1341,22 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     for (label, yes) in bis.edges() {
         let _ = writeln!(is, "| {label} | {} |", if yes { "yes" } else { "no" });
     }
-    if bis.pr.lines.iter().any(|l| l.contains("rust-lang/rust")) {
+    // cargo-bisect-rustc always leaves a trace here: the commit, "not found" (a result), or why there is nothing yet
+    if bis.pr.lines.iter().any(|l| l.contains("rust-lang/rust")) || bis.pr.done {
         let _ = writeln!(is, "\nBisected with `cargo bisect-rustc`:\n");
         for l in &crate::bisect::tidy_pr_lines(&bis.pr.lines) {
             let _ = writeln!(is, "{l}");
         }
+    } else if !bis.pr.na && !bis.nightly.na {
+        // not part of the report (an HTML comment): tells whoever reads the draft whether the search still has to be done by hand
+        let why = if bis.nightly.range.is_none() {
+            format!("needs the one-day nightly range first ({})", if bis.nightly.note.is_empty() { bis.nightly.summary.clone() } else { bis.nightly.note.clone() })
+        } else if bis.pr.note.is_empty() {
+            "not run yet".to_string()
+        } else {
+            bis.pr.note.clone()
+        };
+        let _ = writeln!(is, "\n<!-- cargo-bisect-rustc: NOT DONE ({why}). The next retriage run tries again; the command is `cargo bisect-rustc --regress success --start <good nightly> --end <bad nightly> --script <script that exits 0 while the bug shows>`. -->");
     }
     let _ = writeln!(is, "\nProblem was found by and minimized by rust fuzzer(created by llm) - https://github.com/qarmin/rs-compiler-fuzzer\n\nThe latest findings of the fuzzer can be checked by hand in https://github.com/qarmin/rs-compiler-fuzzer/releases/download/Nightly/findings.zip");
     std::fs::write(dir.join("ISSUE.md"), is).unwrap();
