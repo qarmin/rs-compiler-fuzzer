@@ -120,6 +120,16 @@ bisect dir secs="3000": build
 import dir *args: doctor-quick build
     {{bin}} import --todo {{dir}} --out import-out --bisect 1500 --budget 900 --budget-max 7200 {{args}}
 
+# next batch of GitHub issues -> tmp/issues/found/NAME.rs + NAME.txt (what compiles into an ICE / crash / hang; with --run also O0 vs O3 output differences, which EXECUTES the programs); `just import tmp/issues/found` triages them
+[group('findings')]
+gather *args:
+    python3 tools/gather_issues.py fetch --comments {{args}}
+
+# run the gathered problems again (a status that is no longer a problem means fixed, or flaky)
+[group('findings')]
+gather-verify *args:
+    python3 tools/gather_issues.py verify {{args}}
+
 # show the issue draft of a finding
 [group('findings')]
 issue dir:
