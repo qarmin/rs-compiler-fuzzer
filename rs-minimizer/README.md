@@ -20,11 +20,14 @@ Cheap deletions come first (comments, items together with the code that mentions
 4. **Lines** - ddmin with several candidates tested at once.
 5. **Dead code** - one `rustc` run lists unused items and imports, they go together with the `impl` blocks that mention them.
 6. **Brackets** - hollowing out a bracket pair, removing the brackets, lifting the contents of a block, deleting lexemes (the ideas of Shrink Ray, rewritten here and checked by the oracle after every step).
-7. **Inlining** - calls of functions and methods are replaced by their bodies (`f(a)` -> `{ let x = a; BODY }`, `r.m(a)` -> `{ let (__s, x) = (&r, a); BODY }`), so the function, its impl, its trait and the generic parameter that only existed for it can be deleted. Duplicate function names are made distinct first; bodies with `return`/`?` are never pasted.
-8. **Structure** - a newtype struct replaced by its field (`W(x)` -> `(x)`, `W` -> `T`, `x.0` -> `x` or `*x` depending on how `x` was declared), function bodies stubbed with `unimplemented!()`, unused parameters removed together with the matching argument of every call, unused struct fields removed together with their initialisers, enum variants removed together with the match arms that name them.
-9. **Peephole** (C-Vise `peep`/`balanced`, Shrink Ray `replace_identifiers_with_zero`) - every call, identifier, parenthesised group and block tried as `0`, one operand kept of every binary expression, `let mut` -> `let`, `&mut` -> `&`, `+=` -> `=`.
-10. **Tokens** (C-Vise `clex`) - windows of 1..8 consecutive tokens deleted.
-11. **Expressions** - literals to `0`/`1`, calls replaced by an argument, `.method()` segments dropped, `if` replaced by a branch, redundant parentheses; then `rustfmt` if the program stays interesting.
+7. **Traits** - taken apart piece by piece: `Trait::f(..)` pointed at the only impl (`Type::f(..)`), generic parameters replaced by the type their trait is implemented for (`fn e<T: Num>` -> `fn e` with `i128`; this is what lets the methods be inlined), a single trait method deleted together with its copies in the impls, a single bound deleted (`T: A + B + C` -> `T: A + C`), a whole trait with all its impls. Growing the program is fine here: simpler code lets the other passes shrink it.
+8. **Inlining** - calls of functions and methods are replaced by their bodies (`f(a)` -> `{ let x = a; BODY }`, `r.m(a)` -> `{ let (__s, x) = (&r, a); BODY }`), so the function, its impl, its trait and the generic parameter that only existed for it can be deleted. Duplicate function names are made distinct first; bodies with `return`/`?` are never pasted.
+9. **Structure** - a newtype struct replaced by its field (`W(x)` -> `(x)`, `W` -> `T`, `x.0` -> `x` or `*x` depending on how `x` was declared), function bodies stubbed with `unimplemented!()`, unused parameters removed together with the matching argument of every call, unused struct fields removed together with their initialisers, enum variants removed together with the match arms that name them.
+10. **Peephole** (C-Vise `peep`/`balanced`, Shrink Ray `replace_identifiers_with_zero`) - every call, identifier, parenthesised group and block tried as `0`, one operand kept of every binary expression, `let mut` -> `let`, `&mut` -> `&`, `+=` -> `=`.
+11. **Tokens** (C-Vise `clex`) - windows of 1..8 consecutive tokens deleted.
+12. **Expressions** - literals to `0`/`1`, calls replaced by an argument, `.method()` segments dropped, `if` replaced by a branch, redundant parentheses; then `rustfmt` if the program stays interesting.
+
+A result is handed back in place of the input only when it has fewer tokens than the input (layout and line count do not decide, inlining may add lines).
 
 Callers that know how their programs were produced plug in through `Hook` (see `rs-compiler-fuzzer`'s `src/reduce.rs`: batch harness handling).
 

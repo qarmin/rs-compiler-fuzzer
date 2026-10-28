@@ -26,6 +26,7 @@ pub mod peep;
 pub mod scan;
 pub mod structure;
 pub mod tokens;
+pub mod traits;
 pub mod ui;
 pub mod unroll;
 

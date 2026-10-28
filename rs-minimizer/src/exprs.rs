@@ -4,7 +4,7 @@
 use crate::control::{expired, par_checks};
 use crate::oracle::Oracle;
 use crate::par::par_map;
-use crate::scan::{matching, postfix_start, top_args};
+use crate::scan::{is_ident, matching, postfix_start, top_args};
 use std::time::Instant;
 
 /// Pass 2: `let name: ty = EXPR;`  ->  `let name: ty = 0;` (or `false`)
@@ -425,6 +425,7 @@ pub fn flatten_blocks(it: &dyn Oracle, src: &str, deadline: Instant) -> String {
             }
             i += 1;
         }
+        edits.extend(trivial_matches(&cur));
         if edits.is_empty() {
             break;
         }
@@ -435,6 +436,35 @@ pub fn flatten_blocks(it: &dyn Oracle, src: &str, deadline: Instant) -> String {
         cur = next;
     }
     cur
+}
+
+/// `match x { _ => e }` -> `(e)`.
+fn trivial_matches(src: &str) -> Vec<(usize, usize, String)> {
+    let b = src.as_bytes();
+    let mut out = Vec::new();
+    for (at, _) in src.match_indices("match") {
+        if (at > 0 && is_ident(b[at - 1])) || b.get(at + 5).is_none_or(|&c| is_ident(c)) {
+            continue;
+        }
+        let mut k = at + 5;
+        while k < b.len() && b[k] != b'{' && b[k] != b';' {
+            if matches!(b[k], b'(' | b'[') {
+                let Some(c) = matching(b, k) else { break };
+                k = c;
+            }
+            k += 1;
+        }
+        if b.get(k) != Some(&b'{') {
+            continue;
+        }
+        let Some(close) = matching(b, k) else { continue };
+        let Some(arm) = src[k + 1..close].trim().strip_prefix("_ =>") else { continue };
+        let arm = arm.trim().trim_end_matches(',').trim();
+        if !arm.is_empty() && !arm.contains("=>") {
+            out.push((at, close + 1, format!("({arm})")));
+        }
+    }
+    out
 }
 
 /// `let (a, b, c) = (x, y, z);` loses the pairs whose name is not needed (what a pasted function call leaves behind).
@@ -497,10 +527,9 @@ pub fn simplify_let_tuples(it: &dyn Oracle, src: &str, deadline: Instant) -> Str
             if types.is_none() {
                 let line_start = cur[..at].rfind('\n').map_or(0, |n| n + 1);
                 let indent = &cur[line_start..at];
-                if indent.trim().is_empty() {
-                    let lets: Vec<String> = pats.iter().zip(&vals).map(|(p, v)| format!("let {p} = {v}")).collect();
-                    edits.push((at, vclose + 1, lets.join(&format!(";\n{indent}"))));
-                }
+                let lets: Vec<String> = pats.iter().zip(&vals).map(|(p, v)| format!("let {p} = {v}")).collect();
+                let sep = if indent.trim().is_empty() { format!(";\n{indent}") } else { "; ".to_string() };
+                edits.push((at, vclose + 1, lets.join(&sep)));
             }
         }
         if edits.is_empty() {

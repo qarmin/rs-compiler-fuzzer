@@ -65,12 +65,12 @@ fn skip_string(b: &[u8], mut i: usize) -> usize {
     i
 }
 
-fn has_word(text: &str, word: &str) -> bool {
+pub(crate) fn has_word(text: &str, word: &str) -> bool {
     let b = text.as_bytes();
     text.match_indices(word).any(|(i, _)| (i == 0 || !is_ident(b[i - 1])) && b.get(i + word.len()).is_none_or(|&c| !is_ident(c)))
 }
 
-fn replace_word(text: &str, word: &str, with: &str) -> String {
+pub(crate) fn replace_word(text: &str, word: &str, with: &str) -> String {
     let b = text.as_bytes();
     let mut out = String::with_capacity(text.len());
     let mut i = 0;
@@ -92,7 +92,7 @@ fn replace_word(text: &str, word: &str, with: &str) -> String {
 }
 
 /// Generic parameter names of `<...>` at `open` (type and const parameters; lifetimes are skipped).
-fn generic_names(src: &str, open: usize) -> (Vec<String>, usize) {
+pub(crate) fn generic_names(src: &str, open: usize) -> (Vec<String>, usize) {
     let b = src.as_bytes();
     let mut depth = 0i32;
     let mut k = open;
@@ -284,8 +284,16 @@ pub(crate) fn find_sites(src: &str, def: &FnDef) -> Vec<Site> {
             Site { start, end: close + 1, recv: Some(src[start..dot].trim().to_string()), args, arg_ranges }
         } else if before.ends_with("::") {
             let ty = def.self_ty.as_deref();
-            let prefix_start = before[..before.len() - 2].rfind(|c: char| !(c.is_alphanumeric() || c == '_')).map(|p| p + 1).unwrap_or(0);
-            let prefix = &before[prefix_start..before.len() - 2];
+            let head = &before[..before.len() - 2];
+            // `<Type>::f(..)` and `<Type as Trait>::f(..)` call the same method as `Type::f(..)`
+            let qualified = head.ends_with('>').then(|| head.rfind('<')).flatten().map(|lt| (lt, head[lt + 1..head.len() - 1].split(" as ").next().unwrap_or("").trim()));
+            let (prefix_start, prefix) = match qualified {
+                Some((lt, ty)) => (lt, ty),
+                None => {
+                    let st = head.rfind(|c: char| !(c.is_alphanumeric() || c == '_')).map(|p| p + 1).unwrap_or(0);
+                    (st, &before[st..before.len() - 2])
+                }
+            };
             if def.recv.is_some() || ty != Some(prefix) {
                 continue;
             }

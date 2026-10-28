@@ -15,6 +15,7 @@ use crate::oracle::Oracle;
 use crate::peep::peep;
 use crate::structure::{remove_fields, remove_params, remove_variants_and_arms, stub_bodies, unwrap_newtypes};
 use crate::tokens::shrink_tokens;
+use crate::traits::{monomorphize, remove_bounds, remove_trait_methods, specialize_trait_paths};
 use crate::unroll::unroll;
 use log::{info, warn};
 use std::cell::RefCell;
@@ -228,6 +229,10 @@ fn passes() -> Vec<PassDef> {
         p("method calls", 0.001, 1500, false, |c, s| drop_calls(c.it, s, c.deadline)),
         p("expressions", 0.001, 1500, false, |c, s| simplify_exprs(c.it, s, c.deadline)),
         p("let simplification", 0.0005, 1500, false, |c, s| simplify_lets(c.it, s, c.deadline)),
+        p("trait methods", 0.002, 2000, false, |c, s| remove_trait_methods(c.it, s, c.deadline)),
+        p("bounds", 0.001, 1500, false, |c, s| remove_bounds(c.it, s, c.deadline)),
+        p("trait paths", 0.001, 1500, false, |c, s| specialize_trait_paths(c.it, s, c.deadline)),
+        p("monomorphize", 0.002, 1500, false, |c, s| monomorphize(c.it, s, c.deadline)),
         p("inline", 0.001, 400, true, |c, s| inline_calls(c.it, s, &c.opts.rustc, c.deadline)),
         p("let bindings", 0.001, 400, false, |c, s| drop_let_bindings(c.it, s, c.deadline)),
         p("blocks", 0.001, 400, false, |c, s| flatten_blocks(c.it, s, c.deadline)),
@@ -363,7 +368,8 @@ pub fn minimize(it: &dyn Oracle, src: &str, opts: &Options, log: &mut ReduceLog,
     cur = strip_parens(it, &cur);
     stage(it, hook, Stage::Polish, &mut cur, start + budget, log);
     // a run that found nothing smaller than the input hands the input back (formatting or growing passes must not make it worse)
-    if (cur.lines().count(), cur.len()) >= (src.lines().count(), src.len()) && it.recheck(src) {
+    // measured in tokens: inlining and splitting traits may add lines, and layout must not decide
+    if crate::tokens::tokenize(&cur).len() >= crate::tokens::tokenize(src).len() && it.recheck(src) {
         log.push("nothing smaller than the input was found: the input is kept as it is");
         cur = src.to_string();
         pr.result(log, "polish", &cur);
