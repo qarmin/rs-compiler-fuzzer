@@ -3,7 +3,10 @@ name: fuzz
 # Differential fuzzing of rustc. One job per (toolchain, strategy group).
 #  - push to master : nightly only, `fast` profile (no fat/thin LTO, no single-CGU builds), many small groups
 #  - ~00:00 Warsaw time daily (22:00 UTC; 23:00 in winter): nightly only, `full` profile
-#  Every job: 45 min of fuzzing, then about an hour of triage/minimisation of what it found (about 2 h per job in total).
+#  Toolchain policy: only nightly is fuzzed and used for regressions, bisection and reductions. stable/beta exist only to verify
+#  which released versions crash and to build unrelated tools (the fuzzer itself, cargo-bisect-rustc).
+#  Push jobs: 45 min of fuzzing + triage. Daily jobs: 230 min of fuzzing + up to 60 min of triage, which fits GitHub's 6 h job limit
+#  (see timeout-minutes below); whatever is not triaged is finished by retriage.yml.
 #  - manual dispatch: everything is configurable
 # New findings are triaged (reproduced on stable/beta/nightly, reduced, Miri-checked, searched on GitHub) and merged into the
 # single package `findings.zip` of the `Nightly` release (tools/release_sync.sh; verify.yml keeps it up to date).
@@ -15,7 +18,7 @@ on:
   workflow_dispatch:
     inputs:
       duration_minutes:
-        description: "Minutes each job keeps starting new batches (default 180, 45 on push; about an hour of triage follows)"
+        description: "Minutes each job keeps starting new batches (default 230, 45 on push; up to an hour of triage follows; keep fuzzing + triage + 40 below the 6 h GitHub limit)"
         default: ""
       profile:
         description: "fast = skip the slowest configs, full = everything (default full; fast on push)"
@@ -76,8 +79,8 @@ jobs:
           inc = [{"toolchain": t.strip(), "strategies": g.strip(), "name": g.strip().replace(",", "+")}
                  for t in toolchains.split(",") for g in groups.split(";")]
           print("matrix=" + json.dumps({"include": inc}))
-          # the nightly run fuzzes for 3 hours and triages for about 1 more; pushes stay short
-          print("duration=" + (e["IN_DURATION"] or ("45" if quick else "180")))
+          # the daily run fuzzes for 230 min and triages for up to 60 more (6 h job limit); pushes stay short
+          print("duration=" + (e["IN_DURATION"] or ("45" if quick else "230")))
           print("profile=" + (e["IN_PROFILE"] or ("fast" if quick else "full")))
           print("scale=" + (e["IN_SCALE"] or ("50" if quick else "100")))
           PY
@@ -98,7 +101,7 @@ jobs:
     name: fuzz (${{ matrix.toolchain }}, ${{ matrix.name }})
     needs: [plan, prepare]
     runs-on: ubuntu-26.04
-    timeout-minutes: 355   # ~7 min setup + 180 min fuzzing (+ up to 30 min to finish minimising) + up to ~120 min triage (GitHub's limit is 6 h)
+    timeout-minutes: 355   # ~7 min setup + 230 min fuzzing (+ up to 30 min to finish minimising) + ~3 min storing + up to 70 min triage = 340 min (GitHub's limit is 6 h = 360 min)
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
@@ -165,10 +168,10 @@ jobs:
           export BIN=$PWD/target/release/rs-compiler-fuzzer KEYS_FILE=$PWD/stored-keys-raw.txt ADD_DIRS="$adds"
           tools/release_sync.sh tools/store_mutator.sh
 
-      - name: Triage and store each finding (up to two hours; every result is stored right away)
+      - name: Triage and store each finding (up to one hour; every result is stored right away)
         if: always()
         continue-on-error: true
-        timeout-minutes: 130
+        timeout-minutes: 70
         env:
           GH_TOKEN: ${{ github.token }}
           GITHUB_TOKEN: ${{ github.token }}
@@ -176,7 +179,7 @@ jobs:
         run: |
           shopt -s nullglob
           export BIN=$PWD/target/release/rs-compiler-fuzzer KEYS_FILE=$PWD/stored-keys.txt
-          end=$((SECONDS + 120 * 60)); n=0
+          end=$((SECONDS + 60 * 60)); n=0
           for d in fuzz-out/findings/*/ fuzz-out/triaged/*/; do
             d=${d%/}
             left=$((end - SECONDS))

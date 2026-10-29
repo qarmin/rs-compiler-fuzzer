@@ -152,8 +152,8 @@ by hand. The `*-checks` configs and `PANIC` lines can also point at a generator 
 - `ci.yml` (PR, push to master): `cargo test`, a short smoke run on nightly (`--profile fast`), an end-to-end reduction test and the
   `stdlib` self-check (every snippet of the std strategy compiles on stable and nightly, runs without a panic; API coverage >= 90 %).
 - `fuzz.yml`:
-  - **push to master**: nightly only, `fast` profile, half-size batches, 1 hour;
-  - **00:00 UTC daily**: nightly only, `full` profile, 2 hours per job (jobs are limited to ~2h50);
+  - **push to master**: nightly only, `fast` profile, half-size batches, 45 minutes of fuzzing;
+  - **22:00 UTC daily**: nightly only, `full` profile, 230 minutes of fuzzing + up to 60 minutes of triage per job (GitHub limits a job to 6 h, the workflow budgets 340 min);
   - **manual dispatch**: duration, profile, scale, strategy groups, toolchains, seed are inputs.
   One job per strategy group (only nightly is fuzzed; stable/beta are used by triage to reproduce): 8 jobs. Each job runs the canaries,
   fuzzes, then **triages** the new findings (`triage`: reproduces on stable/beta/nightly, reduces with the built-in passes after flattening the harness into a plain `fn main`, checks the reduced
@@ -170,7 +170,9 @@ by hand. The `*-checks` configs and `PANIC` lines can also point at a generator 
   the same asset; otherwise (another job wrote meanwhile) it backs off and redoes the merge on the fresh package.
   The merge (`pack`) is idempotent and the archive is deterministic, so unchanged findings produce no diff; at the end the
   keys that were stored are checked in the downloaded result.
-- **Pipeline**: every fuzz job fuzzes for 3 hours (45 minutes on push), stores the raw findings in the package, and then spends about an hour
+- **Toolchain policy**: only nightly is fuzzed, and only nightly is used for regressions, bisection, reductions and Miri. stable/beta are used only to check
+  which released versions show a crash (the reproduction table of a finding) and to build unrelated tools (the fuzzer itself, cargo-bisect-rustc).
+- **Pipeline**: every fuzz job fuzzes for 230 minutes (45 minutes on push), stores the raw findings in the package, and then spends up to an hour
   triaging what it found (drop unneeded cases, reduce with Shrink Ray, shortest flags, Miri, exact regression range, GitHub
   search), storing each result as soon as it is ready. `retriage.yml` (when a fuzz/miri run ends, and daily at 01:30 UTC, 4
   shards) continues with everything that has no result yet, an older `fuzzer_id`, or an unsettled minimisation; the first shard also
