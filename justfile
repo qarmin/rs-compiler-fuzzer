@@ -157,6 +157,11 @@ open:
 #   just fuzz-full arith,loops --duration 3600 # all configs incl. the slow ones, for an hour
 # Findings land in ./fuzz-out; `just fuzz-minimize` turns the stored ones into reduced reproducers.
 
+# the CI fuzz job on this machine: nightly, every strategy, all configurations; duration in minutes (default 60)
+[group('fuzz')]
+fuzz duration="60" strategies="all" *args: doctor-quick build
+    {{bin}} fuzz --rustc "rustc +nightly" --strategies {{strategies}} --profile full --duration $(({{duration}} * 60)) --jobs {{jobs}} --out fuzz-out {{args}}
+
 # all configurations except LTO and codegen-units=1 (those need --lto)
 [group('fuzz')]
 fuzz-full strategies="all" *args: doctor-quick build
@@ -206,6 +211,43 @@ fuzz-minimize *args: doctor-quick build
         [ -f "$d/case.rs" ] && [ -f "$d/repro.cfg" ] || continue
         {{bin}} minimize "$d" --jobs {{jobs}} {{args}} || break
     done
+
+## GitHub Actions (needs an authenticated `gh`; every recipe starts the workflow on the master branch and prints how to follow it)
+# Examples:
+#   just gh-fuzz                               # the daily fuzz run: 8 groups, nightly, 230 minutes each
+#   just gh-fuzz 30 "arith,select;loops"       # 30 minutes, only these groups
+#   just gh-runs fuzz                          # list the latest runs of a workflow
+#   just gh-watch                              # follow the newest run
+
+# start fuzz.yml: duration in minutes ("" = default), strategy groups separated by ';' ("" = all), profile full|fast ("" = default)
+[group('github')]
+gh-fuzz duration="" strategies="" profile="":
+    gh workflow run fuzz.yml -f duration_minutes="{{duration}}" -f strategies="{{strategies}}" -f profile="{{profile}}"
+
+# start miri.yml: duration in minutes ("" = default), strategy groups separated by ';' ("" = all)
+[group('github')]
+gh-miri duration="" strategies="":
+    gh workflow run miri.yml -f duration_minutes="{{duration}}" -f strategies="{{strategies}}"
+
+# start retriage.yml (continues findings with open checklist steps)
+[group('github')]
+gh-retriage *args:
+    gh workflow run retriage.yml {{args}}
+
+# start ci.yml
+[group('github')]
+gh-ci:
+    gh workflow run ci.yml
+
+# latest runs of a workflow (fuzz, miri, retriage, ci, import, minimize-long)
+[group('github')]
+gh-runs workflow="fuzz" limit="8":
+    gh run list --workflow {{workflow}}.yml --limit {{limit}}
+
+# follow the newest run of a workflow until it ends
+[group('github')]
+gh-watch workflow="fuzz":
+    gh run watch "$(gh run list --workflow {{workflow}}.yml --limit 1 --json databaseId --jq '.[0].databaseId')"
 
 ## profiling
 # perf permissions (one-time):
