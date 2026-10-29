@@ -131,7 +131,7 @@ cargo build --release
 ./target/release/rs-compiler-fuzzer gen --strategy arith --case-seed 123 --out one.rs
 
 # prove the detector works on known miscompilations (canaries/)
-./target/release/rs-compiler-fuzzer canary --lto --rustc "rustc +nightly" --configs O0,O3,O3-lto-fat
+./target/release/rs-compiler-fuzzer canary --lto --rustc "rustc +nightly" --configs O0,O1,O3,Oz,O3-lto-fat
 
 # re-run stored findings (dirs with case.rs + repro.cfg) on this toolchain
 ./target/release/rs-compiler-fuzzer verify --dir unzipped-findings/ --out verify-out
@@ -153,9 +153,9 @@ by hand. The `*-checks` configs and `PANIC` lines can also point at a generator 
   `stdlib` self-check (every snippet of the std strategy compiles on stable and nightly, runs without a panic; API coverage >= 90 %).
 - `fuzz.yml`:
   - **push to master**: nightly only, `fast` profile, half-size batches, 1 hour;
-  - **00:00 UTC daily**: nightly **and** stable, `full` profile, 2 hours per job (jobs are limited to ~2h50);
+  - **00:00 UTC daily**: nightly only, `full` profile, 2 hours per job (jobs are limited to ~2h50);
   - **manual dispatch**: duration, profile, scale, strategy groups, toolchains, seed are inputs.
-  One job per (toolchain, strategy group): 7 groups x 2 toolchains = 14 jobs. Each job runs the canaries,
+  One job per strategy group (only nightly is fuzzed; stable/beta are used by triage to reproduce): 8 jobs. Each job runs the canaries,
   fuzzes, then **triages** the new findings (`triage`: reproduces on stable/beta/nightly, reduces with the built-in passes after flattening the harness into a plain `fn main`, checks the reduced
   program with Miri, searches rust-lang/rust issues with `gh`) and prints the result into the log, the step
   summary and an artifact. Every finding gets a `STATUS.md` with a **checklist** (what is done, what is open - see below) and an `ISSUE.md` draft (plus `ISSUE_TITLE.txt`) in the rust-lang format: the reduced program only, the shortest

@@ -12,7 +12,7 @@ different optimisation levels) is stored as NAME.rs + NAME.txt, the pair format 
 Already processed issues are skipped, so `fetch` can be repeated until the labels are exhausted. --run EXECUTES the programs from the
 issues (limited by timeout and memory): use a container or a VM for that. Needs `gh` (authenticated) and rustc.
 """
-import argparse, json, os, re, resource, shlex, subprocess, sys, tempfile, time
+import argparse, json, os, re, resource, shlex, signal, subprocess, sys, tempfile, time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -174,24 +174,55 @@ def shlex_split(s):
         return s.split()
 
 
+MEM_GB = 3
+MIN_AVAILABLE_GB = 4
+
+
+def mem_available_gb():
+    for line in open("/proc/meminfo"):
+        if line.startswith("MemAvailable:"):
+            return int(line.split()[1]) / (1 << 20)
+    return 1e9
+
+
+def wait_for_memory():
+    """Does not start another compiler while the machine is short of RAM (the jobs of one run add up)."""
+    while mem_available_gb() < MIN_AVAILABLE_GB:
+        time.sleep(2)
+
+
 def limits(mem_gb):
     def apply():
         resource.setrlimit(resource.RLIMIT_AS, (mem_gb << 30, mem_gb << 30))
         resource.setrlimit(resource.RLIMIT_FSIZE, (256 << 20, 256 << 20))
         resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
         os.setsid()
+        try:
+            with open("/proc/self/oom_score_adj", "w") as f:
+                f.write("1000")
+        except OSError:
+            pass
     return apply
 
 
-def run(cmd, timeout, cwd, mem_gb=16):
+def run(cmd, timeout, cwd, mem_gb=None):
+    """Runs `cmd` in its own process group with an address-space limit; on timeout the whole group is killed (rustc leaves linkers behind)."""
+    wait_for_memory()
     start = time.time()
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=cwd, preexec_fn=limits(mem_gb), errors="replace")
-        return p.returncode, p.stdout, p.stderr, time.time() - start, False
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=cwd, preexec_fn=limits(mem_gb or MEM_GB), errors="replace")
     except OSError as e:
         return None, "", f"cannot start: {e}", time.time() - start, False
-    except subprocess.TimeoutExpired as e:
-        return None, "", (e.stderr.decode(errors="replace") if isinstance(e.stderr, bytes) else e.stderr or ""), time.time() - start, True
+    try:
+        out, err = proc.communicate(timeout=timeout)
+        return proc.returncode, out, err, time.time() - start, False
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        out, err = proc.communicate()
+        return None, "", err or "", time.time() - start, True
 
 
 def classify_compile(code, flags, toolchain, timeout, workdir):
@@ -223,7 +254,7 @@ def first_line(text, needles):
 
 
 def run_binary(workdir, timeout):
-    rc, out, err, secs, hung = run([str(Path(workdir) / "bin")], timeout, workdir, mem_gb=4)
+    rc, out, err, secs, hung = run([str(Path(workdir) / "bin")], timeout, workdir, mem_gb=2)
     return rc, out, hung
 
 
@@ -413,6 +444,7 @@ def cmd_stats(args):
 
 
 def main():
+    global MEM_GB, MIN_AVAILABLE_GB
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("mode", choices=["fetch", "crawl", "verify", "stats"])
     ap.add_argument("--out", default="tmp/issues")
@@ -428,8 +460,11 @@ def main():
     ap.add_argument("--timeout", type=int, default=60, help="seconds a compilation may take before it counts as a hang")
     ap.add_argument("--run-timeout", type=int, default=10)
     ap.add_argument("--max-blocks", type=int, default=6, help="code blocks per issue")
-    ap.add_argument("--jobs", type=int, default=max(1, (os.cpu_count() or 4) // 2))
+    ap.add_argument("--jobs", type=int, default=4, help="parallel compilations (each may use up to --mem-gb of RAM)")
+    ap.add_argument("--mem-gb", type=int, default=MEM_GB, help="address-space limit of one compiler / program")
+    ap.add_argument("--min-available-gb", type=int, default=MIN_AVAILABLE_GB, help="no new process is started while less RAM than this is available")
     args = ap.parse_args()
+    MEM_GB, MIN_AVAILABLE_GB = args.mem_gb, args.min_available_gb
     sys.exit({"fetch": cmd_fetch, "crawl": cmd_crawl, "verify": cmd_verify, "stats": cmd_stats}[args.mode](args))
 
 

@@ -208,9 +208,14 @@ fn parse_lines(stdout: &str) -> BTreeMap<usize, String> {
 /// Strategies tag snippets that are known to trigger an open upstream bug with
 /// `// known-bug: <owner/repo#N ...>`; findings made only of such cases are filed under `known/`.
 fn known_bug(body: &str) -> Option<String> {
-    let all: Vec<&str> = body.lines().filter_map(|l| l.split("// known-bug:").nth(1)).map(str::trim).collect();
+    let mut all: Vec<&str> = body.lines().filter_map(|l| l.split("// known-bug:").nth(1)).map(str::trim).collect();
+    all.extend(KNOWN_CODE_PATTERNS.iter().filter(|(needle, _)| body.contains(needle)).map(|(_, refs)| *refs));
     if all.is_empty() { None } else { Some(all.join(" ")) }
 }
+
+/// Code that is not tagged by the generator but triggers an open upstream miscompilation: 25 of 26 reduced stack-coloring
+/// findings contain `abs_diff` (a regression since 1.99.0), which made arith/shapes report a "new" bug every night.
+const KNOWN_CODE_PATTERNS: &[(&str, &str)] = &[(".abs_diff(", "rust-lang/rust#164825 (LLVM stack-coloring merges stack slots, regression since 1.99.0)")];
 
 const KNOWN_BUGS: &str = include_str!("../known-bugs.txt");
 
@@ -563,6 +568,10 @@ impl Fuzzer<'_> {
                     continue;
                 }
             }
+            if self.diverges(&cases, base, bad).is_none() {
+                warn!("{} vs {} ({}): the divergence did not reproduce on a second run, skipped as flaky", base.name, bad.name, s.name);
+                continue;
+            }
             let far = Instant::now() + Duration::from_secs(self.o.minimize_secs);
             let deadline = self.hard_deadline.map_or(far, |h| h.min(far));
             let min = self.minimize(&cases, base, bad, &outs[b], &outs[i], deadline);
@@ -661,6 +670,7 @@ const CANARIES: &[(&str, &str)] = &[
     ("rust-lang/rust#163311 (-O2/-O3)", include_str!("../canaries/case_163311.rs")),
     ("rust-lang/rust#164667 (-O1, stack colouring)", include_str!("../canaries/case_164667.rs")),
     ("rust-lang/rust#164137 (-O1, early-cse)", include_str!("../canaries/case_164137.rs")),
+    ("rust-lang/rust#164069 (-O1, GVN enum downcast, nightly only)", include_str!("../canaries/case_164069.rs")),
 ];
 
 pub fn canary(o: &Opts) -> i32 {
@@ -809,6 +819,12 @@ pub fn ensure_dir(p: &Path) {
 mod tests {
     use super::*;
     use crate::runner::COMMON_FLAGS;
+
+    #[test]
+    fn abs_diff_cases_count_as_known() {
+        assert!(known_bug("let a = x.abs_diff(y);").is_some_and(|m| m.contains("rust-lang/rust#164825")));
+        assert!(known_bug("let a = x.wrapping_add(y);").is_none());
+    }
 
     #[test]
     fn generation_is_deterministic() {

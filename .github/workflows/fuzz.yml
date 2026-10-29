@@ -2,7 +2,7 @@ name: fuzz
 
 # Differential fuzzing of rustc. One job per (toolchain, strategy group).
 #  - push to master : nightly only, `fast` profile (no fat/thin LTO, no single-CGU builds), many small groups
-#  - ~00:00 Warsaw time daily (22:00 UTC; 23:00 in winter): nightly + stable, `full` profile
+#  - ~00:00 Warsaw time daily (22:00 UTC; 23:00 in winter): nightly only, `full` profile
 #  Every job: 45 min of fuzzing, then about an hour of triage/minimisation of what it found (about 2 h per job in total).
 #  - manual dispatch: everything is configurable
 # New findings are triaged (reproduced on stable/beta/nightly, reduced, Miri-checked, searched on GitHub) and merged into the
@@ -29,7 +29,7 @@ on:
         description: "Strategy groups: groups separated by ';', strategies inside a group by ','"
         default: ""
       toolchains:
-        description: "Comma separated toolchains (default nightly,stable; nightly on push)"
+        description: "Comma separated toolchains (default nightly; only nightly is fuzzed)"
         default: ""
       seed:
         description: "Fuzzer seed (empty = time based)"
@@ -68,11 +68,11 @@ jobs:
           import json, os
           e = os.environ
           quick = e["EVENT"] == "push"
-          # push (nightly only, free runner slots): finer groups = more parallel jobs; daily runs: 7 groups x nightly+stable
-          wide = "arith;select;loops;control;recursion;enums;traits;borrows,asyncs;memory,shapes;abi,simd;collections,floats;unwind,generics,stdlib"
-          narrow = "arith,select;loops;control,recursion;enums,traits;borrows,asyncs;memory,shapes,simd,abi;collections,floats,unwind,generics,stdlib"
+          # push (nightly only, free runner slots): finer groups = more parallel jobs; daily runs: 8 groups, nightly only
+          wide = "arith;select;loops;control;recursion;enums;traits;borrows,asyncs;memory,shapes;abi,simd;collections,floats;unwind,generics;stdlib"
+          narrow = "arith,select;loops;control,recursion;enums,traits;borrows,asyncs;memory,shapes,simd,abi;collections,floats,unwind,generics;stdlib"
           groups = e["IN_GROUPS"] or (wide if quick else narrow)
-          toolchains = e["IN_TOOLCHAINS"] or ("nightly" if quick else "nightly,stable")
+          toolchains = e["IN_TOOLCHAINS"] or "nightly"
           inc = [{"toolchain": t.strip(), "strategies": g.strip(), "name": g.strip().replace(",", "+")}
                  for t in toolchains.split(",") for g in groups.split(";")]
           print("matrix=" + json.dumps({"include": inc}))
@@ -128,7 +128,7 @@ jobs:
 
       - name: Canaries
         continue-on-error: true
-        run: ./target/release/rs-compiler-fuzzer canary --lto --rustc "rustc +${{ matrix.toolchain }}" --configs O0,O3,O3-lto-fat --out fuzz-out
+        run: ./target/release/rs-compiler-fuzzer canary --lto --rustc "rustc +${{ matrix.toolchain }}" --configs O0,O1,O3,Oz,O3-lto-fat --out fuzz-out
 
       - name: Fuzz
         env:
