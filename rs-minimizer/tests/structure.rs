@@ -15,13 +15,13 @@ fn modules_are_hoisted_with_their_paths_and_uses() {
 }
 
 #[test]
-fn modules_whose_names_collide_stay_modules() {
+fn modules_whose_names_collide_are_hoisted_with_renamed_items() {
     let src = "mod a { pub fn f() -> u32 { 1 } }\nmod b { pub fn f() -> u32 { 2 } }\nfn main() { println!(\"{} {}\", a::f(), b::f()); }\n";
     let o = prints("1 2\n");
     check_oracle(&o, src);
     let out = hoist_modules(&o, src, &|_| false, &[]);
     assert_prints(&out, "1 2\n");
-    assert!(out.contains("mod a") || out.contains("mod b"), "at least one module must stay to keep the names apart:\n{out}");
+    assert!(!out.contains("mod a") && !out.contains("mod b"), "the colliding `f` is renamed, so no module has to stay:\n{out}");
 }
 
 #[test]

@@ -70,3 +70,13 @@ fn loops_over_empty_arrays_are_removed_whole() {
     assert!(!out.contains("in []") && !out.contains("in [ ]"), "{out}");
     assert_prints(&out, "0\n");
 }
+
+#[test]
+fn a_module_with_a_same_shaped_twin_of_a_root_item_is_hoisted_with_renames() {
+    let src = "struct G(u32);\nimpl Drop for G { fn drop(&mut self) { println!(\"root {}\", self.0) } }\nmod m {\n    use super::*;\n    struct G(u32);\n    impl Drop for G { fn drop(&mut self) { println!(\"mod {}\", self.0) } }\n    pub fn run() { let _g = G(2); }\n}\nfn main() { let _a = G(1); m::run(); }\n";
+    let o = prints("mod 2\nroot 1\n");
+    check_oracle(&o, src);
+    let out = rs_minimizer::modules::hoist_modules(&o, src, &|_| false, &["rustc".to_string()]);
+    assert!(!out.contains("mod m"), "{out}");
+    assert_prints(&out, "mod 2\nroot 1\n");
+}

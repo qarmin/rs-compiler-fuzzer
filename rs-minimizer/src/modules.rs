@@ -129,6 +129,62 @@ pub fn hoist_with_renames(src: &str, name: &str, rustc: &[String], work: &std::p
     None
 }
 
+/// `old` -> `new` for every whole word of `text` that is not a field, method or path segment (`x.old`, `a::old`) and not inside a string.
+fn rename_words(text: &str, old: &str, new: &str) -> String {
+    let b = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'"' {
+            let mut e = i + 1;
+            while e < b.len() && b[e] != b'"' {
+                e += if b[e] == b'\\' { 2 } else { 1 };
+            }
+            let e = (e + 1).min(b.len());
+            out.push_str(&text[i..e]);
+            i = e;
+        } else if text[i..].starts_with(old) && (i == 0 || !is_ident(b[i - 1])) && b.get(i + old.len()).is_none_or(|&c| !is_ident(c)) && !text[..i].trim_end().ends_with(['.', ':']) {
+            out.push_str(new);
+            i += old.len();
+        } else {
+            let ch = text[i..].chars().next().unwrap();
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+    out
+}
+
+/// Like `hoist_with_renames`, without the compiler: inside the module its own declaration shadows the glob import of the root, so
+/// every plain mention of the name is the module's item (the compiler cannot say so when the root has an item of the same shape).
+fn hoist_with_textual_renames(src: &str, name: &str) -> Option<String> {
+    let mut cur = src.to_string();
+    let mut done: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for _ in 0..64 {
+        let items = item_ranges(&cur);
+        let module = children(&items, None).into_iter().find(|i| i.kw == "mod" && i.name_in(&cur) == Some(name))?.clone();
+        let outside = format!("{}{}", &cur[..module.start], &cur[module.end..]);
+        let taken: std::collections::HashSet<&str> = outside.split(|c: char| !(c.is_alphanumeric() || c == '_')).filter(|w| !w.is_empty()).collect();
+        let clash = children(&items, Some(&module)).into_iter().find_map(|k| {
+            let (s, e) = k.name?;
+            (taken.contains(&cur[s..e]) && !done.contains(&cur[s..e])).then(|| cur[s..e].to_string())
+        });
+        let Some(old) = clash else { return Some(hoist(&cur, &[name.to_string()])) };
+        let new = fresh_name(&cur, &format!("{old}_{name}"));
+        let inside = rename_words(&cur[module.start..module.end], &old, &new);
+        let before = rename_words_after_path(&cur[..module.start], name, &old, &new);
+        let after = rename_words_after_path(&cur[module.end..], name, &old, &new);
+        cur = format!("{before}{inside}{after}");
+        done.insert(new);
+    }
+    None
+}
+
+/// `name::old` -> `name::new` outside the module.
+fn rename_words_after_path(text: &str, name: &str, old: &str, new: &str) -> String {
+    text.replace(&format!("{name}::{old}"), &format!("{name}::{new}"))
+}
+
 /// Top-level modules (those for which `keep` is false) hoisted into the crate root: all at once, else one at a time; a module
 /// whose names collide with the root's is hoisted after renaming the colliding items (needs `rustc`, empty skips that).
 pub fn hoist_modules(it: &dyn Oracle, src: &str, keep: &dyn Fn(&str) -> bool, rustc: &[String]) -> String {
@@ -155,7 +211,7 @@ pub fn hoist_modules(it: &dyn Oracle, src: &str, keep: &dyn Fn(&str) -> bool, ru
         let accepted = if plain != cur && it.check(&plain) {
             Some((plain, false))
         } else {
-            renamed().filter(|c| *c != cur && it.check(c)).map(|c| (c, true))
+            renamed().filter(|c| *c != cur && it.check(c)).or_else(|| hoist_with_textual_renames(&cur, n).filter(|c| *c != cur && it.check(c))).map(|c| (c, true))
         };
         if let Some((cand, renamed)) = accepted {
             info!("hoisted the module {n} into the crate root{}", if renamed { " (colliding names renamed)" } else { "" });
