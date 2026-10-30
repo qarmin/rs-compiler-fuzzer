@@ -397,6 +397,74 @@ fn empty_loops(src: &str) -> Vec<Edit> {
     out
 }
 
+/// `let h; .. h = x;` -> `.. let h = x;`: the one assignment at the declaration's own nesting level becomes the initialiser.
+fn deferred_lets(src: &str) -> Vec<Edit> {
+    let b = src.as_bytes();
+    let mut out = Vec::new();
+    for (at, _) in src.match_indices("let ") {
+        if at > 0 && is_ident(b[at - 1]) {
+            continue;
+        }
+        let name_start = crate::scan::skip_ws(b, at + 4);
+        let mut name_end = name_start;
+        while name_end < b.len() && is_ident(b[name_end]) {
+            name_end += 1;
+        }
+        let name = &src[name_start..name_end];
+        if name.is_empty() || name == "mut" {
+            continue;
+        }
+        let Some(semi) = src[name_end..].find(';').map(|p| name_end + p) else { continue };
+        let annotation = src[name_end..semi].trim();
+        if !(annotation.is_empty() || (annotation.starts_with(':') && !annotation.contains('='))) {
+            continue;
+        }
+        let mut depth = 0i32;
+        let mut k = semi + 1;
+        let mut found: Option<usize> = None;
+        let mut statement_start = true;
+        while k < b.len() && depth >= 0 {
+            match b[k] {
+                b'"' => {
+                    k += 1;
+                    while k < b.len() && b[k] != b'"' {
+                        k += if b[k] == b'\\' { 2 } else { 1 };
+                    }
+                    statement_start = false;
+                }
+                b'{' | b'(' | b'[' => {
+                    depth += 1;
+                    statement_start = b[k] == b'{';
+                }
+                b'}' | b')' | b']' => {
+                    depth -= 1;
+                    statement_start = b[k] == b'}';
+                }
+                b';' => statement_start = true,
+                c if c.is_ascii_whitespace() => {}
+                _ => {
+                    if statement_start && depth == 0 && src[k..].starts_with(name) && !b.get(k + name.len()).is_some_and(|&c| is_ident(c)) {
+                        let after = crate::scan::skip_ws(b, k + name.len());
+                        if b.get(after) == Some(&b'=') && b.get(after + 1) != Some(&b'=') {
+                            if found.is_some() {
+                                found = None;
+                                break;
+                            }
+                            found = Some(k);
+                        }
+                    }
+                    statement_start = false;
+                }
+            }
+            k += 1;
+        }
+        let Some(assign) = found else { continue };
+        let kept = format!("{}let {}{}", &src[semi + 1..assign], name, if annotation.is_empty() { String::new() } else { format!("{annotation}") });
+        out.push((at, assign + name.len(), kept));
+    }
+    out
+}
+
 /// `extern "win64" fn` -> `extern "C" fn` -> `fn`: the calling convention a generator picked is rarely what the bug needs.
 fn abi_weakening(src: &str) -> Vec<Edit> {
     let b = src.as_bytes();
@@ -528,8 +596,9 @@ fn folded_constants(src: &str) -> Vec<Edit> {
 /// The whole set, one category after the other.
 pub fn peep(it: &dyn Oracle, src: &str, deadline: Instant) -> String {
     let mut cur = src.to_string();
-    let passes: [(&str, fn(&str) -> Vec<Edit>); 13] = [
+    let passes: [(&str, fn(&str) -> Vec<Edit>); 14] = [
         ("keywords and compound assignments weakened", keyword_weakening),
+        ("deferred initialisers moved into the let", deferred_lets),
         ("loops over empty arrays removed", empty_loops),
         ("calling conventions weakened", abi_weakening),
         ("binary operators: one operand kept", binary_operands),

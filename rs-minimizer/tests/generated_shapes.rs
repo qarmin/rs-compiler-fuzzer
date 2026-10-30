@@ -112,3 +112,13 @@ fn a_block_statement_ending_in_an_expression_is_spliced_with_a_semicolon() {
     assert!(!out.contains("{\n        let a"), "{out}");
     assert_prints(&out, "8\n");
 }
+
+#[test]
+fn a_deferred_initialiser_moves_into_the_let() {
+    let src = "fn main() {\n    let h: u64;\n    let a = std::hint::black_box(3u64);\n    h = a * 2;\n    println!(\"{}\", h)\n}\n";
+    let o = prints("6\n");
+    check_oracle(&o, src);
+    let out = peep(&o, src, far());
+    assert!(!out.contains("let h;") && !out.contains("let h: u64;"), "{out}");
+    assert_prints(&out, "6\n");
+}
