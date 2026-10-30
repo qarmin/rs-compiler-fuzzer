@@ -747,10 +747,21 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
                             if effort == 2 && out.lines().count() > 60 && !crate::reduce::INTERRUPTED.load(std::sync::atomic::Ordering::Relaxed) {
                                 // the stored program may be a dead end: the same pipeline from the original, the smaller result wins
                                 info!("round {round}: a fresh start from the original program ({} lines) for comparison", case.lines().count());
+                                // its intermediate programs are bigger than the stored one: they must not overwrite the checkpoint
+                                if o.checkpoint {
+                                    crate::reduce::set_checkpoint(Some(dir.join("reduced.rs.fresh")));
+                                }
                                 let fresh = reduce_all(&it, &case, o.budget.saturating_sub(t0.elapsed()) / 2, &mut reduce_log);
+                                if o.checkpoint {
+                                    crate::reduce::set_checkpoint(Some(dir.join("reduced.rs")));
+                                    let _ = std::fs::remove_file(dir.join("reduced.rs.fresh"));
+                                }
                                 if fresh.len() < out.len() {
                                     reduce_log.push(format!("the fresh start got smaller: {} lines instead of {}", fresh.lines().count(), out.lines().count()));
                                     out = fresh;
+                                }
+                                if o.checkpoint {
+                                    let _ = std::fs::write(dir.join("reduced.rs"), &out);
                                 }
                             }
                             let changed = out != round_src;
