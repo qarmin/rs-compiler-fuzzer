@@ -417,13 +417,18 @@ fn deferred_lets(src: &str) -> Vec<Edit> {
         if at > 0 && is_ident(b[at - 1]) {
             continue;
         }
-        let name_start = crate::scan::skip_ws(b, at + 4);
+        let mut name_start = crate::scan::skip_ws(b, at + 4);
+        let mut mutable = false;
+        if src[name_start..].starts_with("mut ") {
+            mutable = true;
+            name_start = crate::scan::skip_ws(b, name_start + 4);
+        }
         let mut name_end = name_start;
         while name_end < b.len() && is_ident(b[name_end]) {
             name_end += 1;
         }
         let name = &src[name_start..name_end];
-        if name.is_empty() || name == "mut" {
+        if name.is_empty() {
             continue;
         }
         let Some(semi) = src[name_end..].find(';').map(|p| name_end + p) else { continue };
@@ -471,7 +476,7 @@ fn deferred_lets(src: &str) -> Vec<Edit> {
             k += 1;
         }
         let Some(assign) = found else { continue };
-        let kept = format!("{}let {}{}", &src[semi + 1..assign], name, if annotation.is_empty() { String::new() } else { format!("{annotation}") });
+        let kept = format!("{}let {}{}{}", &src[semi + 1..assign], if mutable { "mut " } else { "" }, name, annotation);
         out.push((at, assign + name.len(), kept));
     }
     out

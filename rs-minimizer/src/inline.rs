@@ -718,7 +718,10 @@ pub fn inline_calls(it: &dyn Oracle, src: &str, rustc: &[String], deadline: Inst
             }
             seen.push(&d.name);
             let group: Vec<&FnDef> = defs_now.iter().filter(|o| o.name == d.name && o.in_impl && o.in_trait && o.params.len() == d.params.len()).collect();
-            if group.len() < 2 || group.len() != defs_now.iter().filter(|o| o.name == d.name).count() {
+            // the other definitions of the name may only be default bodies in the trait itself
+            let others_are_defaults = defs_now.iter().filter(|o| o.name == d.name && !(o.in_impl && o.in_trait && o.params.len() == d.params.len())).all(|o| o.in_trait && !o.in_impl);
+            let total = defs_now.iter().filter(|o| o.name == d.name).count();
+            if total < 2 || !others_are_defaults {
                 continue;
             }
             let count = find_sites(&cur, group[0]).len();

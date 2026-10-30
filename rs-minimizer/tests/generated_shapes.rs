@@ -174,3 +174,25 @@ fn calls_of_a_trait_method_with_several_impls_are_inlined() {
     assert!(!main_body.contains(".feed("), "{out}");
     assert_prints(&out, "11\n");
 }
+
+#[test]
+fn a_trait_default_body_does_not_hide_the_only_impl_from_inlining() {
+    let src = "trait F { fn feed(&self, h: &mut u64) {} }\nimpl F for u32 { fn feed(&self, h: &mut u64) { *h ^= *self as u64 } }\nfn main() {\n    let mut h = 1u64;\n    6u32.feed(&mut h);\n    println!(\"{}\", h);\n}\n";
+    let o = prints("7\n");
+    check_oracle(&o, src);
+    rs_minimizer::control::set_parallel(8);
+    let out = rs_minimizer::inline::inline_calls(&o, src, &["rustc".to_string()], far());
+    let main_body = &out[out.find("fn main").unwrap()..];
+    assert!(!main_body.contains(".feed("), "{out}");
+    assert_prints(&out, "7\n");
+}
+
+#[test]
+fn a_deferred_mutable_initialiser_moves_into_the_let() {
+    let src = "fn main() {\n    let mut h;\n    let a = std::hint::black_box(3u64);\n    h = a * 2;\n    h += 1;\n    println!(\"{}\", h)\n}\n";
+    let o = prints("7\n");
+    check_oracle(&o, src);
+    let out = peep(&o, src, far());
+    assert!(!out.contains("let mut h;"), "{out}");
+    assert_prints(&out, "7\n");
+}
