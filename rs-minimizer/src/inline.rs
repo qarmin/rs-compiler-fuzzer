@@ -65,6 +65,28 @@ fn skip_string(b: &[u8], mut i: usize) -> usize {
     i
 }
 
+/// `text` with the insides of string literals and comments blanked out (same length), for searching the code only.
+pub(crate) fn code_only(text: &str) -> String {
+    let b = text.as_bytes();
+    let mut out = b.to_vec();
+    let mut i = 0;
+    while i < b.len() {
+        let end = if b[i] == b'"' {
+            skip_string(b, i).min(b.len() - 1)
+        } else if b[i] == b'/' && b.get(i + 1) == Some(&b'/') {
+            text[i..].find('\n').map_or(b.len() - 1, |n| i + n - 1)
+        } else if b[i] == b'/' && b.get(i + 1) == Some(&b'*') {
+            text[i + 2..].find("*/").map_or(b.len() - 1, |n| i + n + 3)
+        } else {
+            i += 1;
+            continue;
+        };
+        out[i + 1..end].iter_mut().filter(|c| **c != b'\n').for_each(|c| *c = b' ');
+        i = end + 1;
+    }
+    String::from_utf8(out).unwrap_or_else(|_| text.to_string())
+}
+
 pub(crate) fn has_word(text: &str, word: &str) -> bool {
     let b = text.as_bytes();
     text.match_indices(word).any(|(i, _)| (i == 0 || !is_ident(b[i - 1])) && b.get(i + word.len()).is_none_or(|&c| !is_ident(c)))
@@ -132,7 +154,9 @@ pub(crate) fn generic_names(src: &str, open: usize) -> (Vec<String>, usize) {
     (names, k)
 }
 
-fn parse_fn(src: &str, items: &[Item], item: &Item) -> Option<FnDef> {
+/// `strict` keeps what a pasted body cannot contain (`extern`/`async` functions, `return`, `?`, recursion); the parameter pass
+/// does not paste anything and takes every function.
+fn parse_fn(src: &str, items: &[Item], item: &Item, strict: bool) -> Option<FnDef> {
     let b = src.as_bytes();
     if item.kw != "fn" || b.get(item.header_end) != Some(&b'{') || b[item.end - 1] != b'}' {
         return None;
@@ -141,7 +165,7 @@ fn parse_fn(src: &str, items: &[Item], item: &Item) -> Option<FnDef> {
     let name = src[ns..ne].to_string();
     let header_prefix = &src[item.start..ns];
     let unsafe_fn = has_word(header_prefix, "unsafe");
-    if has_word(header_prefix, "async") || has_word(header_prefix, "extern") {
+    if strict && (has_word(header_prefix, "async") || has_word(header_prefix, "extern")) {
         return None;
     }
     let mut i = skip_ws(b, ne);
@@ -192,14 +216,15 @@ fn parse_fn(src: &str, items: &[Item], item: &Item) -> Option<FnDef> {
         params.push(Param { name: ident.to_string(), pos, mutable, ty: ty.trim().to_string() });
     }
     let body = src[item.header_end + 1..item.end - 1].to_string();
-    for banned in ["return", "async", "await", "yield"] {
-        if has_word(&body, banned) {
+    if strict {
+        let code = code_only(&body);
+        if ["return", "async", "await", "yield"].iter().any(|w| has_word(&code, w)) {
             return None;
         }
-    }
-    let calls_itself = body.match_indices(&format!("{name}(")).any(|(i, _)| i == 0 || !is_ident(body.as_bytes()[i - 1]));
-    if body.contains('?') || calls_itself {
-        return None;
+        let calls_itself = code.match_indices(&format!("{name}(")).any(|(i, _)| i == 0 || !is_ident(code.as_bytes()[i - 1]));
+        if code.contains('?') || calls_itself {
+            return None;
+        }
     }
     let parent = items.iter().filter(|p| p.contains(item)).max_by_key(|p| p.start);
     let (mut self_ty, mut in_trait, mut in_impl) = (None, false, false);
@@ -229,7 +254,13 @@ fn parse_fn(src: &str, items: &[Item], item: &Item) -> Option<FnDef> {
 
 pub(crate) fn defs_of(src: &str) -> Vec<FnDef> {
     let items = item_ranges(src);
-    items.iter().filter_map(|i| parse_fn(src, &items, i)).collect()
+    items.iter().filter_map(|i| parse_fn(src, &items, i, true)).collect()
+}
+
+/// Like `defs_of`, for passes that edit signatures and call sites but never paste a body.
+pub(crate) fn all_defs_of(src: &str) -> Vec<FnDef> {
+    let items = item_ranges(src);
+    items.iter().filter_map(|i| parse_fn(src, &items, i, false)).collect()
 }
 
 #[derive(Clone)]
@@ -695,7 +726,7 @@ pub fn substitute_lets(it: &dyn Oracle, src: &str, deadline: Instant) -> String 
     for _ in 0..3 {
         let before = cur.clone();
         let mut spots: Vec<usize> = Vec::new();
-        for def in defs_of(&cur) {
+        for def in all_defs_of(&cur) {
             spots.extend(simple_lets(&def.body, def.item.header_end + 1));
         }
         spots.sort();

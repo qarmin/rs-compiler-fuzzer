@@ -3,7 +3,7 @@
 
 use crate::control::{expired, par_checks};
 use crate::exprs::greedy_edits;
-use crate::inline::{defs_of, find_sites};
+use crate::inline::{all_defs_of, find_sites};
 use crate::items::item_ranges;
 use crate::oracle::Oracle;
 use crate::par::par_map;
@@ -178,7 +178,7 @@ pub fn remove_params(it: &dyn Oracle, src: &str, deadline: Instant) -> String {
         if expired(deadline) {
             break;
         }
-        let defs = defs_of(&cur);
+        let defs = all_defs_of(&cur);
         let mut cands: Vec<String> = Vec::new();
         for d in defs.iter().filter(|d| d.name != "main" && !d.in_trait && defs.iter().filter(|o| o.name == d.name).count() == 1) {
             let b = cur.as_bytes();

@@ -153,6 +153,12 @@ fn binary_operands(src: &str) -> Vec<Edit> {
         if cuts.is_empty() {
             continue;
         }
+        // `<` and `>` are not in BINOPS (generics), a space on both sides makes them comparisons
+        let compares = cuts.iter().any(|&(a, z)| matches!(&text[a..z], "==" | "!=" | "<=" | ">=" | "&&" | "||")) || text.contains(" < ") || text.contains(" > ");
+        if compares {
+            out.push((s, e, " true ".to_string()));
+            out.push((s, e, " false ".to_string()));
+        }
         let mut bounds = vec![0usize];
         for &(a, z) in &cuts {
             bounds.push(a);
@@ -358,6 +364,64 @@ fn keyword_weakening(src: &str) -> Vec<Edit> {
     out
 }
 
+/// `for x in [] { .. }` never runs: the loop goes whole (the compiler does not report it as dead code, and with all of them gone in
+/// one oracle call a generated harness loses most of its cases at once).
+fn empty_loops(src: &str) -> Vec<Edit> {
+    let b = src.as_bytes();
+    let mut out = Vec::new();
+    for (at, _) in src.match_indices("for") {
+        if (at > 0 && is_ident(b[at - 1])) || b.get(at + 3).is_none_or(|&c| is_ident(c)) {
+            continue;
+        }
+        let Some(p) = src[at..].find(" in ") else { continue };
+        let head = &src[at + 3..at + p];
+        if head.contains(['{', '}', ';']) {
+            continue;
+        }
+        let iter = crate::scan::skip_ws(b, at + p + 4);
+        if b.get(iter) != Some(&b'[') {
+            continue;
+        }
+        let Some(arr) = matching(b, iter) else { continue };
+        if !src[iter + 1..arr].trim().is_empty() {
+            continue;
+        }
+        let open = crate::scan::skip_ws(b, arr + 1);
+        if b.get(open) != Some(&b'{') {
+            continue;
+        }
+        if let Some(close) = matching(b, open) {
+            out.push((at, close + 1, String::new()));
+        }
+    }
+    out
+}
+
+/// `extern "win64" fn` -> `extern "C" fn` -> `fn`: the calling convention a generator picked is rarely what the bug needs.
+fn abi_weakening(src: &str) -> Vec<Edit> {
+    let b = src.as_bytes();
+    let mut out = Vec::new();
+    for (at, _) in src.match_indices("extern") {
+        if at > 0 && is_ident(b[at - 1]) {
+            continue;
+        }
+        let lit = crate::scan::skip_ws(b, at + 6);
+        if b.get(lit) != Some(&b'"') {
+            continue;
+        }
+        let Some(close) = src[lit + 1..].find('"').map(|p| lit + 1 + p) else { continue };
+        let after = crate::scan::skip_ws(b, close + 1);
+        if !src[after..].starts_with("fn") || b.get(after + 2).is_some_and(|c| is_ident(*c)) {
+            continue;
+        }
+        if &src[lit..=close] != "\"C\"" {
+            out.push((at, close + 1, "extern \"C\"".to_string()));
+        }
+        out.push((at, after, String::new()));
+    }
+    out
+}
+
 fn int_literals(src: &str) -> Vec<(usize, usize, u128, String)> {
     let b = src.as_bytes();
     let mut out = Vec::new();
@@ -406,6 +470,13 @@ fn smaller_integers(src: &str) -> Vec<Edit> {
                 out.push((s, e, format!("{cand}{suffix}")));
             }
         }
+        if suffix.starts_with('u') && v > 1 {
+            // the all-ones value is what a long literal usually stands for
+            let max = format!("{suffix}::MAX");
+            if max.len() < e - s {
+                out.push((s, e, max));
+            }
+        }
     }
     out
 }
@@ -420,6 +491,19 @@ fn folded_constants(src: &str) -> Vec<Edit> {
             continue;
         }
         let between = src[a.1..b.0].trim();
+        let comparison = match between {
+            "==" => Some(a.2 == b.2),
+            "!=" => Some(a.2 != b.2),
+            "<" => Some(a.2 < b.2),
+            "<=" => Some(a.2 <= b.2),
+            ">" => Some(a.2 > b.2),
+            ">=" => Some(a.2 >= b.2),
+            _ => None,
+        };
+        if let Some(v) = comparison {
+            out.push((a.0, b.1, v.to_string()));
+            continue;
+        }
         let value = match between {
             "+" => a.2.checked_add(b.2),
             "-" => a.2.checked_sub(b.2),
@@ -444,8 +528,10 @@ fn folded_constants(src: &str) -> Vec<Edit> {
 /// The whole set, one category after the other.
 pub fn peep(it: &dyn Oracle, src: &str, deadline: Instant) -> String {
     let mut cur = src.to_string();
-    let passes: [(&str, fn(&str) -> Vec<Edit>); 11] = [
+    let passes: [(&str, fn(&str) -> Vec<Edit>); 13] = [
         ("keywords and compound assignments weakened", keyword_weakening),
+        ("loops over empty arrays removed", empty_loops),
+        ("calling conventions weakened", abi_weakening),
         ("binary operators: one operand kept", binary_operands),
         ("parenthesised groups and blocks replaced by 0", groups_to_zero),
         ("calls replaced by values", calls_to_values),
