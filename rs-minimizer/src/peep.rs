@@ -347,6 +347,18 @@ fn deref_of_borrow(src: &str) -> Vec<Edit> {
         let inner = src[at + 3..close].trim_start_matches("mut ");
         out.push((at, close + 1, format!("({inner})")));
     }
+    // `*&mut name` / `*&name` without parentheses
+    for (at, _) in src.match_indices("*&") {
+        if at > 0 && (is_ident(b[at - 1]) || matches!(b[at - 1], b')' | b']')) {
+            continue;
+        }
+        let rest = src[at + 2..].trim_start_matches("mut ");
+        let name_start = src.len() - rest.len();
+        let name_len = rest.bytes().take_while(|c| is_ident(*c)).count();
+        if name_len > 0 {
+            out.push((at, name_start + name_len, src[name_start..name_start + name_len].to_string()));
+        }
+    }
     out
 }
 

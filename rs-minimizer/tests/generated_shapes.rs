@@ -141,3 +141,13 @@ fn literals_after_a_string_are_still_shrunk() {
     let out = peep(&o, src, far());
     assert!(!out.contains("1000") && !out.contains("100u32"), "{out}");
 }
+
+#[test]
+fn a_dereferenced_borrow_of_a_name_is_the_name() {
+    let src = "fn main() {\n    let mut h = 1u32;\n    *&mut h = 5;\n    println!(\"{}\", *&h);\n}\n";
+    let o = prints("5\n");
+    check_oracle(&o, src);
+    let out = peep(&o, src, far());
+    assert!(!out.contains("*&"), "{out}");
+    assert_prints(&out, "5\n");
+}
