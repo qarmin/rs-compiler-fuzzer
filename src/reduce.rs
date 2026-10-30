@@ -180,6 +180,47 @@ pub fn prefer_println(it: &dyn Oracle, src: &str) -> String {
     if it.check(&cand) { cand } else { src.to_string() }
 }
 
+/// The batch harness hashes a value with `H`: `let mut h = H(0); h.feed(X); println!("{:016x}", h.0)`. A report reads better as
+/// `println!("{}", X)` without the struct (kept only if the program is still interesting).
+pub fn drop_hash_harness(it: &dyn Oracle, src: &str) -> String {
+    let single = |pat: &str| -> Option<usize> {
+        let at = src.find(pat)?;
+        src[at + pat.len()..].find(pat).is_none().then_some(at)
+    };
+    let (Some(feed), Some(decl), Some(print)) = (single("h.feed("), single("let mut h = H(0);"), single("println!(\"{:016x}\", h.0)")) else { return src.to_string() };
+    let b = src.as_bytes();
+    let open = feed + "h.feed".len();
+    let Some(close) = matching(b, open) else { return src.to_string() };
+    let arg = src[open + 1..close].trim().to_string();
+    let after_feed = src[close + 1..].trim_start().strip_prefix(';').map_or(close + 1, |r| src.len() - r.len());
+    if !(decl < feed && after_feed <= print) {
+        return src.to_string();
+    }
+    let print_end = print + "println!(\"{:016x}\", h.0)".len();
+    let mut out = String::with_capacity(src.len());
+    out.push_str(&src[..decl]);
+    out.push_str(&src[decl + "let mut h = H(0);".len()..feed]);
+    out.push_str(&src[after_feed..print]);
+    out.push_str(&format!("println!(\"{{}}\", {arg})"));
+    out.push_str(&src[print_end..]);
+    if !it.check(&out) {
+        return src.to_string();
+    }
+    // the struct and its impl are dead now
+    let items = rs_minimizer::items::item_ranges(&out);
+    let mut cut: Vec<(usize, usize)> = items
+        .iter()
+        .filter(|i| (i.kw == "struct" && i.name_in(&out) == Some("H")) || (i.kw == "impl" && out[i.start..i.header_end].split_whitespace().eq(["impl", "H"])))
+        .map(|i| (i.start, i.end))
+        .collect();
+    cut.sort();
+    let mut slim = out.clone();
+    for (s, e) in cut.iter().rev() {
+        slim.replace_range(*s..*e, "");
+    }
+    if slim != out && it.check(&slim) { slim } else { out }
+}
+
 /// `use std::hint::black_box as a;` + `let a = a(1);` reads badly (the reducers shorten names): call it `black_box`
 /// again when the program stays interesting.
 pub fn unalias_black_box(it: &dyn Oracle, src: &str) -> String {
@@ -225,8 +266,37 @@ pub fn reduce_all(it: &Interest, src: &str, budget: Duration, log: &mut ReduceLo
                 }
                 _ => None,
             },
-            Stage::Polish => Some(prefer_println(it, &unalias_black_box(it, cur))),
+            Stage::Polish => Some(prefer_println(it, &unalias_black_box(it, &drop_hash_harness(it, cur)))),
         }
     };
     rs_minimizer::minimize(it, src, &opts, log, &mut hook)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rs_minimizer::Cached;
+
+    const HARNESS: &str = "use std::hint::black_box;\nstruct H(u64);\nimpl H {\n    #[inline(never)]\n    fn feed(&mut self, v: u64) {\n        self.0 = v\n    }\n}\nfn main() {\n    let mut h = H(0);\n    h.feed({\n        let d = black_box(5u64);\n        d + 1\n    });\n    println!(\"{:016x}\", h.0)\n}\n";
+
+    #[test]
+    fn the_hash_harness_is_replaced_by_a_println() {
+        let o = Cached::new(|s: &str| s.contains("black_box") && s.contains("d + 1") && s.contains("fn main"));
+        let out = drop_hash_harness(&o, HARNESS);
+        assert!(!out.contains("struct H") && !out.contains("impl H") && !out.contains("feed"), "{out}");
+        assert!(out.contains("println!(\"{}\", {"), "{out}");
+    }
+
+    #[test]
+    fn the_harness_stays_when_the_oracle_needs_it() {
+        let o = Cached::new(|s: &str| s.contains("h.feed("));
+        assert_eq!(drop_hash_harness(&o, HARNESS), HARNESS);
+    }
+
+    #[test]
+    fn a_program_without_the_harness_is_untouched() {
+        let o = Cached::new(|_: &str| true);
+        let src = "fn main() { println!(\"{}\", 1) }\n";
+        assert_eq!(drop_hash_harness(&o, src), src);
+    }
 }
