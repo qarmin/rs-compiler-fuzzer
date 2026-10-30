@@ -709,6 +709,35 @@ pub fn inline_calls(it: &dyn Oracle, src: &str, rustc: &[String], deadline: Inst
                 }
             }
         }
+        // trait methods with several impls: at one call site at a time every impl is tried, the compiler rejects the wrong ones
+        let defs_now = defs_of(&cur);
+        let mut seen: Vec<&str> = Vec::new();
+        for d in defs_now.iter().filter(|d| d.in_impl && d.in_trait && d.recv.is_some()) {
+            if seen.contains(&d.name.as_str()) {
+                continue;
+            }
+            seen.push(&d.name);
+            let group: Vec<&FnDef> = defs_now.iter().filter(|o| o.name == d.name && o.in_impl && o.in_trait && o.params.len() == d.params.len()).collect();
+            if group.len() < 2 || group.len() != defs_now.iter().filter(|o| o.name == d.name).count() {
+                continue;
+            }
+            let count = find_sites(&cur, group[0]).len();
+            for site in (0..count).rev() {
+                if expired(deadline) {
+                    return cur;
+                }
+                let text = cur.as_str();
+                let cands: Vec<Option<String>> = group.iter().flat_map(|g| VARIANTS.iter().map(move |v| inline_def(text, g, *v, Some(site)))).collect();
+                let res = par_map(&cands, width, |c| c.as_ref().is_some_and(|c| it.check(c)));
+                if let Some(p) = res.iter().position(|&ok| ok) {
+                    info!("inlined one call of the trait method `{}` (one of {} impls)", d.name, group.len());
+                    cur = cands[p].clone().unwrap();
+                    crate::control::rebase_checkpoint(&cur);
+                    done += 1;
+                    break;
+                }
+            }
+        }
         info!("inlining, round {round}: {done} function(s) inlined ({} -> {} lines)", before.lines().count(), cur.lines().count());
         if cur == before {
             break;

@@ -162,3 +162,15 @@ fn an_unused_parameter_goes_from_a_function_called_through_a_pointer() {
     assert!(out.contains("fn(i128, u32)"), "{out}");
     assert_prints(&out, "7\n");
 }
+
+#[test]
+fn calls_of_a_trait_method_with_several_impls_are_inlined() {
+    let src = "trait F { fn feed(&self, h: &mut u64); }\nimpl F for u32 { fn feed(&self, h: &mut u64) { *h ^= *self as u64 } }\nimpl F for u64 { fn feed(&self, h: &mut u64) { *h = h.wrapping_add(*self) } }\nfn main() {\n    let mut h = 1u64;\n    5u32.feed(&mut h);\n    7u64.feed(&mut h);\n    println!(\"{}\", h);\n}\n";
+    let o = prints("11\n");
+    check_oracle(&o, src);
+    rs_minimizer::control::set_parallel(8);
+    let out = rs_minimizer::inline::inline_calls(&o, src, &["rustc".to_string()], far());
+    let main_body = &out[out.find("fn main").unwrap()..];
+    assert!(!main_body.contains(".feed("), "{out}");
+    assert_prints(&out, "11\n");
+}
