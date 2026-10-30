@@ -43,6 +43,12 @@ pub fn matching(b: &[u8], open: usize) -> Option<usize> {
 /// Start of the postfix expression (`a.b(c)[d].e`) that ends right before `end`.
 pub fn postfix_start(b: &[u8], mut end: usize) -> usize {
     loop {
+        // a chain continued on the next line: `x\n    .f()`
+        if b.get(end) == Some(&b'.') {
+            while end > 0 && b[end - 1].is_ascii_whitespace() {
+                end -= 1;
+            }
+        }
         if end == 0 {
             return 0;
         }

@@ -196,3 +196,15 @@ fn a_deferred_mutable_initialiser_moves_into_the_let() {
     assert!(!out.contains("let mut h;"), "{out}");
     assert_prints(&out, "7\n");
 }
+
+#[test]
+fn a_method_call_on_a_multiline_chain_is_inlined() {
+    let src = "trait F { fn feed(&self, h: &mut u64); }\nimpl F for i16 { fn feed(&self, h: &mut u64) { *h = *h ^ *self as u64 } }\nfn main() {\n    let mut h = 1u64;\n    (3i16)\n        .wrapping_add(1)\n        .checked_mul(2)\n        .unwrap_or(0)\n        .feed(&mut h);\n    println!(\"{}\", h);\n}\n";
+    let o = prints("9\n");
+    check_oracle(&o, src);
+    rs_minimizer::control::set_parallel(4);
+    let out = rs_minimizer::inline::inline_calls(&o, src, &["rustc".to_string()], far());
+    let main_body = &out[out.find("fn main").unwrap()..];
+    assert!(!main_body.contains(".feed("), "{out}");
+    assert_prints(&out, "9\n");
+}
