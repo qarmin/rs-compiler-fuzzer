@@ -219,3 +219,13 @@ fn a_loop_over_one_element_and_an_identity_match_go() {
     assert!(!out.contains("for ") && !out.contains("match "), "{out}");
     assert_prints(&out, "8\n");
 }
+
+#[test]
+fn a_match_on_a_literal_picks_its_arm() {
+    let src = "fn main() {\n    let v = match 0 { 0 => 5u32 + 1, _ => 9 };\n    println!(\"{}\", v);\n}\n";
+    let o = prints("6\n");
+    check_oracle(&o, src);
+    let out = rs_minimizer::exprs::flatten_blocks(&o, src, far());
+    assert!(!out.contains("match"), "{out}");
+    assert_prints(&out, "6\n");
+}

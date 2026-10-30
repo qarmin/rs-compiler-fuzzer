@@ -464,6 +464,18 @@ fn trivial_matches(src: &str) -> Vec<(usize, usize, String)> {
             continue;
         }
         let Some(close) = matching(b, k) else { continue };
+        // `match 0 { 0 => a, _ => b }`: the arm whose pattern is the literal scrutinee
+        let scrutinee_text = src[at + 5..k].trim();
+        if !scrutinee_text.is_empty() && scrutinee_text.bytes().all(|c| c.is_ascii_digit()) {
+            let picked = top_args(src, k, close).into_iter().find_map(|(s, e)| {
+                let (pat, expr) = src[s..e].split_once("=>")?;
+                (pat.trim() == scrutinee_text && !expr.contains("=>")).then(|| expr.trim().trim_end_matches(',').trim().to_string())
+            });
+            if let Some(expr) = picked.filter(|e| !e.is_empty()) {
+                out.push((at, close + 1, format!("({expr})")));
+                continue;
+            }
+        }
         let body = src[k + 1..close].trim();
         // `_ => e`, and `name => name` (the scrutinee itself)
         let arm = match body.strip_prefix("_ =>") {
