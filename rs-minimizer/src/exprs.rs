@@ -417,7 +417,13 @@ pub fn flatten_blocks(it: &dyn Oracle, src: &str, deadline: Instant) -> String {
                 if let Some(close) = matching(b, i) {
                     let inner = &cur[i + 1..close];
                     match prev {
-                        Some(b';') | Some(b'{') | Some(b'}') => edits.push((i, close + 1, inner.to_string())),
+                        Some(b';') | Some(b'{') | Some(b'}') => {
+                            // the block's last expression becomes a statement when more code follows
+                            let more = cur[close + 1..].trim_start().bytes().next().is_some_and(|c| c != b'}');
+                            let t = inner.trim_end();
+                            let text = if more && !t.is_empty() && !t.ends_with(';') && !t.ends_with('}') { format!("{t};") } else { inner.to_string() };
+                            edits.push((i, close + 1, text));
+                        }
                         Some(b'=') | Some(b'(') | Some(b',') if !inner.contains(';') && !inner.trim().is_empty() && !inner.contains("let ") => edits.push((i, close + 1, format!("({})", inner.trim()))),
                         _ => {}
                     }

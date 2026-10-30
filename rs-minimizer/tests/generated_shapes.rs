@@ -102,3 +102,13 @@ fn a_unit_assignment_and_a_mutable_reborrow_binding_go() {
     assert!(!out.contains("() ="), "{out}");
     assert_prints(&out, "9\n");
 }
+
+#[test]
+fn a_block_statement_ending_in_an_expression_is_spliced_with_a_semicolon() {
+    let src = "fn main() {\n    let h;\n    {\n        let a = 4u32;\n        h = a * 2\n    }\n    println!(\"{}\", h)\n}\n";
+    let o = prints("8\n");
+    check_oracle(&o, src);
+    let out = rs_minimizer::exprs::flatten_blocks(&o, src, far());
+    assert!(!out.contains("{\n        let a"), "{out}");
+    assert_prints(&out, "8\n");
+}
