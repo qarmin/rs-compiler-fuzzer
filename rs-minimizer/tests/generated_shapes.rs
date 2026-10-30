@@ -122,3 +122,22 @@ fn a_deferred_initialiser_moves_into_the_let() {
     assert!(!out.contains("let h;") && !out.contains("let h: u64;"), "{out}");
     assert_prints(&out, "6\n");
 }
+
+#[test]
+fn a_cast_of_a_literal_is_a_literal() {
+    let src = "fn main() {\n    let a = std::hint::black_box(3u32);\n    println!(\"{}\", a.rotate_left(32u8 as u32) + (7 as u32));\n}\n";
+    let o = prints("10\n");
+    check_oracle(&o, src);
+    let out = peep(&o, src, far());
+    assert!(!out.contains(" as "), "{out}");
+    assert_prints(&out, "10\n");
+}
+
+#[test]
+fn literals_after_a_string_are_still_shrunk() {
+    let src = "fn main() {\n    println!(\"{}\", 1000u32 / 10);\n    println!(\"{}\", 100u32 + 0);\n}\n";
+    let o = rs_minimizer::Cached::new(|s: &str| s.contains("println!") && run_program(s).is_some());
+    check_oracle(&o, src);
+    let out = peep(&o, src, far());
+    assert!(!out.contains("1000") && !out.contains("100u32"), "{out}");
+}

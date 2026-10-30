@@ -503,6 +503,7 @@ fn int_literals(src: &str) -> Vec<(usize, usize, u128, String)> {
                 }
                 i += 1;
             }
+            i += 1;
         } else if b[i].is_ascii_digit() && (i == 0 || !(is_ident(b[i - 1]) || b[i - 1] == b'.')) {
             let s = i;
             while i < b.len() && (b[i].is_ascii_digit() || b[i] == b'_') {
@@ -544,6 +545,29 @@ fn smaller_integers(src: &str) -> Vec<Edit> {
             if max.len() < e - s {
                 out.push((s, e, max));
             }
+        }
+    }
+    out
+}
+
+/// `32u8 as u32` -> `32u32`, `0 as i32` -> `0i32`: a cast of a literal is a literal of the target type.
+fn folded_casts(src: &str) -> Vec<Edit> {
+    const INTS: [&str; 12] = ["u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128", "isize"];
+    let b = src.as_bytes();
+    let mut out = Vec::new();
+    for (s, e, v, _) in int_literals(src) {
+        let at = crate::scan::skip_ws(b, e);
+        if !src[at..].starts_with("as") || b.get(at + 2).is_none_or(|c| is_ident(*c)) {
+            continue;
+        }
+        let ty_start = crate::scan::skip_ws(b, at + 2);
+        let mut ty_end = ty_start;
+        while ty_end < b.len() && is_ident(b[ty_end]) {
+            ty_end += 1;
+        }
+        let ty = &src[ty_start..ty_end];
+        if INTS.contains(&ty) {
+            out.push((s, ty_end, format!("{v}{ty}")));
         }
     }
     out
@@ -596,8 +620,9 @@ fn folded_constants(src: &str) -> Vec<Edit> {
 /// The whole set, one category after the other.
 pub fn peep(it: &dyn Oracle, src: &str, deadline: Instant) -> String {
     let mut cur = src.to_string();
-    let passes: [(&str, fn(&str) -> Vec<Edit>); 14] = [
+    let passes: [(&str, fn(&str) -> Vec<Edit>); 15] = [
         ("keywords and compound assignments weakened", keyword_weakening),
+        ("casts of literals folded", folded_casts),
         ("deferred initialisers moved into the let", deferred_lets),
         ("loops over empty arrays removed", empty_loops),
         ("calling conventions weakened", abi_weakening),
