@@ -208,3 +208,14 @@ fn a_method_call_on_a_multiline_chain_is_inlined() {
     assert!(!main_body.contains(".feed("), "{out}");
     assert_prints(&out, "9\n");
 }
+
+#[test]
+fn a_loop_over_one_element_and_an_identity_match_go() {
+    let src = "fn f(x: u32) -> u32 { x * 2 }\nfn main() {\n    for s in [4u32] {\n        println!(\"{}\", match f(s) { k => k });\n    }\n}\n";
+    let o = prints("8\n");
+    check_oracle(&o, src);
+    let out = peep(&o, src, far());
+    let out = rs_minimizer::exprs::flatten_blocks(&o, &out, far());
+    assert!(!out.contains("for ") && !out.contains("match "), "{out}");
+    assert_prints(&out, "8\n");
+}

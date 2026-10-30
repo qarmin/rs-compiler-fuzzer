@@ -482,6 +482,35 @@ fn deferred_lets(src: &str) -> Vec<Edit> {
     out
 }
 
+/// `for x in [v] { .. }` -> `let x = v; { .. }`: a loop that runs once.
+fn single_iteration_loops(src: &str) -> Vec<Edit> {
+    let b = src.as_bytes();
+    let mut out = Vec::new();
+    for (at, _) in src.match_indices("for") {
+        if (at > 0 && is_ident(b[at - 1])) || b.get(at + 3).is_none_or(|&c| is_ident(c)) {
+            continue;
+        }
+        let Some(p) = src[at..].find(" in ") else { continue };
+        let pat = src[at + 3..at + p].trim();
+        if pat.is_empty() || pat.contains(['{', '}', ';']) {
+            continue;
+        }
+        let iter = crate::scan::skip_ws(b, at + p + 4);
+        if b.get(iter) != Some(&b'[') {
+            continue;
+        }
+        let Some(arr) = matching(b, iter) else { continue };
+        let items = top_args(src, iter, arr);
+        let open = crate::scan::skip_ws(b, arr + 1);
+        if items.len() != 1 || src[iter + 1..arr].contains(';') || b.get(open) != Some(&b'{') {
+            continue;
+        }
+        let (s, e) = items[0];
+        out.push((at, arr + 1, format!("let {pat} = {};", src[s..e].trim())));
+    }
+    out
+}
+
 /// `extern "win64" fn` -> `extern "C" fn` -> `fn`: the calling convention a generator picked is rarely what the bug needs.
 fn abi_weakening(src: &str) -> Vec<Edit> {
     let b = src.as_bytes();
@@ -637,8 +666,9 @@ fn folded_constants(src: &str) -> Vec<Edit> {
 /// The whole set, one category after the other.
 pub fn peep(it: &dyn Oracle, src: &str, deadline: Instant) -> String {
     let mut cur = src.to_string();
-    let passes: [(&str, fn(&str) -> Vec<Edit>); 15] = [
+    let passes: [(&str, fn(&str) -> Vec<Edit>); 16] = [
         ("keywords and compound assignments weakened", keyword_weakening),
+        ("loops that run once unrolled", single_iteration_loops),
         ("casts of literals folded", folded_casts),
         ("deferred initialisers moved into the let", deferred_lets),
         ("loops over empty arrays removed", empty_loops),

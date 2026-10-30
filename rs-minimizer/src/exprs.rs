@@ -464,7 +464,23 @@ fn trivial_matches(src: &str) -> Vec<(usize, usize, String)> {
             continue;
         }
         let Some(close) = matching(b, k) else { continue };
-        let Some(arm) = src[k + 1..close].trim().strip_prefix("_ =>") else { continue };
+        let body = src[k + 1..close].trim();
+        // `_ => e`, and `name => name` (the scrutinee itself)
+        let arm = match body.strip_prefix("_ =>") {
+            Some(arm) => Some(arm),
+            None => body.split_once("=>").filter(|(pat, rest)| {
+                let pat = pat.trim();
+                !pat.is_empty() && pat.bytes().all(is_ident) && rest.trim().trim_end_matches(',').trim() == pat
+            }).map(|_| ""),
+        };
+        let Some(arm) = arm else { continue };
+        if arm.is_empty() {
+            let scrutinee = src[at + 5..k].trim();
+            if !scrutinee.is_empty() {
+                out.push((at, close + 1, format!("({scrutinee})")));
+            }
+            continue;
+        }
         let arm = arm.trim().trim_end_matches(',').trim();
         if !arm.is_empty() && !arm.contains("=>") {
             out.push((at, close + 1, format!("({arm})")));
