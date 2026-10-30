@@ -80,3 +80,13 @@ fn a_module_with_a_same_shaped_twin_of_a_root_item_is_hoisted_with_renames() {
     assert!(!out.contains("mod m"), "{out}");
     assert_prints(&out, "mod 2\nroot 1\n");
 }
+
+#[test]
+fn a_catch_unwind_statement_loses_its_wrapper() {
+    let src = "fn main() {\n    let mut h = 1u64;\n    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {\n        h += 2;\n        h * 3\n    }));\n    println!(\"{}\", h)\n}\n";
+    let o = prints("3\n");
+    check_oracle(&o, src);
+    let out = rs_minimizer::unroll::drop_catch_unwind(&o, src);
+    assert!(!out.contains("catch_unwind"), "{out}");
+    assert_prints(&out, "3\n");
+}

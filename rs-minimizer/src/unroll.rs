@@ -232,7 +232,7 @@ pub fn expand_macros(it: &dyn Oracle, src: &str) -> String {
 
 const CATCH: &str = "std::panic::catch_unwind(std::panic::AssertUnwindSafe(||";
 
-/// Each `catch_unwind(AssertUnwindSafe(|| X)).is_ok()` as `{ X; true }`.
+/// Each `catch_unwind(AssertUnwindSafe(|| X)).is_ok()` as `{ X; true }`, and one used as a statement as `{ X }`.
 fn without_catch_unwind(src: &str, only: Option<usize>) -> (String, usize) {
     let b = src.as_bytes();
     let mut sites: Vec<(usize, usize, String)> = Vec::new();
@@ -244,11 +244,15 @@ fn without_catch_unwind(src: &str, only: Option<usize>) -> (String, usize) {
         let Some(inner_close) = matching(b, assert_open) else { continue };
         let Some(outer_close) = matching(b, at + "std::panic::catch_unwind".len()) else { continue };
         let tail = ".is_ok()";
-        if !src[outer_close + 1..].starts_with(tail) || inner_close + 1 != outer_close {
+        if inner_close + 1 != outer_close {
             continue;
         }
         let x = src[at + CATCH.len()..inner_close].trim();
-        sites.push((at, outer_close + 1 + tail.len(), format!("{{ {x}; true }}")));
+        if src[outer_close + 1..].starts_with(tail) {
+            sites.push((at, outer_close + 1 + tail.len(), format!("{{ {x}; true }}")));
+        } else if src[outer_close + 1..].trim_start().starts_with(';') {
+            sites.push((at, outer_close + 1, format!("{{ {x} }}")));
+        }
     }
     let count = sites.len();
     let mut out = src.to_string();
