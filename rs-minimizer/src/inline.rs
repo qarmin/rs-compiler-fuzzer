@@ -821,11 +821,12 @@ fn substitute_one(src: &str, let_pos: usize) -> Option<String> {
     let marker = "\u{1}USE\u{1}";
     let marked = rename_in_scope(src, scope, skip, name, marker);
     let uses = marked.matches(marker).count();
-    let simple = expr.bytes().all(|c| is_ident(c) || matches!(c, b'&' | b'*' | b'.' | b':')) || expr.parse::<f64>().is_ok();
+    let reference = expr.strip_prefix("&mut ").is_some_and(|r| !r.is_empty() && r.bytes().all(is_ident));
+    let simple = reference || expr.bytes().all(|c| is_ident(c) || matches!(c, b'&' | b'*' | b'.' | b':')) || expr.parse::<f64>().is_ok();
     if uses == 0 || (uses > 1 && !simple) || src[scope.0..scope.1].contains(&format!("{{{name}")) {
         return None;
     }
-    let text = if simple { expr.to_string() } else { format!("({expr})") };
+    let text = if simple && !reference { expr.to_string() } else { format!("({expr})") };
     let replaced = marked.replace(marker, &text);
     // drop the let statement itself
     Some(format!("{}{}", &replaced[..let_pos], &replaced[end..]))

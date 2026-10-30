@@ -358,7 +358,7 @@ fn replacements(src: &str, pattern: &str, with: &str) -> Vec<Edit> {
 
 fn keyword_weakening(src: &str) -> Vec<Edit> {
     let mut out = Vec::new();
-    for (pat, with) in [("let mut ", "let "), ("&mut ", "&"), ("unsafe {", "{"), ("pub ", ""), ("pub(crate) ", ""), ("+=", "="), ("-=", "="), ("*=", "="), ("/=", "="), ("%=", "="), ("^=", "="), ("|=", "="), ("&=", "="), ("<<=", "="), (">>=", "="), ("inline(never)", "inline"), ("#[inline(always)]", "")] {
+    for (pat, with) in [("let mut ", "let "), ("() = ", ""), ("&mut ", "&"), ("unsafe {", "{"), ("pub ", ""), ("pub(crate) ", ""), ("+=", "="), ("-=", "="), ("*=", "="), ("/=", "="), ("%=", "="), ("^=", "="), ("|=", "="), ("&=", "="), ("<<=", "="), (">>=", "="), ("inline(never)", "inline"), ("#[inline(always)]", "")] {
         out.extend(replacements(src, pat, with));
     }
     out

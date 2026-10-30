@@ -90,3 +90,15 @@ fn a_catch_unwind_statement_loses_its_wrapper() {
     assert!(!out.contains("catch_unwind"), "{out}");
     assert_prints(&out, "3\n");
 }
+
+#[test]
+fn a_unit_assignment_and_a_mutable_reborrow_binding_go() {
+    let src = "fn main() {\n    let mut h = 1u64;\n    () = {\n        let r = &mut h;\n        *r = *r + 2;\n        *r = *r * 3\n    };\n    println!(\"{}\", h)\n}\n";
+    let o = prints("9\n");
+    check_oracle(&o, src);
+    let out = rs_minimizer::inline::substitute_lets(&o, src, far());
+    assert!(!out.contains("let r"), "{out}");
+    let out = peep(&o, &out, far());
+    assert!(!out.contains("() ="), "{out}");
+    assert_prints(&out, "9\n");
+}
