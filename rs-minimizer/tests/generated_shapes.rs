@@ -151,3 +151,14 @@ fn a_dereferenced_borrow_of_a_name_is_the_name() {
     assert!(!out.contains("*&"), "{out}");
     assert_prints(&out, "5\n");
 }
+
+#[test]
+fn an_unused_parameter_goes_from_a_function_called_through_a_pointer() {
+    let src = "use std::hint::black_box;\nfn f(a: i128, unused: i128, n: u32) -> i128 { a + n as i128 }\nfn main() {\n    let e: fn(i128, i128, u32) -> i128 = black_box(f);\n    println!(\"{}\", e(5, 0, 2));\n}\n";
+    let o = prints("7\n");
+    check_oracle(&o, src);
+    let out = remove_params(&o, src, far());
+    assert!(!out.contains("unused"), "{out}");
+    assert!(out.contains("fn(i128, u32)"), "{out}");
+    assert_prints(&out, "7\n");
+}

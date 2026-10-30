@@ -171,6 +171,46 @@ fn apply_removals(src: &str, mut cuts: Vec<(usize, usize)>) -> String {
     out
 }
 
+/// Argument lists that stand for the parameters of `d` without naming it: the types of every `fn(..)` type that spells exactly the
+/// parameter types, and the arguments of the calls of a variable declared with such a type (`let e: fn(A, B) -> R = f; e(a, b)`).
+fn pointer_arg_lists(src: &str, d: &crate::inline::FnDef) -> Vec<Vec<(usize, usize)>> {
+    let squash = |t: &str| t.split_whitespace().collect::<String>();
+    let want: Vec<String> = d.params.iter().map(|p| squash(&p.ty)).collect();
+    let b = src.as_bytes();
+    let mut out = Vec::new();
+    for (at, _) in src.match_indices("fn(") {
+        if at > 0 && (crate::scan::is_ident(b[at - 1]) || b[at - 1] == b':') {
+            continue;
+        }
+        let open = at + 2;
+        let Some(close) = matching(b, open) else { continue };
+        let args = top_args(src, open, close);
+        if args.len() != want.len() || args.iter().zip(&want).any(|(&(s, e), w)| squash(&src[s..e]) != *w) {
+            continue;
+        }
+        out.push(args);
+        let before = src[..at].trim_end();
+        let Some(before) = before.strip_suffix(':') else { continue };
+        let name: String = before.trim_end().chars().rev().take_while(|c| c.is_alphanumeric() || *c == '_').collect::<Vec<_>>().into_iter().rev().collect();
+        if name.is_empty() {
+            continue;
+        }
+        for (call, _) in src.match_indices(&format!("{name}(")) {
+            if call > 0 && (crate::scan::is_ident(b[call - 1]) || b[call - 1] == b'.') {
+                continue;
+            }
+            let o = call + name.len();
+            if let Some(c) = matching(b, o) {
+                let call_args = top_args(src, o, c);
+                if call_args.len() == want.len() {
+                    out.push(call_args);
+                }
+            }
+        }
+    }
+    out
+}
+
 /// A parameter that nothing reads goes, with the matching argument of every call.
 pub fn remove_params(it: &dyn Oracle, src: &str, deadline: Instant) -> String {
     let mut cur = src.to_string();
@@ -193,10 +233,14 @@ pub fn remove_params(it: &dyn Oracle, src: &str, deadline: Instant) -> String {
                 continue;
             }
             header_args = header_args.into_iter().collect();
+            let pointers = if d.recv.is_none() { pointer_arg_lists(&cur, d) } else { Vec::new() };
             for pi in (0..d.params.len()).rev() {
                 let mut cuts = vec![list_removal(&cur, &header_args[offset..], pi)];
                 for s in &sites {
                     cuts.push(list_removal(&cur, &s.arg_ranges, pi));
+                }
+                for list in &pointers {
+                    cuts.push(list_removal(&cur, list, pi));
                 }
                 cands.push(apply_removals(&cur, cuts));
             }
