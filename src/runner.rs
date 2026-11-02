@@ -106,6 +106,19 @@ fn drain<R: Read + Send + 'static>(mut r: R, limit: usize) -> thread::JoinHandle
     })
 }
 
+/// Resident memory (MB) one compiler or test process may use before it is killed; `RS_MEM_MB` overrides it. A reduction runs one
+/// oracle per core, so a candidate that makes rustc or the program grow without bound must not take the machine down.
+fn mem_limit_mb() -> u64 {
+    static LIMIT: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *LIMIT.get_or_init(|| std::env::var("RS_MEM_MB").ok().and_then(|v| v.parse().ok()).unwrap_or(4096))
+}
+
+fn rss_mb(pid: u32) -> Option<u64> {
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    let kb: u64 = status.lines().find(|l| l.starts_with("VmRSS:"))?.split_whitespace().nth(1)?.parse().ok()?;
+    Some(kb / 1024)
+}
+
 unsafe extern "C" {
     fn prctl(option: i32, arg2: u64, arg3: u64, arg4: u64, arg5: u64) -> i32;
 }
@@ -131,7 +144,7 @@ pub fn exec(mut cmd: Command, timeout: Duration) -> std::io::Result<Exec> {
         if let Some(st) = child.try_wait()? {
             break (Some(st), false);
         }
-        if start.elapsed() > timeout {
+        if start.elapsed() > timeout || rss_mb(pid).is_some_and(|m| m > mem_limit_mb()) {
             // kill the whole process group (rustc spawns linkers etc.)
             let _ = Command::new("kill").args(["-KILL", "--", &format!("-{pid}")]).status();
             let _ = child.kill();

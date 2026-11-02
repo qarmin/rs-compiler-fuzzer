@@ -48,7 +48,45 @@ fn left_secs(o: &TriageOpts) -> u64 {
 /// Version of the triage / minimisation logic. Bump it by hand whenever the results of `triage` get
 /// better (smarter reduction, more exact regression range, ...): every stored finding with a smaller
 /// `fuzzer_id` is then triaged again by the `retriage` job and replaced in the package.
-pub const FUZZER_ID: u32 = 6;
+pub const FUZZER_ID: u32 = 7;
+
+/// Cumulative minutes of reduction at which a stage ends. The last mark is only worked towards while the program is longer than
+/// `SHORT_LINES`: a tiny program is settled after the one before it.
+const STAGE_MARKS: [u64; 4] = [600, 1200, 2400, 3600];
+const SHORT_LINES: usize = 20;
+const STAGES: usize = STAGE_MARKS.len();
+
+/// Reduction time a program of that size needs before it may be called settled.
+fn required_secs(lines: usize) -> u64 {
+    if lines > SHORT_LINES { STAGE_MARKS[STAGES - 1] } else { STAGE_MARKS[STAGES - 2] }
+}
+
+/// Stages of a run that starts after `done` seconds of earlier reduction: (index, length). Stages whose mark is behind us are
+/// skipped; the run's own budget cuts the list. Once every mark is passed one stage uses the whole budget.
+fn stage_budgets(done: u64, budget: Duration) -> Vec<(usize, Duration)> {
+    let mut out = Vec::new();
+    let (mut at, mut left) = (done, budget);
+    for (i, mark) in STAGE_MARKS.iter().enumerate() {
+        if *mark <= at || left.is_zero() {
+            continue;
+        }
+        let len = Duration::from_secs(mark - at).min(left);
+        out.push((i, len));
+        at += len.as_secs();
+        left -= len;
+    }
+    if out.is_empty() {
+        out.push((STAGES - 1, budget));
+    }
+    out
+}
+
+fn store_min_progress(dir: &Path, total_secs: u64, stage: usize) {
+    let mut st = read_cfg(&dir.join("status.cfg"));
+    st.insert("min_total_seconds".into(), total_secs.to_string());
+    st.insert("min_stage".into(), format!("{stage} of {STAGES}"));
+    write_cfg(&dir.join("status.cfg"), &st);
+}
 
 pub type Cfg = BTreeMap<String, String>;
 
@@ -314,6 +352,67 @@ fn flag_groups(flags: &[String]) -> Vec<Vec<String>> {
     out
 }
 
+/// Drops every command-line flag the program no longer needs (shared flags, the reference build's, the failing build's), judged on
+/// the oracle's own compiler. A smaller program often stops depending on a flag, and a shorter command line lets the next
+/// reduction steps change more. Returns whether anything was dropped.
+fn shorten_flags(it: &mut Interest, src: &str) -> bool {
+    let flat = |g: &[Vec<String>]| g.iter().flatten().cloned().collect::<Vec<String>>();
+    let fresh = |it: &Interest| {
+        let mut c = it.clone();
+        c.cache = Default::default();
+        c
+    };
+    let mut changed = false;
+    let mut common = flag_groups(&crate::runner::common_flags());
+    for i in (0..common.len()).rev() {
+        let mut cand = common.clone();
+        cand.remove(i);
+        crate::runner::set_common_flags(Some(flat(&cand)));
+        if fresh(it).check(src) {
+            common = cand;
+            changed = true;
+        }
+    }
+    crate::runner::set_common_flags(Some(flat(&common)));
+    if !it.a.flags.is_empty() {
+        let mut c = fresh(it);
+        c.a.flags.clear();
+        if c.check(src) {
+            it.a.flags.clear();
+            changed = true;
+        } else {
+            let mut groups = flag_groups(&it.a.flags);
+            for i in (0..groups.len()).rev() {
+                let mut g2 = groups.clone();
+                g2.remove(i);
+                let mut c = fresh(it);
+                c.a.flags = flat(&g2);
+                if c.check(src) {
+                    groups = g2;
+                    it.a.flags = flat(&groups);
+                    changed = true;
+                }
+            }
+        }
+    }
+    let mut groups = flag_groups(&it.b.flags);
+    for i in (0..groups.len()).rev() {
+        let mut g2 = groups.clone();
+        g2.remove(i);
+        let mut c = fresh(it);
+        c.b.flags = flat(&g2);
+        if c.check(src) {
+            groups = g2;
+            it.b.flags = flat(&groups);
+            changed = true;
+        }
+    }
+    if changed {
+        it.cache = Default::default();
+    }
+    changed
+}
+
 /// The same program built with other optimisation levels: which ones show the bug.
 #[derive(Clone, Debug)]
 struct Variant {
@@ -333,6 +432,69 @@ fn variants_from_text(t: &str) -> Vec<Variant> {
             Some(Variant { flags: p.next()?.to_string(), bug: p.next()? == "bug", out: p.next().unwrap_or("").replace("\\n", "\n") })
         })
         .collect()
+}
+
+/// Where a program killed by a signal died: the frames `gdb` shows (built with the failing flags, run under gdb in batch mode).
+/// None when gdb is missing or the run does not crash again; the frames below `main` are cut off.
+fn crash_backtrace(rustc: &[String], src: &Path, cfg: &Config, work: &Path) -> Option<String> {
+    // debug info gives file:line and inlined frames; it can hide a code-generation bug, so the plain build is the fallback
+    let mut with_debug = cfg.clone();
+    with_debug.flags.extend(["-C".to_string(), "debuginfo=2".to_string()]);
+    backtrace_of(rustc, src, &with_debug, work).or_else(|| backtrace_of(rustc, src, cfg, work))
+}
+
+fn backtrace_of(rustc: &[String], src: &Path, cfg: &Config, work: &Path) -> Option<String> {
+    let dir = work.join(format!("bt_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).ok()?;
+    let bin = dir.join("bt_bin");
+    let mut c = crate::runner::rustc_cmd(rustc);
+    c.args(crate::runner::compile_args(src, &bin, cfg));
+    let built = exec(c, Duration::from_secs(120)).map(|r| r.code == Some(0)).unwrap_or(false);
+    let stem = src.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let mut out = None;
+    if built {
+        let mut g = Command::new("gdb");
+        g.args(["-batch", "-nx", "-ex", "set pagination off", "-ex", "run", "-ex", "bt 30"]).arg(&bin);
+        if let Ok(r) = exec(g, Duration::from_secs(90)) {
+            let text = String::from_utf8_lossy(&r.stdout).into_owned();
+            let mut lines: Vec<String> = Vec::new();
+            for l in text.lines() {
+                if l.starts_with("Program received signal") || l.starts_with("Program terminated with signal") {
+                    lines.push(l.to_string());
+                } else if l.starts_with('#') {
+                    let l = crate::demangle::demangle_text(l).replace(&format!("{stem}::"), "reduced::").replace(&format!("{stem}.rs"), "reduced.rs");
+                    // the directory the file was compiled from is of no interest
+                    let l = match l.find("reduced.rs:") {
+                        Some(end) => match l[..end].rfind(' ') {
+                            Some(start) => format!("{}{}", &l[..=start], &l[end..]),
+                            None => l,
+                        },
+                        None => l,
+                    };
+                    let l = match l.find("/lib/rustlib/src/rust/library/") {
+                        Some(at) => match l[..at].rfind(" at ") {
+                            Some(from) => format!("{} at {}", &l[..from], &l[at + "/lib/rustlib/src/rust/".len()..]),
+                            None => l,
+                        },
+                        None => l,
+                    };
+                    let past_user_code = l.contains("lang_start") || l.contains("__rust_begin_short_backtrace");
+                    if past_user_code {
+                        break;
+                    }
+                    lines.push(l.chars().take(300).collect());
+                    if l.contains(" main ()") || l.contains("reduced::main") {
+                        break;
+                    }
+                }
+            }
+            if lines.iter().any(|l| l.starts_with('#')) {
+                out = Some(lines.join("\n"));
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    out
 }
 
 /// What a run printed, as shown in the issue.
@@ -695,6 +857,7 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     let min_done = !o.force_reduce && steps::current(&old, "minimized", "", &date).filter(|m| m.status == "done").is_some();
     let min_version_ok = steps::get(&old, "minimized").map(|m| m.version == steps::REDUCE_VERSION).unwrap_or(true);
     let prev_runs: u32 = if min_version_ok { old.get("min_runs").and_then(|v| v.parse().ok()).unwrap_or(0) } else { 0 };
+    let prev_total: u64 = if min_version_ok { old.get("min_total_seconds").and_then(|v| v.parse().ok()).unwrap_or(0) } else { 0 };
     let mut reduction_kept = false;
     match (&prev_reduced, min_done) {
         (Some(prev), true) => {
@@ -705,7 +868,7 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
         _ => {
             if let (Some(pc), false) = (&primary, o.no_reduce) {
                 if matrix.iter().any(|m| m.2 == Repro::Yes) {
-                    let it = Interest { rustc: vec!["rustc".into(), format!("+{pc}")], a: base.clone(), b: bad.clone(), crash_sig: sig.clone(), limits: Limits { compile: Duration::from_secs(120), run: Duration::from_secs(10) }, work: o.work.clone(), cache: Default::default() };
+                    let mut it = Interest { rustc: vec!["rustc".into(), format!("+{pc}")], a: base.clone(), b: bad.clone(), crash_sig: sig.clone(), limits: Limits { compile: Duration::from_secs(120), run: Duration::from_secs(10) }, work: o.work.clone(), cache: Default::default() };
                     // a finding that is triaged again continues from its earlier (already small) result when that still shows the bug
                     let start_src = match &prev_reduced {
                         Some(prev) if prev.lines().count() <= STORED_LIMIT_LINES && it.check(prev) => {
@@ -736,53 +899,80 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
                         // from the original) instead of giving up. Only a round at the highest effort that changes nothing ends it early.
                         let t0 = std::time::Instant::now();
                         let mut round_src = start_src.clone();
+                        if shorten_flags(&mut it, &round_src) {
+                            info!("the command line got shorter before the reduction: shared `{}`, reference `{}`, failing `{}`", crate::runner::common_flags().join(" "), it.a.flags.join(" "), it.b.flags.join(" "));
+                        }
                         let mut last_unchanged = false;
-                        let mut effort = 0usize;
                         let mut rounds_done = 0usize;
-                        for round in 1..=12 {
-                            rounds_done = round;
-                            rs_minimizer::control::set_effort(effort);
-                            let left = o.budget.saturating_sub(t0.elapsed());
-                            let mut out = reduce_all(&it, &round_src, left, &mut reduce_log);
-                            if effort == 2 && out.lines().count() > 60 && !crate::reduce::INTERRUPTED.load(std::sync::atomic::Ordering::Relaxed) {
-                                // the stored program may be a dead end: the same pipeline from the original, the smaller result wins
-                                info!("round {round}: a fresh start from the original program ({} lines) for comparison", case.lines().count());
-                                // its intermediate programs are bigger than the stored one: they must not overwrite the checkpoint
-                                if o.checkpoint {
-                                    crate::reduce::set_checkpoint(Some(dir.join("reduced.rs.fresh")));
-                                }
-                                let fresh = reduce_all(&it, &case, o.budget.saturating_sub(t0.elapsed()) / 2, &mut reduce_log);
-                                if o.checkpoint {
-                                    crate::reduce::set_checkpoint(Some(dir.join("reduced.rs")));
-                                    let _ = std::fs::remove_file(dir.join("reduced.rs.fresh"));
-                                }
-                                if fresh.len() < out.len() {
-                                    reduce_log.push(format!("the fresh start got smaller: {} lines instead of {}", fresh.lines().count(), out.lines().count()));
-                                    out = fresh;
-                                }
-                                if o.checkpoint {
-                                    let _ = std::fs::write(dir.join("reduced.rs"), &out);
-                                }
-                            }
-                            let changed = out != round_src;
-                            round_src = out;
-                            let interrupted = crate::reduce::INTERRUPTED.load(std::sync::atomic::Ordering::Relaxed);
-                            let time_left = t0.elapsed() * 4 < o.budget * 3;
-                            if interrupted || !time_left {
-                                last_unchanged = false;
+                        let interrupted = || crate::reduce::INTERRUPTED.load(std::sync::atomic::Ordering::Relaxed);
+                        'stages: for (si, stage_budget) in stage_budgets(prev_total, o.budget) {
+                            let stage_t0 = std::time::Instant::now();
+                            if si == STAGES - 1 && round_src.lines().count() <= SHORT_LINES && prev_total + t0.elapsed().as_secs() >= required_secs(round_src.lines().count()) {
                                 break;
                             }
-                            if changed {
-                                info!("round {round} (effort {effort}) changed the program to {} lines; another round on it ({}s of {}s used)", round_src.lines().count(), t0.elapsed().as_secs(), o.budget.as_secs());
-                            } else if effort < 3 {
-                                effort += 1;
-                                info!("round {round} changed nothing; trying harder (effort {effort}, {}s of {}s used)", t0.elapsed().as_secs(), o.budget.as_secs());
-                            } else {
-                                last_unchanged = true;
-                                break;
+                            let mut effort = si.min(3);
+                            info!("stage {} of {STAGES}: {}s, starting at effort {effort}", si + 1, stage_budget.as_secs());
+                            loop {
+                                rounds_done += 1;
+                                rs_minimizer::control::set_effort(effort);
+                                rs_minimizer::control::set_salt(rounds_done - 1);
+                                let left = stage_budget.saturating_sub(stage_t0.elapsed());
+                                let mut out = reduce_all(&it, &round_src, left, &mut reduce_log);
+                                if effort == 2 && out.lines().count() > 60 && !interrupted() && it.check(&case) {
+                                    // the stored program may be a dead end: the same pipeline from the original, the smaller result wins
+                                    info!("a fresh start from the original program ({} lines) for comparison", case.lines().count());
+                                    // its intermediate programs are bigger than the stored one: they must not overwrite the checkpoint
+                                    if o.checkpoint {
+                                        crate::reduce::set_checkpoint(Some(dir.join("reduced.rs.fresh")));
+                                    }
+                                    let fresh = reduce_all(&it, &case, stage_budget.saturating_sub(stage_t0.elapsed()) / 2, &mut reduce_log);
+                                    if o.checkpoint {
+                                        crate::reduce::set_checkpoint(Some(dir.join("reduced.rs")));
+                                        let _ = std::fs::remove_file(dir.join("reduced.rs.fresh"));
+                                    }
+                                    if fresh.len() < out.len() {
+                                        reduce_log.push(format!("the fresh start got smaller: {} lines instead of {}", fresh.lines().count(), out.lines().count()));
+                                        out = fresh;
+                                    }
+                                }
+                                let changed = out != round_src;
+                                round_src = out;
+                                let total = prev_total + t0.elapsed().as_secs();
+                                let settled = total >= required_secs(round_src.lines().count());
+                                if interrupted() {
+                                    last_unchanged = false;
+                                    break 'stages;
+                                }
+                                let stage_over = stage_t0.elapsed() * 4 >= stage_budget * 3;
+                                if changed {
+                                    info!("round {rounds_done} (effort {effort}) changed the program to {} lines ({}s of {}s used)", round_src.lines().count(), t0.elapsed().as_secs(), o.budget.as_secs());
+                                } else if effort < 3 {
+                                    effort += 1;
+                                    info!("round {rounds_done} changed nothing; trying harder (effort {effort}, {}s of {}s used)", t0.elapsed().as_secs(), o.budget.as_secs());
+                                } else if settled {
+                                    last_unchanged = true;
+                                    break 'stages;
+                                } else {
+                                    info!("round {rounds_done} changed nothing, but only {total}s of the required {}s of minimisation were spent: another round with other seeds", required_secs(round_src.lines().count()));
+                                }
+                                if stage_over {
+                                    break;
+                                }
                             }
+                            last_unchanged = false;
+                            if round_src.len() < reduced.len() && it.check(&round_src) {
+                                let _ = std::fs::write(dir.join("reduced.rs"), &round_src);
+                            }
+                            if shorten_flags(&mut it, &round_src) {
+                                info!("stage {}: the smaller program needs fewer flags: shared `{}`, reference `{}`, failing `{}`", si + 1, crate::runner::common_flags().join(" "), it.a.flags.join(" "), it.b.flags.join(" "));
+                                reduce_log.push(format!("flags after stage {}: shared `{}`, reference `{}`, failing `{}`", si + 1, crate::runner::common_flags().join(" "), it.a.flags.join(" "), it.b.flags.join(" ")));
+                            }
+                            store_min_progress(dir, prev_total + t0.elapsed().as_secs(), si + 1);
                         }
                         rs_minimizer::control::set_effort(0);
+                        rs_minimizer::control::set_salt(0);
+                        base.flags = it.a.flags.clone();
+                        bad.flags = it.b.flags.clone();
                         reduced = round_src;
                         if let Some(prev) = prev_reduced.as_ref().filter(|p| p.len() < reduced.len() && it.check(p)) {
                             reduce_log.push(format!("the stored program ({} lines) is smaller than what this run found ({} lines): kept", prev.lines().count(), reduced.lines().count()));
@@ -1064,10 +1254,15 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     let complete = did_reduce && crate::reduce::last_run_complete();
     let unchanged = continued_from.as_deref() == Some(rhash.as_str());
     let rl = lines_of(&reduced);
+    let min_total = if reduction_kept { prev_total } else if did_reduce { prev_total + reduce_started.elapsed().as_secs() } else { prev_total };
+    let need = required_secs(lines_of(&reduced));
+    let time_spent = min_total >= need;
     let min_status = if reduction_kept {
         old.get("min_status").cloned().unwrap_or_else(|| "converged".into())
     } else if !did_reduce {
         "not reduced".to_string()
+    } else if !time_spent {
+        format!("in progress - {} of the required {} minutes of minimisation spent", min_total / 60, need / 60)
     } else if complete && unchanged {
         "converged".to_string()
     } else if min_runs >= 6 {
@@ -1250,6 +1445,7 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     st.insert("fuzzer_id".into(), FUZZER_ID.to_string());
     st.insert("min_status".into(), min_status.clone());
     st.insert("min_runs".into(), min_runs.to_string());
+    st.insert("min_total_seconds".into(), min_total.to_string());
     if !reduction_kept {
         st.insert("min_last_run_seconds".into(), reduce_started.elapsed().as_secs().to_string());
     }
@@ -1423,6 +1619,13 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
             }
         }
     }
+    if let (false, Some((_, Outcome::Ran { signal: Some(_), .. }))) = (crash, &outputs) {
+        let chan = matrix2.iter().find(|m| m.2 == Repro::Yes).map(|m| m.0.clone());
+        let bt = chan.and_then(|ch| crash_backtrace(&["rustc".to_string(), format!("+{ch}")], &reduced_path, &bad, &o.work));
+        if let Some(bt) = bt {
+            let _ = writeln!(is, "Where the failing build crashes (`gdb -batch -ex run -ex bt`):\n```\n{bt}\n```\n");
+        }
+    }
     if let Some(c) = culprit.as_ref().filter(|c| c.n > 0) {
         let what = if c.kind == "llvm" { "LLVM pass" } else { "MIR pass" };
         let limit = if c.kind == "llvm" { "-C llvm-args=-opt-bisect-limit" } else { "-Zmir-opt-bisect-limit" };
@@ -1457,7 +1660,7 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
         };
         let _ = writeln!(is, "\n<!-- cargo-bisect-rustc: NOT DONE ({why}). The next retriage run tries again; the command is `cargo bisect-rustc --regress success --start <good nightly> --end <bad nightly> --script <script that exits 0 while the bug shows>`. -->");
     }
-    let _ = writeln!(is, "\nProblem was found by and minimized by rust fuzzer(created by llm) - https://github.com/qarmin/rs-compiler-fuzzer\n\nThe latest findings of the fuzzer can be checked by hand in https://github.com/qarmin/rs-compiler-fuzzer/releases/download/Nightly/findings.zip");
+    let _ = writeln!(is, "\nProblem was found by and minimized by rust fuzzer(created by llm) - https://github.com/qarmin/rs-compiler-fuzzer (the latest findings of the fuzzer can be checked by hand in https://github.com/qarmin/rs-compiler-fuzzer/releases/download/Nightly/findings.zip)");
     std::fs::write(dir.join("ISSUE.md"), is).unwrap();
 
     // put the status at the top of report.md (replace an older block)
@@ -1538,5 +1741,28 @@ mod sibling_tests {
     fn the_commit_is_named_once() {
         let l: Vec<String> = vec!["- Regression in [f20a92e](u)".into(), "- searched commit range: [a...b](u)".into(), "- regressed commit: [f20a92e](u)".into()];
         assert_eq!(crate::bisect::tidy_pr_lines(&l).len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod stage_tests {
+    use super::*;
+
+    #[test]
+    fn stages_end_at_the_cumulative_marks() {
+        let b = stage_budgets(0, Duration::from_secs(10_000));
+        assert_eq!(b.iter().map(|x| x.1.as_secs()).collect::<Vec<_>>(), [600, 600, 1200, 1200]);
+    }
+
+    #[test]
+    fn finished_stages_are_skipped_and_the_budget_cuts() {
+        let b = stage_budgets(1500, Duration::from_secs(1000));
+        assert_eq!(b, vec![(2, Duration::from_secs(900)), (3, Duration::from_secs(100))]);
+    }
+
+    #[test]
+    fn a_short_program_needs_less() {
+        assert_eq!(required_secs(12), 2400);
+        assert_eq!(required_secs(21), 3600);
     }
 }

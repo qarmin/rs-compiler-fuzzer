@@ -23,7 +23,7 @@ pub struct Step {
 /// Version of the minimiser: bump it when a pass is added or improved. The step `minimized` is then open again and the
 /// convergence count starts from zero (the next runs continue from the previous result).
 /// 2: `print!` is turned back into `println!` at the end
-pub const REDUCE_VERSION: u32 = 5;
+pub const REDUCE_VERSION: u32 = 6;
 
 /// Every step is one atomic result: done, not applicable, or still to do (no partial results are recorded).
 /// 5: the steps were split up (one result per channel, per kind of flag, per kind of level, per search) and every version raised.
@@ -32,7 +32,7 @@ pub const STEPS: &[Step] = &[
     Step { id: "reproduced_beta", title: "Reproduced on beta (reduced program)", version: 2, code: true, max_age_days: 0 },
     Step { id: "reproduced_nightly", title: "Reproduced on nightly (reduced program)", version: 2, code: true, max_age_days: 0 },
     Step { id: "minimize_cases", title: "Batch reduced to the cases that matter (a single case if one is enough)", version: 2, code: false, max_age_days: 0 },
-    Step { id: "minimized", title: "Code minimised (every pass finished, a second run changed nothing)", version: REDUCE_VERSION, code: false, max_age_days: 0 },
+    Step { id: "minimized", title: "Code minimised (at least 60 minutes in total, every pass finished, a second run changed nothing)", version: REDUCE_VERSION, code: false, max_age_days: 0 },
     Step { id: "flags_common", title: "Shortest command line: shared flags (edition, lints, checks) reduced", version: 2, code: true, max_age_days: 0 },
     Step { id: "flags_reference", title: "Shortest command line: reference build reduced", version: 2, code: true, max_age_days: 0 },
     Step { id: "flags_failing", title: "Shortest command line: failing build reduced", version: 2, code: true, max_age_days: 0 },

@@ -411,7 +411,7 @@ pub fn write_index(pkg: &Path) {
         if c2.get("state").map(String::as_str) == Some("fixed") { 99 } else { 100 - crate::steps::progress(&c2, &today).0 }
     };
     rows.sort_by(|a, b| rank(&a.1, &a.0).cmp(&rank(&b.1, &b.0)).then(a.0.cmp(&b.0)));
-    let mut s = String::from("# Stored findings\n\nOne row per distinct finding. Every directory under `findings/` has `finding.json` (with the checklist), `STATUS.md` (checklist, reproduction per channel, minimisation, UB check, upstream search) and, once triaged, `reduced.rs` + `ISSUE.md`. The checklist says what was done and what is still open; steps are redone when the tool gets better at them or when the reduced program changes.\n\n");
+    let mut s = String::from("# Stored findings\n\nOne row per distinct finding. The `target` column says what it is compiled for: `host` is plain `rustc file.rs`, anything else needs `rustc --target <triple> ... file.rs && ./file` (e.g. `i686-unknown-linux-gnu`, run natively on x86_64 with gcc-multilib). Every directory under `findings/` has `finding.json` (with the checklist), `STATUS.md` (checklist, reproduction per channel, minimisation, UB check, upstream search) and, once triaged, `reduced.rs` + `ISSUE.md`. The checklist says what was done and what is still open; steps are redone when the tool gets better at them or when the reduced program changes.\n\n");
     let finished = |k: &str, c: &Cfg| {
         let mut c2 = c.clone();
         crate::steps::backfill(&mut c2, &root.join(k));
@@ -420,7 +420,7 @@ pub fn write_index(pkg: &Path) {
     };
     let (full, partial): (Vec<(String, Cfg)>, Vec<(String, Cfg)>) = rows.iter().cloned().partition(|(k, c)| finished(k, c));
     let table = |s: &mut String, set: &[(String, Cfg)]| {
-        let _ = writeln!(s, "| steps done | open steps | state | class | finding | kind | reduced lines | minimisation | seen | last seen | upstream |\n|---|---|---|---|---|---|---|---|---|---|---|");
+        let _ = writeln!(s, "| steps done | open steps | state | class | finding | target | kind | reduced lines | minimisation | seen | last seen | upstream |\n|---|---|---|---|---|---|---|---|---|---|---|---|");
         for (k, c) in set {
             let mut c2 = c.clone();
             crate::steps::backfill(&mut c2, &root.join(k));
@@ -428,7 +428,7 @@ pub fn write_index(pkg: &Path) {
             let (done, total) = crate::steps::progress(&c2, &today);
             let next = { let ids = crate::steps::open_ids(&c2, &today); if ids.is_empty() { "none - ready for a human to review and report".to_string() } else { ids.join(", ") } };
             let up = std::fs::read_to_string(root.join(k).join("known-issues.txt")).map(|t| linkify(&t)).unwrap_or_else(|_| linkify(&g("upstream_search")));
-            let _ = writeln!(s, "| {done}/{total} | {} | {} | {} | `{k}` | {} | {} | {} | {}x | {} | {} |", next.replace('|', "/"), g("state"), g("class"), g("kind"), g("reduced_lines"), g("min_status"), g("times_seen"), g("last_seen"), up);
+            let _ = writeln!(s, "| {done}/{total} | {} | {} | {} | `{k}` | {} | {} | {} | {} | {}x | {} | {} |", next.replace('|', "/"), g("state"), g("class"), target_of(c), g("kind"), g("reduced_lines"), g("min_status"), g("times_seen"), g("last_seen"), up);
         }
     };
     for (k, _) in &rows {
@@ -534,6 +534,25 @@ pub fn write_index(pkg: &Path) {
     table(&mut s, &partial);
     std::fs::write(pkg.join("INDEX.md"), s).unwrap();
     write_old_index(pkg);
+}
+
+/// The compilation target a finding needs: from `--target` in any of its flag sets, else the host.
+fn target_of(c: &Cfg) -> String {
+    for key in ["min_bad_flags", "min_base_flags", "min_common_flags", "bad_flags", "base_flags"] {
+        let Some(flags) = c.get(key) else { continue };
+        let words: Vec<&str> = flags.split_whitespace().collect();
+        for (i, w) in words.iter().enumerate() {
+            if let Some(t) = w.strip_prefix("--target=") {
+                return format!("`{t}`");
+            }
+            if *w == "--target" {
+                if let Some(t) = words.get(i + 1) {
+                    return format!("`{t}`");
+                }
+            }
+        }
+    }
+    "host (x86_64-unknown-linux-gnu)".to_string()
 }
 
 /// `old_findings/INDEX.md`: findings that stopped reproducing on the newest nightly (kept apart from the current ones).

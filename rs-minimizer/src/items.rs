@@ -589,7 +589,7 @@ fn ddmin_siblings(it: &dyn Oracle, cur: &mut String, mut list: Vec<(usize, usize
         let mut units = if with_cascade && roots.len() >= 2 { roots } else { (0..list.len()).collect() };
         // a higher effort deletes random subsets instead of neighbours: what is needed is often scattered
         if crate::control::effort() > 0 {
-            crate::control::shuffled(&mut units, crate::control::effort() as u64);
+            crate::control::shuffled(&mut units, crate::control::seed());
         }
         units
     };

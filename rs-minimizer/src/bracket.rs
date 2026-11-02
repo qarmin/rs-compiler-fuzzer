@@ -159,7 +159,7 @@ pub fn lexeme_deletions(it: &dyn Oracle, src: &str, deadline: Instant) -> String
     intervals.dedup_by_key(|i| i.0);
     if effort() > 0 {
         let mut v: Vec<_> = intervals.iter().map(|i| vec![i.0]).collect();
-        crate::control::shuffled(&mut v, effort() as u64);
+        crate::control::shuffled(&mut v, crate::control::seed());
         return run(it, src, v, "lexeme deletions (shuffled)", deadline);
     }
     run(it, src, intervals.into_iter().map(|i| vec![i.0]).collect(), "lexeme deletions", deadline)

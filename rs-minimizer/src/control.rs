@@ -23,6 +23,18 @@ pub fn set_effort(level: usize) {
     EFFORT.store(level, Ordering::Relaxed);
 }
 
+static SALT: AtomicUsize = AtomicUsize::new(0);
+
+/// Changes the random subsets of the next run: the same effort level with another salt tries other deletions.
+pub fn set_salt(n: usize) {
+    SALT.store(n, Ordering::Relaxed);
+}
+
+/// Seed of the shuffles of the current run.
+pub fn seed() -> u64 {
+    effort() as u64 + 1000 * SALT.load(Ordering::Relaxed) as u64
+}
+
 pub fn effort() -> usize {
     EFFORT.load(Ordering::Relaxed)
 }

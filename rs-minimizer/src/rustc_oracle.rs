@@ -56,6 +56,12 @@ fn peak_rss_mb(pid: u32) -> Option<u64> {
     Some(kb / 1024)
 }
 
+/// Default resident-memory limit (MB) of one compiler or program run (`RS_MEM_MB`, 4096): one oracle runs per core.
+fn default_mem_mb() -> u64 {
+    static LIMIT: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *LIMIT.get_or_init(|| std::env::var("RS_MEM_MB").ok().and_then(|v| v.parse().ok()).unwrap_or(4096))
+}
+
 /// Runs a command, kills it after `timeout` or when its resident memory passes `mem_mb`.
 pub fn exec(mut cmd: Command, timeout: Duration, mem_mb: Option<u64>) -> std::io::Result<Exec> {
     use std::os::unix::process::ExitStatusExt;
@@ -86,7 +92,7 @@ pub fn exec(mut cmd: Command, timeout: Duration, mem_mb: Option<u64>) -> std::io
         if start.elapsed() > timeout {
             timed_out = true;
         }
-        if let Some(limit) = mem_mb {
+        if let Some(limit) = mem_mb.or(Some(default_mem_mb())) {
             if peak_rss_mb(child.id()).is_some_and(|m| m > limit) {
                 over_memory = true;
             }

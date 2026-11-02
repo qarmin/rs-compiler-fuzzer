@@ -31,6 +31,9 @@ on:
       strategies:
         description: "Strategy groups: groups separated by ';', strategies inside a group by ','"
         default: ""
+      i686_strategies:
+        description: "Strategy groups fuzzed with --target i686-unknown-linux-gnu (same syntax as strategies; default arith,floats;memory,abi,simd[;select,loops,control,enums])"
+        default: ""
       toolchains:
         description: "Comma separated toolchains (default nightly; only nightly is fuzzed)"
         default: ""
@@ -66,6 +69,7 @@ jobs:
           IN_PROFILE: ${{ inputs.profile }}
           IN_DURATION: ${{ inputs.duration_minutes }}
           IN_SCALE: ${{ inputs.scale }}
+          IN_I686: ${{ inputs.i686_strategies }}
         run: |
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
           import json, os
@@ -76,8 +80,12 @@ jobs:
           narrow = "arith,select;loops;control,recursion;enums,traits;borrows,asyncs;memory,shapes,simd,abi;collections,floats,unwind,generics;stdlib"
           groups = e["IN_GROUPS"] or (wide if quick else narrow)
           toolchains = e["IN_TOOLCHAINS"] or "nightly"
-          inc = [{"toolchain": t.strip(), "strategies": g.strip(), "name": g.strip().replace(",", "+")}
+          inc = [{"toolchain": t.strip(), "strategies": g.strip(), "name": g.strip().replace(",", "+"), "i686": ""}
                  for t in toolchains.split(",") for g in groups.split(";")]
+          # 32-bit x86 (rustc --target i686-unknown-linux-gnu -C opt-level=1 -C codegen-units=16 ...): the most crash-prone strategies, nightly only
+          i686_groups = e["IN_I686"] or ("arith,floats;memory,abi,simd" if quick else "arith,floats;memory,abi,simd;select,loops,control,enums")
+          inc += [{"toolchain": "nightly", "strategies": g.strip(), "name": "i686-" + g.strip().replace(",", "+"), "i686": "yes"}
+                  for g in i686_groups.split(";") if g.strip()]
           print("matrix=" + json.dumps({"include": inc}))
           # the daily run fuzzes for 230 min and triages for up to 60 more (6 h job limit); pushes stay short
           print("duration=" + (e["IN_DURATION"] or ("45" if quick else "230")))
@@ -129,7 +137,16 @@ jobs:
           rustup component add miri rust-src --toolchain nightly || echo "miri unavailable on this nightly"
           [ -x "$HOME/.cargo/bin/cargo-bisect-rustc" ] || cargo +stable install cargo-bisect-rustc --locked || echo "cargo-bisect-rustc unavailable"
 
+      - name: Install the 32-bit x86 target (i686 jobs)
+        if: matrix.i686 == 'yes'
+        run: |
+          for c in stable beta nightly; do rustup target add i686-unknown-linux-gnu --toolchain $c; done
+          sudo apt-get update && sudo apt-get install -y gcc-multilib
+          printf 'fn main() { println!("ok"); }\n' > /tmp/small.rs
+          rustc +${{ matrix.toolchain }} --target i686-unknown-linux-gnu -C opt-level=1 -C codegen-units=16 /tmp/small.rs -o /tmp/small && /tmp/small
+
       - name: Canaries
+        if: matrix.i686 != 'yes'
         continue-on-error: true
         run: ./target/release/rs-compiler-fuzzer canary --lto --rustc "rustc +${{ matrix.toolchain }}" --configs O0,O1,O3,Oz,O3-lto-fat --out fuzz-out
 
@@ -139,9 +156,11 @@ jobs:
           PROFILE: ${{ needs.plan.outputs.profile }}
           SCALE: ${{ needs.plan.outputs.scale }}
           SEED: ${{ inputs.seed }}
+          I686: ${{ matrix.i686 }}
         run: |
           seed_arg=()
-          if [ -n "$SEED" ]; then seed_arg=(--seed "$SEED"); fi
+          if [ "$I686" = yes ]; then seed_arg+=(--i686); fi
+          if [ -n "$SEED" ]; then seed_arg+=(--seed "$SEED"); fi
           ./target/release/rs-compiler-fuzzer fuzz \
             --rustc "rustc +${{ matrix.toolchain }}" \
             --duration $((DURATION_MIN * 60)) \

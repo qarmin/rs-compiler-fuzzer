@@ -155,6 +155,7 @@ by hand. The `*-checks` configs and `PANIC` lines can also point at a generator 
   - **push to master**: nightly only, `fast` profile, half-size batches, 45 minutes of fuzzing;
   - **22:00 UTC daily**: nightly only, `full` profile, 230 minutes of fuzzing + up to 60 minutes of triage per job (GitHub limits a job to 6 h, the workflow budgets 340 min);
   - **manual dispatch**: duration, profile, scale, strategy groups, toolchains, seed are inputs.
+  Extra **i686 jobs** (`i686-<groups>`, `--i686`): the same fuzzing with `--target i686-unknown-linux-gnu` (needs `rustup target add` + `gcc-multilib`), the builds compared among themselves (baseline `i686-O0`; configs such as `-C opt-level=1 -C codegen-units=16`). The `target` column of `INDEX.md` shows which findings need `--target`; the `i686_strategies` dispatch input picks the groups.
   One job per strategy group (only nightly is fuzzed; stable/beta are used by triage to reproduce): 8 jobs. Each job runs the canaries,
   fuzzes, then **triages** the new findings (`triage`: reproduces on stable/beta/nightly, reduces with the built-in passes after flattening the harness into a plain `fn main`, checks the reduced
   program with Miri, searches rust-lang/rust issues with `gh`) and prints the result into the log, the step
@@ -187,7 +188,9 @@ by hand. The `*-checks` configs and `PANIC` lines can also point at a generator 
   search in which one query failed is not a finished search. `STATUS.md` shows `- [x]` / `- [ ]` / `- [!]`, `INDEX.md` has "steps
   done" and the next open step, `finding.json` (schema 2) has the same as `steps`.
   - *Fully minimised* means: one run finished every pass before its deadlines (`complete once`) and the next run, started from that
-    result, changed nothing (`converged`); at most 6 runs.
+    result, changed nothing (`converged`); at most 6 runs. On top of that a finding needs reduction time before it can be `converged`: 60 minutes in total (40 when the program has 20 lines or fewer), summed over runs (`min_total_seconds` in `status.cfg`). A run works in stages that end at 10, 20, 40 and 60 cumulative minutes (`STAGE_MARKS`; the last one is skipped for a program of 20 lines or fewer), every finished stage stores its program and the time spent, so an interrupted job loses at most one stage. A round that changes nothing does not end the run while the time is not spent: the next round shuffles the candidates differently (`control::set_salt`).
+  - **Memory**: every compiler and test process is killed when its resident memory passes `RS_MEM_MB` (default 4096), for the fuzzer's own oracle and for `rs-minimizer`'s.
+  - `tools/handmin.py FILE CHECK` is a manual complement: random multi-range deletions on many threads (also under `ulimit -v`); it found nothing the built-in passes miss on the findings tried.
   - **Steps are reset when they should be**: every step has a version. When the tool gets better at it (a new reduction pass:
     `REDUCE_VERSION`, a better bisection ...) the version is bumped and the step is open again for every finding. Steps that depend
     on the program (everything except the minimisation itself) also carry a hash of the reduced program and its command line: as soon

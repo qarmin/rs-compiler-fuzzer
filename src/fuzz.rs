@@ -124,6 +124,30 @@ pub fn default_configs(nightly: bool) -> Vec<Config> {
     v
 }
 
+pub const I686_TARGET: &str = "i686-unknown-linux-gnu";
+
+/// 32-bit x86 builds compared among themselves (a 64-bit baseline would differ in `usize` and ABI by design). The first one is the baseline.
+pub fn i686_configs(nightly: bool) -> Vec<Config> {
+    let c = |name: &str, flags: &str| Config::new(name, &format!("--target {I686_TARGET} {flags}"));
+    let mut v = vec![
+        c("i686-O0", "-C opt-level=0"),
+        c("i686-O1", "-C opt-level=1"),
+        c("i686-O1-cgu16", "-C opt-level=1 -C codegen-units=16"),
+        c("i686-O2", "-C opt-level=2"),
+        c("i686-O3", "-C opt-level=3"),
+        c("i686-O3-cgu16", "-C opt-level=3 -C codegen-units=16"),
+        c("i686-Os", "-C opt-level=s"),
+        c("i686-Oz", "-C opt-level=z"),
+        c("i686-O3-checks", "-C opt-level=3 -C overflow-checks=on -C debug-assertions=on"),
+        c("i686-O3-fastisel", "-C opt-level=3 -C llvm-args=-fast-isel"),
+    ];
+    if nightly {
+        v.push(c("i686-O3-mir0", "-C opt-level=3 -Z mir-opt-level=0"));
+        v.push(c("i686-O3-mir3", "-C opt-level=3 -Z mir-opt-level=3"));
+    }
+    v
+}
+
 pub fn rustc_version(rustc: &[String]) -> String {
     let mut c = rustc_cmd(rustc);
     c.arg("-vV");

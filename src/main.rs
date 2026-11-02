@@ -57,6 +57,7 @@ OPTIONS:
   --rustc \"CMD\"         rustc command, e.g. \"rustc +nightly\" (default: rustc)
   --lto                 also compare the slow builds: thin/fat LTO and codegen-units=1 (off by default: too heavy for CI)
   --profile fast|full   fast = skip the slowest configs (fat/thin LTO, one codegen unit); default full
+  --i686                compare 32-bit builds (--target i686-unknown-linux-gnu, needs the target and gcc-multilib) instead of the x86_64 ones
   --configs a,b,c       use only these named configurations (first = baseline)
   --config NAME=FLAGS   add a custom configuration (repeatable)
   --compile-timeout S   per-compilation timeout (default 900)
@@ -121,6 +122,7 @@ fn main() {
     let mut jobs = std::thread::available_parallelism().map(|n| (n.get() / 2).max(1)).unwrap_or(1);
     let mut rustc = "rustc".to_string();
     let mut only: Option<Vec<String>> = None;
+    let mut i686 = false;
     let mut extra: Vec<Config> = Vec::new();
     let mut compile_timeout = 900u64;
     let mut run_timeout = 60u64;
@@ -172,6 +174,7 @@ fn main() {
             }
             "--jobs" => jobs = num(val()).max(1) as usize,
             "--rustc" => rustc = val(),
+            "--i686" => i686 = true,
             "--configs" => only = Some(val().split(',').map(|s| s.trim().to_string()).collect()),
             "--config" => {
                 let v = val();
@@ -236,6 +239,10 @@ fn main() {
                 println!("  {:<10} {}", s.name, s.about);
             }
             println!("stdlib tables: {}", strategies::stdlib_table_names().join(" "));
+            println!("--i686 configurations:");
+            for c in fuzz::i686_configs(true) {
+                println!("  {:<16} {}", c.name, c.flags.join(" "));
+            }
             println!("default configurations (nightly adds -Z ones):");
             for c in fuzz::default_configs(true) {
                 println!("  {:<16} {}{}", c.name, c.flags.join(" "), if c.slow { "   [slow: not in --profile fast]" } else { "" });
@@ -490,7 +497,8 @@ fn main() {
         }
         "fuzz" | "canary" | "verify" | "miri" => {
             let version = fuzz::rustc_version(&rustc_argv);
-            let mut configs = fuzz::default_configs(fuzz::is_nightly(&version));
+            let nightly = fuzz::is_nightly(&version);
+            let mut configs = if i686 { fuzz::i686_configs(nightly) } else { fuzz::default_configs(nightly) };
             configs.extend(extra);
             match profile.as_str() {
                 "fast" => configs.retain(|c| !c.slow),
