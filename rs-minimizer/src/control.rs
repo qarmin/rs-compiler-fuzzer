@@ -66,18 +66,29 @@ pub fn par() -> usize {
 }
 
 pub fn cores() -> usize {
-    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4)
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
 }
 
 fn meminfo_gb(key: &str) -> Option<f64> {
     let text = std::fs::read_to_string("/proc/meminfo").ok()?;
-    let kb: f64 = text.lines().find(|l| l.starts_with(key))?.split_whitespace().nth(1)?.parse().ok()?;
+    let kb: f64 = text
+        .lines()
+        .find(|l| l.starts_with(key))?
+        .split_whitespace()
+        .nth(1)?
+        .parse()
+        .ok()?;
     Some(kb / 1024.0 / 1024.0)
 }
 
 /// What the run has to work with: cores, memory, load, and how many oracle calls and external workers run at once.
 pub fn describe_system() -> String {
-    let load = std::fs::read_to_string("/proc/loadavg").ok().and_then(|t| t.split_whitespace().next().map(String::from)).unwrap_or_else(|| "?".into());
+    let load = std::fs::read_to_string("/proc/loadavg")
+        .ok()
+        .and_then(|t| t.split_whitespace().next().map(String::from))
+        .unwrap_or_else(|| "?".into());
     format!(
         "{} cores, {:.1} GB RAM ({:.1} GB free), load {load}; {} oracle calls at once (each starts rustc, which is multi-threaded itself)",
         cores(),
@@ -120,10 +131,14 @@ pub fn install_ctrlc() {
     let res = ctrlc::set_handler(|| {
         if INTERRUPTED.swap(true, Ordering::SeqCst) {
             crate::ui::restore_terminal();
-            warn!("Ctrl+C again - leaving at once (the checkpoint holds the best program found so far)");
+            warn!(
+                "Ctrl+C again - leaving at once (the checkpoint holds the best program found so far)"
+            );
             std::process::exit(130);
         }
-        warn!("Ctrl+C caught - finishing the running oracle calls, then writing up (press Ctrl+C again to leave at once)");
+        warn!(
+            "Ctrl+C caught - finishing the running oracle calls, then writing up (press Ctrl+C again to leave at once)"
+        );
     });
     if let Err(e) = res {
         error!("cannot install the Ctrl+C handler: {e}");
@@ -156,11 +171,19 @@ fn write_atomically(path: &std::path::Path, src: &str) {
 /// An accepted program that is bigger than the best one (macros expanded): it becomes the baseline and is written to disk, so
 /// that the file always holds the form every later step works on.
 pub fn rebase_checkpoint(src: &str) {
-    let Some(path) = CHECKPOINT.lock().unwrap().clone() else { return };
+    let Some(path) = CHECKPOINT.lock().unwrap().clone() else {
+        return;
+    };
     write_atomically(&path, src);
     note_size(BEST.lock().unwrap().as_deref(), src);
     *BEST.lock().unwrap() = Some(src.to_string());
-    info!("[{}] saved as the new baseline (a bigger but simpler program): {} lines, {} bytes ({})", stage(), src.lines().count(), src.len(), path.display());
+    info!(
+        "[{}] saved as the new baseline (a bigger but simpler program): {} lines, {} bytes ({})",
+        stage(),
+        src.lines().count(),
+        src.len(),
+        path.display()
+    );
 }
 
 static LAST_LOG: Mutex<Option<Instant>> = Mutex::new(None);
@@ -181,7 +204,10 @@ pub fn ui_on() -> bool {
 
 /// `(lines, bytes)` of the program the run is working on (the last accepted one).
 pub fn current_size() -> (usize, usize) {
-    (CUR_LINES.load(Ordering::Relaxed), CUR_BYTES.load(Ordering::Relaxed))
+    (
+        CUR_LINES.load(Ordering::Relaxed),
+        CUR_BYTES.load(Ordering::Relaxed),
+    )
 }
 
 /// The program before and after the last accepted change.
@@ -216,7 +242,12 @@ pub fn start_clock() {
 /// `attempt 125, 3.4/s`: how many oracle calls were made so far and how fast they go.
 fn attempts() -> String {
     let runs = ORACLE_RUNS.load(Ordering::Relaxed);
-    let secs = CLOCK.lock().unwrap().map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0).max(0.001);
+    let secs = CLOCK
+        .lock()
+        .unwrap()
+        .map(|t| t.elapsed().as_secs_f64())
+        .unwrap_or(0.0)
+        .max(0.001);
     format!("attempt {runs}, {:.1}/s", runs as f64 / secs)
 }
 
@@ -232,19 +263,45 @@ fn stage() -> String {
 }
 
 fn note_interesting(src: &str) {
-    let Some(path) = CHECKPOINT.lock().unwrap().clone() else { return };
+    let Some(path) = CHECKPOINT.lock().unwrap().clone() else {
+        return;
+    };
     let mut best = BEST.lock().unwrap();
     if best.as_ref().map(|b| src.len() < b.len()).unwrap_or(true) {
         // every improvement goes to the debug log (the file, not the terminal)
-        log::debug!("[{}] {} -> {} bytes ({})", stage(), best.as_ref().map(|b| b.len()).unwrap_or(0), src.len(), attempts());
+        log::debug!(
+            "[{}] {} -> {} bytes ({})",
+            stage(),
+            best.as_ref().map(|b| b.len()).unwrap_or(0),
+            src.len(),
+            attempts()
+        );
         // a pass that finds many tiny improvements would flood the log: a line when it matters (1% of the program) or every 3 seconds
         let mut last = LAST_LOG.lock().unwrap();
-        let big = best.as_ref().is_none_or(|b| (b.len() - src.len()) * 100 >= b.len());
+        let big = best
+            .as_ref()
+            .is_none_or(|b| (b.len() - src.len()) * 100 >= b.len());
         if big || last.is_none_or(|t| t.elapsed() >= Duration::from_secs(3)) {
             *last = Some(Instant::now());
             match best.as_ref() {
-                Some(b) => info!("[{}] smaller program: {} -> {} lines, {} -> {} bytes ({}; saved to {})", stage(), b.lines().count(), src.lines().count(), b.len(), src.len(), attempts(), path.display()),
-                None => info!("[{}] first interesting program: {} lines, {} bytes ({}; saved to {})", stage(), src.lines().count(), src.len(), attempts(), path.display()),
+                Some(b) => info!(
+                    "[{}] smaller program: {} -> {} lines, {} -> {} bytes ({}; saved to {})",
+                    stage(),
+                    b.lines().count(),
+                    src.lines().count(),
+                    b.len(),
+                    src.len(),
+                    attempts(),
+                    path.display()
+                ),
+                None => info!(
+                    "[{}] first interesting program: {} lines, {} bytes ({}; saved to {})",
+                    stage(),
+                    src.lines().count(),
+                    src.len(),
+                    attempts(),
+                    path.display()
+                ),
             }
         }
         write_atomically(&path, src);
@@ -301,7 +358,10 @@ static REJECTED: Mutex<Option<Rejected>> = Mutex::new(None);
 
 /// What the compiler complained about, without the names: `error[E0425]: cannot find value `_` in this scope`.
 fn reason_of(stderr: &str) -> String {
-    let line = stderr.lines().find(|l| l.starts_with("error")).unwrap_or("error: (no message)");
+    let line = stderr
+        .lines()
+        .find(|l| l.starts_with("error"))
+        .unwrap_or("error: (no message)");
     let mut out = String::new();
     let mut in_quote = false;
     for c in line.chars() {
@@ -326,21 +386,33 @@ pub fn note_invalid(stderr: &str) {
     ORACLE_INVALID.fetch_add(1, Ordering::Relaxed);
     let reason = reason_of(stderr);
     let mut g = REJECTED.lock().unwrap();
-    let r = g.get_or_insert_with(|| Rejected { reasons: HashMap::new(), recent: VecDeque::new() });
+    let r = g.get_or_insert_with(|| Rejected {
+        reasons: HashMap::new(),
+        recent: VecDeque::new(),
+    });
     if r.reasons.len() < 500 || r.reasons.contains_key(&reason) {
         *r.reasons.entry(reason.clone()).or_insert(0) += 1;
     }
     if r.recent.len() >= REJECTED_KEPT {
         r.recent.pop_front();
     }
-    let first_line = stderr.lines().find(|l| l.starts_with("error")).unwrap_or("").chars().take(200).collect::<String>();
+    let first_line = stderr
+        .lines()
+        .find(|l| l.starts_with("error"))
+        .unwrap_or("")
+        .chars()
+        .take(200)
+        .collect::<String>();
     r.recent.push_back(format!("[{}] {}", stage(), first_line));
 }
 
 /// The most frequent reasons candidates were rejected, most frequent first.
 pub fn rejection_reasons(n: usize) -> Vec<(String, usize)> {
     let g = REJECTED.lock().unwrap();
-    let mut v: Vec<(String, usize)> = g.as_ref().map(|r| r.reasons.iter().map(|(k, c)| (k.clone(), *c)).collect()).unwrap_or_default();
+    let mut v: Vec<(String, usize)> = g
+        .as_ref()
+        .map(|r| r.reasons.iter().map(|(k, c)| (k.clone(), *c)).collect())
+        .unwrap_or_default();
     v.sort_by_key(|(_, c)| std::cmp::Reverse(*c));
     v.truncate(n);
     v
@@ -399,7 +471,8 @@ pub fn start_heartbeat(every: Duration) {
                 every.as_secs(),
                 ORACLE_HITS.load(Ordering::Relaxed),
                 ORACLE_ACTIVE.load(Ordering::Relaxed),
-                best.map(|l| format!("{l} lines")).unwrap_or_else(|| "(nothing yet)".into()),
+                best.map(|l| format!("{l} lines"))
+                    .unwrap_or_else(|| "(nothing yet)".into()),
             );
             last_runs = runs;
         }

@@ -1,7 +1,7 @@
-use handsome_logger::{ColorChoice, CombinedLogger, Config, TermLogger, TerminalMode, WriteLogger};
 use crate::control::{install_ctrlc, set_checkpoint, set_parallel, start_heartbeat};
 use crate::rustc_oracle::{Mode, Spec, detect};
 use crate::{Cached, Options, Oracle, ReduceLog, minimize, script_predicate};
+use handsome_logger::{ColorChoice, CombinedLogger, Config, TermLogger, TerminalMode, WriteLogger};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -49,10 +49,17 @@ fn die(msg: &str) -> ! {
 
 /// The command line of the standalone reducer (`args` without the program name); returns the exit code.
 pub fn run(args: Vec<String>) -> i32 {
-    let (mut input, mut test, mut output, mut log_file) = (None::<PathBuf>, None::<String>, None::<PathBuf>, None::<PathBuf>);
+    let (mut input, mut test, mut output, mut log_file) = (
+        None::<PathBuf>,
+        None::<String>,
+        None::<PathBuf>,
+        None::<PathBuf>,
+    );
     let mut ui_mode = "auto".to_string();
     let mut budget = 600u64;
-    let mut jobs = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+    let mut jobs = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
     let mut rustc = "rustc".to_string();
     let mut flags = String::new();
     let (mut compile_secs, mut run_secs) = (120u64, 20u64);
@@ -60,7 +67,11 @@ pub fn run(args: Vec<String>) -> i32 {
     let mut wanted: Option<(String, Option<String>)> = None;
     let mut it = args.iter().peekable();
     while let Some(a) = it.next() {
-        let mut val = || it.next().cloned().unwrap_or_else(|| die(&format!("{a} needs a value")));
+        let mut val = || {
+            it.next()
+                .cloned()
+                .unwrap_or_else(|| die(&format!("{a} needs a value")))
+        };
         match a.as_str() {
             "-h" | "--help" => {
                 print!("{HELP}");
@@ -68,10 +79,26 @@ pub fn run(args: Vec<String>) -> i32 {
             }
             "--test" => test = Some(val()),
             "-o" | "--output" => output = Some(PathBuf::from(val())),
-            "--budget" => budget = val().parse().unwrap_or_else(|_| die("--budget needs a number")),
-            "--jobs" => jobs = val().parse().unwrap_or_else(|_| die("--jobs needs a number")),
-            "--timeout" => compile_secs = val().parse().unwrap_or_else(|_| die("--timeout needs a number of seconds")),
-            "--run-timeout" => run_secs = val().parse().unwrap_or_else(|_| die("--run-timeout needs a number of seconds")),
+            "--budget" => {
+                budget = val()
+                    .parse()
+                    .unwrap_or_else(|_| die("--budget needs a number"))
+            }
+            "--jobs" => {
+                jobs = val()
+                    .parse()
+                    .unwrap_or_else(|_| die("--jobs needs a number"))
+            }
+            "--timeout" => {
+                compile_secs = val()
+                    .parse()
+                    .unwrap_or_else(|_| die("--timeout needs a number of seconds"))
+            }
+            "--run-timeout" => {
+                run_secs = val()
+                    .parse()
+                    .unwrap_or_else(|_| die("--run-timeout needs a number of seconds"))
+            }
             "--rustc" => rustc = val(),
             "--flags" => flags = val(),
             "--log" => log_file = Some(PathBuf::from(val())),
@@ -79,14 +106,21 @@ pub fn run(args: Vec<String>) -> i32 {
             "--ice" => wanted = Some(("ice".into(), None)),
             "--auto" => wanted = None,
             "--error" | "--hang" => {
-                let optional = it.peek().filter(|n| !n.starts_with('-') && !n.ends_with(".rs")).map(|n| n.to_string());
+                let optional = it
+                    .peek()
+                    .filter(|n| !n.starts_with('-') && !n.ends_with(".rs"))
+                    .map(|n| n.to_string());
                 if optional.is_some() {
                     it.next();
                 }
                 wanted = Some((a.trim_start_matches('-').to_string(), optional));
             }
-            "--oom" | "--vs" | "--stdout" | "--stderr" => wanted = Some((a.trim_start_matches('-').to_string(), Some(val()))),
-            other if !other.starts_with('-') && input.is_none() => input = Some(PathBuf::from(other)),
+            "--oom" | "--vs" | "--stdout" | "--stderr" => {
+                wanted = Some((a.trim_start_matches('-').to_string(), Some(val())))
+            }
+            other if !other.starts_with('-') && input.is_none() => {
+                input = Some(PathBuf::from(other))
+            }
             other => die(&format!("unknown option `{other}` (see --help)")),
         }
     }
@@ -99,17 +133,26 @@ pub fn run(args: Vec<String>) -> i32 {
     }
     let mut loggers: Vec<Box<dyn handsome_logger::SharedLogger>> = Vec::new();
     if !ui {
-        loggers.push(TermLogger::new(Config::default(), TerminalMode::Mixed, ColorChoice::Auto));
+        loggers.push(TermLogger::new(
+            Config::default(),
+            TerminalMode::Mixed,
+            ColorChoice::Auto,
+        ));
     }
     if let Some(f) = &log_file {
-        match std::fs::OpenOptions::new().create(true).append(true).open(f) {
+        match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(f)
+        {
             Ok(file) => loggers.push(WriteLogger::new(Config::default(), file)),
             Err(e) => eprintln!("cannot write {}: {e}", f.display()),
         }
     }
     let _ = CombinedLogger::init(loggers);
 
-    let src = std::fs::read_to_string(&input).unwrap_or_else(|e| die(&format!("{}: {e}", input.display())));
+    let src = std::fs::read_to_string(&input)
+        .unwrap_or_else(|e| die(&format!("{}: {e}", input.display())));
     let work = std::env::temp_dir().join(format!("rs-minimizer-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&work);
     let words = |t: &str| t.split_whitespace().map(String::from).collect::<Vec<_>>();
@@ -125,31 +168,84 @@ pub fn run(args: Vec<String>) -> i32 {
         Box::new(oracle)
     } else {
         if rustc.trim().is_empty() {
-            die("without --test the compiler is needed: give --rustc \"rustc\" (or \"rustc +nightly\")");
+            die(
+                "without --test the compiler is needed: give --rustc \"rustc\" (or \"rustc +nightly\")",
+            );
         }
-        let mut spec = Spec { rustc: words(&rustc), flags: words(&flags), mode: Mode::Hang { secs: compile_secs }, compile_timeout: Duration::from_secs(compile_secs), run_timeout: Duration::from_secs(run_secs) };
+        let mut spec = Spec {
+            rustc: words(&rustc),
+            flags: words(&flags),
+            mode: Mode::Hang { secs: compile_secs },
+            compile_timeout: Duration::from_secs(compile_secs),
+            run_timeout: Duration::from_secs(run_secs),
+        };
         let detected = detect(&spec, &src);
         let (mode, why) = match (&wanted, detected) {
             (None, Some(d)) => d,
-            (None, None) => die("nothing to reduce: the file compiles, runs and behaves the same at every optimisation level. Say what to keep: --vs \"FLAGS\", --stdout TEXT, --stderr TEXT, --error TEXT, --oom GB, --hang"),
+            (None, None) => die(
+                "nothing to reduce: the file compiles, runs and behaves the same at every optimisation level. Say what to keep: --vs \"FLAGS\", --stdout TEXT, --stderr TEXT, --error TEXT, --oom GB, --hang",
+            ),
             (Some((name, arg)), detected) => {
-                let from_detection = |kind: fn(&Mode) -> bool| detected.clone().filter(|(m, _)| kind(m));
+                let from_detection =
+                    |kind: fn(&Mode) -> bool| detected.clone().filter(|(m, _)| kind(m));
                 match (name.as_str(), arg) {
-                    ("ice", _) => from_detection(|m| matches!(m, Mode::Crash { .. })).unwrap_or_else(|| die("--ice: the compiler does not crash on this file with these flags")),
-                    ("error", Some(text)) => (Mode::Error { needle: text.clone() }, format!("the compilation fails with `{text}`")),
-                    ("error", None) => from_detection(|m| matches!(m, Mode::Error { .. })).unwrap_or_else(|| die("--error: the compilation of this file does not fail")),
+                    ("ice", _) => from_detection(|m| matches!(m, Mode::Crash { .. }))
+                        .unwrap_or_else(|| {
+                            die("--ice: the compiler does not crash on this file with these flags")
+                        }),
+                    ("error", Some(text)) => (
+                        Mode::Error {
+                            needle: text.clone(),
+                        },
+                        format!("the compilation fails with `{text}`"),
+                    ),
+                    ("error", None) => from_detection(|m| matches!(m, Mode::Error { .. }))
+                        .unwrap_or_else(|| {
+                            die("--error: the compilation of this file does not fail")
+                        }),
                     ("hang", secs) => {
-                        let secs = secs.as_ref().and_then(|s| s.parse().ok()).unwrap_or(compile_secs);
+                        let secs = secs
+                            .as_ref()
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(compile_secs);
                         spec.compile_timeout = Duration::from_secs(secs);
-                        (Mode::Hang { secs }, format!("the compilation does not finish in {secs}s"))
+                        (
+                            Mode::Hang { secs },
+                            format!("the compilation does not finish in {secs}s"),
+                        )
                     }
                     ("oom", Some(gb)) => {
-                        let mb = (gb.parse::<f64>().unwrap_or_else(|_| die("--oom needs a number of GB")) * 1024.0) as u64;
-                        (Mode::Oom { mb }, format!("the compiler uses more than {gb} GB"))
+                        let mb = (gb
+                            .parse::<f64>()
+                            .unwrap_or_else(|_| die("--oom needs a number of GB"))
+                            * 1024.0) as u64;
+                        (
+                            Mode::Oom { mb },
+                            format!("the compiler uses more than {gb} GB"),
+                        )
                     }
-                    ("vs", Some(other)) => (Mode::Differ { other_flags: words(other) }, format!("the program behaves differently with `{other}` and with `{flags}`")),
-                    ("stdout", Some(text)) => (Mode::Output { stdout: true, needle: text.clone() }, format!("the program prints `{text}`")),
-                    ("stderr", Some(text)) => (Mode::Output { stdout: false, needle: text.clone() }, format!("the program's stderr contains `{text}`")),
+                    ("vs", Some(other)) => (
+                        Mode::Differ {
+                            other_flags: words(other),
+                        },
+                        format!(
+                            "the program behaves differently with `{other}` and with `{flags}`"
+                        ),
+                    ),
+                    ("stdout", Some(text)) => (
+                        Mode::Output {
+                            stdout: true,
+                            needle: text.clone(),
+                        },
+                        format!("the program prints `{text}`"),
+                    ),
+                    ("stderr", Some(text)) => (
+                        Mode::Output {
+                            stdout: false,
+                            needle: text.clone(),
+                        },
+                        format!("the program's stderr contains `{text}`"),
+                    ),
                     _ => die("this option needs a value (see --help)"),
                 }
             }
@@ -169,19 +265,44 @@ pub fn run(args: Vec<String>) -> i32 {
     start_heartbeat(Duration::from_secs(30));
     set_checkpoint(Some(output.clone()));
     let mut opts = Options::new(Duration::from_secs(budget));
-    opts.rustc = if uses_rustc_passes { words(&rustc) } else { Vec::new() };
+    opts.rustc = if uses_rustc_passes {
+        words(&rustc)
+    } else {
+        Vec::new()
+    };
     if ui {
-        let log_name = log_file.as_ref().map(|f| f.display().to_string()).unwrap_or_default();
-        crate::ui::start(&input.display().to_string(), Duration::from_secs(budget), (src.lines().count(), src.len()), &output.display().to_string(), &log_name);
+        let log_name = log_file
+            .as_ref()
+            .map(|f| f.display().to_string())
+            .unwrap_or_default();
+        crate::ui::start(
+            &input.display().to_string(),
+            Duration::from_secs(budget),
+            (src.lines().count(), src.len()),
+            &output.display().to_string(),
+            &log_name,
+        );
     }
     let mut log = ReduceLog::default();
     let result = minimize(&*oracle, &src, &opts, &mut log, &mut |_, _, _| None);
     let _ = std::fs::write(&output, &result);
     let _ = std::fs::remove_dir_all(&work);
     crate::control::write_rejected_log(&output.with_extension("rejected.log"));
-    log::info!("done: {} -> {} lines, written to {}", src.lines().count(), result.lines().count(), output.display());
+    log::info!(
+        "done: {} -> {} lines, written to {}",
+        src.lines().count(),
+        result.lines().count(),
+        output.display()
+    );
     if ui {
-        crate::ui::stop(&[format!("{} lines / {} bytes -> {} lines / {} bytes, written to {}", src.lines().count(), src.len(), result.lines().count(), result.len(), output.display())]);
+        crate::ui::stop(&[format!(
+            "{} lines / {} bytes -> {} lines / {} bytes, written to {}",
+            src.lines().count(),
+            src.len(),
+            result.lines().count(),
+            result.len(),
+            output.display()
+        )]);
     }
     0
 }

@@ -44,10 +44,51 @@ const ANY: &[&str] = &[
 
 fn flit(rng: &mut Rng, ty: &str, nonzero: bool) -> String {
     let c: &[&str] = &[
-        "0.0", "-0.0", "1.0", "-1.0", "0.5", "3.25", "1e10", "-1e10", "1e-10", "123456.789", "16777216.0", "16777217.0", "9007199254740993.0",
-        "2.5", "-2.5", "0.1", "0.3", "1e30", "-7.75", "255.5", "65535.9", "4294967295.5", "1.5", "-0.5", "7.0", "100.0",
+        "0.0",
+        "-0.0",
+        "1.0",
+        "-1.0",
+        "0.5",
+        "3.25",
+        "1e10",
+        "-1e10",
+        "1e-10",
+        "123456.789",
+        "16777216.0",
+        "16777217.0",
+        "9007199254740993.0",
+        "2.5",
+        "-2.5",
+        "0.1",
+        "0.3",
+        "1e30",
+        "-7.75",
+        "255.5",
+        "65535.9",
+        "4294967295.5",
+        "1.5",
+        "-0.5",
+        "7.0",
+        "100.0",
     ];
-    let nz: &[&str] = &["1.0", "-1.0", "0.5", "3.25", "1e10", "-1e10", "1e-10", "123456.789", "2.5", "-2.5", "0.1", "-7.75", "255.5", "1.5", "-0.5", "7.0"];
+    let nz: &[&str] = &[
+        "1.0",
+        "-1.0",
+        "0.5",
+        "3.25",
+        "1e10",
+        "-1e10",
+        "1e-10",
+        "123456.789",
+        "2.5",
+        "-2.5",
+        "0.1",
+        "-7.75",
+        "255.5",
+        "1.5",
+        "-0.5",
+        "7.0",
+    ];
     let s = if nonzero {
         match rng.below(10) {
             0 => format!("{ty}::MAX"),
@@ -67,13 +108,19 @@ fn flit(rng: &mut Rng, ty: &str, nonzero: bool) -> String {
             _ => format!("{}{ty}", rng.pick(c)),
         }
     };
-    if s.starts_with('-') { format!("({s})") } else { s }
+    if s.starts_with('-') {
+        format!("({s})")
+    } else {
+        s
+    }
 }
 
 pub fn generate(rng: &mut Rng) -> String {
     let ty = *rng.pick(&["f32", "f64"]);
     let bitty = if ty == "f32" { "u32" } else { "u64" };
-    let mut p = format!("        type T = {ty};\n        fn qz(x: T) -> i64 {{ (x * 1024.0).round() as i64 }}\n");
+    let mut p = format!(
+        "        type T = {ty};\n        fn qz(x: T) -> i64 {{ (x * 1024.0).round() as i64 }}\n"
+    );
     for v in ["a", "b", "c"] {
         let l = flit(rng, ty, false);
         p += &format!("        let {v}: T = {};\n", bbv(rng, l));
@@ -83,8 +130,15 @@ pub fn generate(rng: &mut Rng) -> String {
         p += &format!("        let {v}: T = {};\n", bbv(rng, l));
     }
     let iv = format!("{}i32", rng.below(2000) as i64 - 1000);
-    let uv = format!("{}{bitty}", rng.next_u64() >> if ty == "f32" { 32 } else { 0 });
-    p += &format!("        let i: i32 = {}; let u: {bitty} = {};\n", bbv(rng, iv), bbv(rng, uv));
+    let uv = format!(
+        "{}{bitty}",
+        rng.next_u64() >> if ty == "f32" { 32 } else { 0 }
+    );
+    p += &format!(
+        "        let i: i32 = {}; let u: {bitty} = {};\n",
+        bbv(rng, iv),
+        bbv(rng, uv)
+    );
     let n = rng.range(6, 14);
     let body = emit(rng, &p, &[ANY], n);
     wrap("", &body)

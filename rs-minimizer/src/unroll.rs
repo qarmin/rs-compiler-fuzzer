@@ -34,12 +34,16 @@ fn parse_macros(src: &str) -> Vec<MacroDef> {
         if name.is_empty() || i >= b.len() || b[i] != b'{' {
             continue;
         }
-        let Some(def_close) = matching(b, i) else { continue };
+        let Some(def_close) = matching(b, i) else {
+            continue;
+        };
         let inner_start = skip_ws(b, i + 1);
         if inner_start >= b.len() || !matches!(b[inner_start], b'(' | b'[' | b'{') {
             continue;
         }
-        let Some(pat_close) = matching(b, inner_start) else { continue };
+        let Some(pat_close) = matching(b, inner_start) else {
+            continue;
+        };
         let pat = &src[inner_start + 1..pat_close];
         let mut j = skip_ws(b, pat_close + 1);
         if !src[j..].starts_with("=>") {
@@ -49,27 +53,68 @@ fn parse_macros(src: &str) -> Vec<MacroDef> {
         if j >= b.len() || !matches!(b[j], b'(' | b'[' | b'{') {
             continue;
         }
-        let Some(body_close) = matching(b, j) else { continue };
+        let Some(body_close) = matching(b, j) else {
+            continue;
+        };
         // exactly one rule: only `;` / whitespace may follow it
-        if !src[body_close + 1..def_close].trim().trim_start_matches(';').trim().is_empty() {
+        if !src[body_close + 1..def_close]
+            .trim()
+            .trim_start_matches(';')
+            .trim()
+            .is_empty()
+        {
             continue;
         }
         let body = src[j + 1..body_close].to_string();
         let pat_t = pat.trim();
         let comma_sep = pat_t.ends_with("),*");
-        let (params, repeated) = if let Some(rest) = pat_t.strip_prefix("$(").and_then(|r| r.strip_suffix(")*").or_else(|| r.strip_suffix("),*"))) {
-            (vec![rest.split(':').next().unwrap_or("").trim().trim_start_matches('$').to_string()], true)
+        let (params, repeated) = if let Some(rest) = pat_t
+            .strip_prefix("$(")
+            .and_then(|r| r.strip_suffix(")*").or_else(|| r.strip_suffix("),*")))
+        {
+            (
+                vec![
+                    rest.split(':')
+                        .next()
+                        .unwrap_or("")
+                        .trim()
+                        .trim_start_matches('$')
+                        .to_string(),
+                ],
+                true,
+            )
         } else {
-            let names: Vec<String> = pat_t.split(',').map(|p| p.trim().trim_start_matches('$').split(':').next().unwrap_or("").to_string()).filter(|n| !n.is_empty()).collect();
+            let names: Vec<String> = pat_t
+                .split(',')
+                .map(|p| {
+                    p.trim()
+                        .trim_start_matches('$')
+                        .split(':')
+                        .next()
+                        .unwrap_or("")
+                        .to_string()
+                })
+                .filter(|n| !n.is_empty())
+                .collect();
             if names.is_empty() && !pat_t.is_empty() {
                 continue;
             }
             (names, false)
         };
-        if params.iter().any(|p| p.is_empty() || !p.bytes().all(is_ident)) {
+        if params
+            .iter()
+            .any(|p| p.is_empty() || !p.bytes().all(is_ident))
+        {
             continue;
         }
-        out.push(MacroDef { name, range: (start, def_close + 1), params, repeated, comma_sep, body });
+        out.push(MacroDef {
+            name,
+            range: (start, def_close + 1),
+            params,
+            repeated,
+            comma_sep,
+            body,
+        });
     }
     out
 }
@@ -109,8 +154,20 @@ fn expansion(def: &MacroDef, args: &[String]) -> Option<String> {
             return None;
         }
         let inner = &body[at + 2..close];
-        let each: Vec<String> = args.iter().map(|a| substitute(inner, &def.params, std::slice::from_ref(a)).trim().to_string()).collect();
-        format!("{}{}{}", &body[..at], each.join("\n"), &body[close + 2 + sep_len..])
+        let each: Vec<String> = args
+            .iter()
+            .map(|a| {
+                substitute(inner, &def.params, std::slice::from_ref(a))
+                    .trim()
+                    .to_string()
+            })
+            .collect();
+        format!(
+            "{}{}{}",
+            &body[..at],
+            each.join("\n"),
+            &body[close + 2 + sep_len..]
+        )
     } else {
         substitute(body, &def.params, args)
     };
@@ -121,7 +178,11 @@ fn expansion(def: &MacroDef, args: &[String]) -> Option<String> {
     let stmt = t.starts_with("let ") || t.starts_with('{');
     Some(if stmt && !t.contains("//") {
         let one = t.lines().map(str::trim).collect::<Vec<_>>().join(" ");
-        if t.starts_with('{') { one } else { format!("{{ {one} }}") }
+        if t.starts_with('{') {
+            one
+        } else {
+            format!("{{ {one} }}")
+        }
     } else {
         t.to_string()
     })
@@ -136,7 +197,9 @@ fn expand_def(src: &str, def: &MacroDef, region_end: usize) -> String {
     let mut from = def.range.1;
     let mut all_done = true;
     while from < region_end {
-        let Some(p) = src[from..region_end].find(&pat) else { break };
+        let Some(p) = src[from..region_end].find(&pat) else {
+            break;
+        };
         let at = from + p;
         from = at + pat.len();
         if at > 0 && is_ident(b[at - 1]) {
@@ -152,9 +215,15 @@ fn expand_def(src: &str, def: &MacroDef, region_end: usize) -> String {
             continue;
         };
         let args: Vec<String> = if def.repeated && !def.comma_sep {
-            src[open + 1..close].split_whitespace().map(String::from).collect()
+            src[open + 1..close]
+                .split_whitespace()
+                .map(String::from)
+                .collect()
         } else {
-            top_args(src, open, close).into_iter().map(|(s, e)| src[s..e].trim().to_string()).collect()
+            top_args(src, open, close)
+                .into_iter()
+                .map(|(s, e)| src[s..e].trim().to_string())
+                .collect()
         };
         if !def.repeated && args.len() != def.params.len() {
             all_done = false;
@@ -192,7 +261,12 @@ fn expand_all(src: &str, accept: &mut dyn FnMut(&str, &str) -> bool) -> String {
     loop {
         let defs = parse_macros(&cur);
         let Some(d) = defs.get(skip) else { break };
-        let region_end = defs.iter().skip(skip + 1).find(|o| o.name == d.name).map(|o| o.range.0).unwrap_or(cur.len());
+        let region_end = defs
+            .iter()
+            .skip(skip + 1)
+            .find(|o| o.name == d.name)
+            .map(|o| o.range.0)
+            .unwrap_or(cur.len());
         let cand = expand_def(&cur, d, region_end);
         if cand != cur && accept(&d.name, &cand) {
             cur = cand;
@@ -211,13 +285,24 @@ pub fn expand_macros(it: &dyn Oracle, src: &str) -> String {
     }
     let all = expand_all(src, &mut |_, _| true);
     if all != src && it.check(&all) {
-        info!("expanded all macros ({} -> {} lines)", src.lines().count(), all.lines().count());
+        info!(
+            "expanded all macros ({} -> {} lines)",
+            src.lines().count(),
+            all.lines().count()
+        );
         crate::control::rebase_checkpoint(&all);
         return all;
     }
     let cur = expand_all(src, &mut |name, cand| {
         let ok = it.check(cand);
-        info!("macro {name}: {}", if ok { "expanded" } else { "expanding it changes the behaviour - kept" });
+        info!(
+            "macro {name}: {}",
+            if ok {
+                "expanded"
+            } else {
+                "expanding it changes the behaviour - kept"
+            }
+        );
         ok
     });
     if cur != src {
@@ -225,7 +310,9 @@ pub fn expand_macros(it: &dyn Oracle, src: &str) -> String {
     }
     let left = parse_macros(&cur).len();
     if left > 0 {
-        info!("{left} macro definition(s) could not be expanded (several rules, unsupported patterns or the bug depends on them)");
+        info!(
+            "{left} macro definition(s) could not be expanded (several rules, unsupported patterns or the bug depends on them)"
+        );
     }
     cur
 }
@@ -241,8 +328,12 @@ fn without_catch_unwind(src: &str, only: Option<usize>) -> (String, usize) {
         let at = from + p;
         from = at + CATCH.len();
         let assert_open = at + "std::panic::catch_unwind(std::panic::AssertUnwindSafe".len();
-        let Some(inner_close) = matching(b, assert_open) else { continue };
-        let Some(outer_close) = matching(b, at + "std::panic::catch_unwind".len()) else { continue };
+        let Some(inner_close) = matching(b, assert_open) else {
+            continue;
+        };
+        let Some(outer_close) = matching(b, at + "std::panic::catch_unwind".len()) else {
+            continue;
+        };
         let tail = ".is_ok()";
         if inner_close + 1 != outer_close {
             continue;
@@ -293,10 +384,24 @@ pub fn drop_catch_unwind(it: &dyn Oracle, src: &str) -> String {
 
 fn drop_hook(it: &dyn Oracle, src: &str) -> String {
     let lines: Vec<&str> = src.lines().collect();
-    let Some(i) = lines.iter().position(|l| l.trim_start().starts_with("std::panic::set_hook(")) else { return src.to_string() };
-    let cand: Vec<&str> = lines.iter().enumerate().filter(|(n, _)| *n != i).map(|(_, l)| *l).collect();
+    let Some(i) = lines
+        .iter()
+        .position(|l| l.trim_start().starts_with("std::panic::set_hook("))
+    else {
+        return src.to_string();
+    };
+    let cand: Vec<&str> = lines
+        .iter()
+        .enumerate()
+        .filter(|(n, _)| *n != i)
+        .map(|(_, l)| *l)
+        .collect();
     let cand = cand.join("\n") + "\n";
-    if it.check(&cand) { cand } else { src.to_string() }
+    if it.check(&cand) {
+        cand
+    } else {
+        src.to_string()
+    }
 }
 
 /// First reduction step: plain code instead of macros and panic plumbing.
@@ -308,7 +413,6 @@ pub fn unroll(it: &dyn Oracle, src: &str) -> String {
     }
     cur
 }
-
 
 /// `let(a, b) = ..` is the same program as `let (a, b) = ..`; the passes look for `let ` (reducers that strip whitespace write the
 /// first form).

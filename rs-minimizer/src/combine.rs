@@ -6,7 +6,11 @@ use crate::oracle::Oracle;
 /// `winners` are indices of candidates that were accepted individually. `build` makes the text for a subset of them (or `None` when
 /// they cannot be combined, e.g. overlapping ranges). The whole set is tried first, then its first half; the result is the subset that
 /// was accepted together with its text. `None` when neither works (the caller falls back to the first winner).
-pub fn merge_winners(it: &dyn Oracle, winners: &[usize], build: impl Fn(&[usize]) -> Option<String>) -> Option<(Vec<usize>, String)> {
+pub fn merge_winners(
+    it: &dyn Oracle,
+    winners: &[usize],
+    build: impl Fn(&[usize]) -> Option<String>,
+) -> Option<(Vec<usize>, String)> {
     if winners.len() < 2 {
         return None;
     }
@@ -15,10 +19,11 @@ pub fn merge_winners(it: &dyn Oracle, winners: &[usize], build: impl Fn(&[usize]
             break;
         }
         let subset = &winners[..take];
-        if let Some(text) = build(subset) {
-            if !text.trim().is_empty() && it.check(&text) {
-                return Some((subset.to_vec(), text));
-            }
+        if let Some(text) = build(subset)
+            && !text.trim().is_empty()
+            && it.check(&text)
+        {
+            return Some((subset.to_vec(), text));
         }
     }
     None

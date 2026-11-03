@@ -131,6 +131,12 @@ jobs:
             ~/sr
             ~/.cargo/bin/cargo-bisect-rustc
           key: reducers-${{ runner.os }}-v1
+      - name: Cache the LLVM binaries used to verify LLVM culprits (apt.llvm.org packages, tools/llvm_issue.py)
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/llvm-issue
+          key: llvm-issue-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: llvm-issue-${{ runner.os }}-
       - name: Install triage tools (other channels, Miri, Shrink Ray)
         run: |
           for c in stable beta nightly; do rustup toolchain install $c --profile minimal; done
@@ -217,6 +223,7 @@ jobs:
             echo "::group::NEW/TRIAGED $d"
             cat "$d/STATUS.md" 2>/dev/null | head -c 6000; echo
             head -c 5000 "$d/report.md"
+            [ -f "$d/LLVM_ISSUE.md" ] && { echo "----- LLVM_ISSUE.md (first lines) -----"; head -c 3000 "$d/LLVM_ISSUE.md"; echo; }
             echo; echo "----- case.rs (first 120 lines) -----"
             grep -v '^\s*$' "$d/case.rs" | awk '/^mod case_/{f=1} f' | head -120
             echo "::endgroup::"

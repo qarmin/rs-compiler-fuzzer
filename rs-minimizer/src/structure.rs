@@ -13,7 +13,12 @@ use std::time::Instant;
 
 fn whole_words(text: &str, word: &str) -> Vec<usize> {
     let b = text.as_bytes();
-    text.match_indices(word).map(|(i, _)| i).filter(|&i| (i == 0 || !is_ident(b[i - 1])) && b.get(i + word.len()).is_none_or(|&c| !is_ident(c))).collect()
+    text.match_indices(word)
+        .map(|(i, _)| i)
+        .filter(|&i| {
+            (i == 0 || !is_ident(b[i - 1])) && b.get(i + word.len()).is_none_or(|&c| !is_ident(c))
+        })
+        .collect()
 }
 
 /// How `.0` of the wrapper is rewritten: gone (reads through a reference still work), or `*x` (a write through a reference).
@@ -34,7 +39,10 @@ fn declared_as_reference(src: &str, pos: usize, ident: &str) -> bool {
         let before = src[..at].trim_end();
         if let Some(rest) = after.strip_prefix(':').filter(|r| !r.starts_with(':')) {
             best = Some((at, rest.trim_start().starts_with('&')));
-        } else if before.ends_with("let") || before.ends_with("let mut") || before.ends_with("mut") && before[..before.len() - 3].trim_end().ends_with("let") {
+        } else if before.ends_with("let")
+            || before.ends_with("let mut")
+            || before.ends_with("mut") && before[..before.len() - 3].trim_end().ends_with("let")
+        {
             let eq = src[at..].find('=').map(|p| at + p);
             if let Some(eq) = eq {
                 let init = src[eq + 1..].trim_start();
@@ -78,7 +86,10 @@ fn unwrap_newtype(src: &str, item: &crate::items::Item, deref: Access) -> Option
             i = e;
             continue;
         }
-        if src[i..].starts_with(name) && (i == 0 || !is_ident(b[i - 1])) && b.get(i + name.len()).is_none_or(|&c| !is_ident(c)) {
+        if src[i..].starts_with(name)
+            && (i == 0 || !is_ident(b[i - 1]))
+            && b.get(i + name.len()).is_none_or(|&c| !is_ident(c))
+        {
             let ctor = b.get(i + name.len()) == Some(&b'(');
             out.push_str(if ctor { "" } else { ty });
             i += name.len();
@@ -92,7 +103,10 @@ fn unwrap_newtype(src: &str, item: &crate::items::Item, deref: Access) -> Option
             if k < i && !b[k].is_ascii_digit() {
                 // `ident.0`: the identifier is already in `out`
                 let rest = src[i + 2..].trim_start();
-                let writes = (rest.starts_with('=') && !rest.starts_with("==")) || ["+=", "-=", "*=", "/=", "%=", "^=", "|=", "&=", "<<=", ">>="].iter().any(|o| rest.starts_with(o));
+                let writes = (rest.starts_with('=') && !rest.starts_with("=="))
+                    || ["+=", "-=", "*=", "/=", "%=", "^=", "|=", "&=", "<<=", ">>="]
+                        .iter()
+                        .any(|o| rest.starts_with(o));
                 let ident = &src[k..i];
                 let as_ref = deref.auto && declared_as_reference(src, i, ident);
                 if as_ref || (!deref.auto && if writes { deref.write } else { deref.read }) {
@@ -114,11 +128,37 @@ pub fn unwrap_newtypes(it: &dyn Oracle, src: &str, deadline: Instant) -> String 
     let mut cur = src.to_string();
     for _ in 0..4 {
         let items = item_ranges(&cur);
-        let access = [Access { write: false, read: false, auto: true }, Access { write: false, read: false, auto: false }, Access { write: true, read: false, auto: false }, Access { write: true, read: true, auto: false }];
+        let access = [
+            Access {
+                write: false,
+                read: false,
+                auto: true,
+            },
+            Access {
+                write: false,
+                read: false,
+                auto: false,
+            },
+            Access {
+                write: true,
+                read: false,
+                auto: false,
+            },
+            Access {
+                write: true,
+                read: true,
+                auto: false,
+            },
+        ];
         let cands: Vec<String> = items
             .iter()
             .filter(|i| i.kw == "struct" && cur.as_bytes().get(i.header_end) == Some(&b';'))
-            .flat_map(|i| access.iter().filter_map(|a| unwrap_newtype(&cur, i, *a)).collect::<Vec<_>>())
+            .flat_map(|i| {
+                access
+                    .iter()
+                    .filter_map(|a| unwrap_newtype(&cur, i, *a))
+                    .collect::<Vec<_>>()
+            })
             .collect();
         if cands.is_empty() || expired(deadline) {
             break;
@@ -126,7 +166,11 @@ pub fn unwrap_newtypes(it: &dyn Oracle, src: &str, deadline: Instant) -> String 
         let res = par_map(&cands, par_checks(), |c| it.check(c));
         match res.iter().position(|&ok| ok) {
             Some(p) => {
-                info!("newtype struct unwrapped ({} -> {} bytes)", cur.len(), cands[p].len());
+                info!(
+                    "newtype struct unwrapped ({} -> {} bytes)",
+                    cur.len(),
+                    cands[p].len()
+                );
                 cur = cands[p].clone();
             }
             None => break,
@@ -141,7 +185,12 @@ pub fn stub_bodies(it: &dyn Oracle, src: &str, deadline: Instant) -> String {
     let b = src.as_bytes();
     let edits: Vec<(usize, usize, String)> = item_ranges(src)
         .iter()
-        .filter(|i| i.kw == "fn" && b.get(i.header_end) == Some(&b'{') && i.end - i.header_end > 12 && i.name_in(src) != Some("main"))
+        .filter(|i| {
+            i.kw == "fn"
+                && b.get(i.header_end) == Some(&b'{')
+                && i.end - i.header_end > 12
+                && i.name_in(src) != Some("main")
+        })
         .map(|i| (i.header_end, i.end, "{ unimplemented!() }".to_string()))
         .collect();
     greedy_edits(it, src, edits, deadline)
@@ -183,15 +232,32 @@ fn pointer_arg_lists(src: &str, d: &crate::inline::FnDef) -> Vec<Vec<(usize, usi
             continue;
         }
         let open = at + 2;
-        let Some(close) = matching(b, open) else { continue };
+        let Some(close) = matching(b, open) else {
+            continue;
+        };
         let args = top_args(src, open, close);
-        if args.len() != want.len() || args.iter().zip(&want).any(|(&(s, e), w)| squash(&src[s..e]) != *w) {
+        if args.len() != want.len()
+            || args
+                .iter()
+                .zip(&want)
+                .any(|(&(s, e), w)| squash(&src[s..e]) != *w)
+        {
             continue;
         }
         out.push(args);
         let before = src[..at].trim_end();
-        let Some(before) = before.strip_suffix(':') else { continue };
-        let name: String = before.trim_end().chars().rev().take_while(|c| c.is_alphanumeric() || *c == '_').collect::<Vec<_>>().into_iter().rev().collect();
+        let Some(before) = before.strip_suffix(':') else {
+            continue;
+        };
+        let name: String = before
+            .trim_end()
+            .chars()
+            .rev()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
         if name.is_empty() {
             continue;
         }
@@ -220,20 +286,37 @@ pub fn remove_params(it: &dyn Oracle, src: &str, deadline: Instant) -> String {
         }
         let defs = all_defs_of(&cur);
         let mut cands: Vec<String> = Vec::new();
-        for d in defs.iter().filter(|d| d.name != "main" && !d.in_trait && defs.iter().filter(|o| o.name == d.name).count() == 1) {
+        for d in defs.iter().filter(|d| {
+            d.name != "main" && !d.in_trait && defs.iter().filter(|o| o.name == d.name).count() == 1
+        }) {
             let b = cur.as_bytes();
             let (ns, ne) = d.item.name.unwrap();
             let open = skip_ws(b, ne);
-            let open = if b.get(open) == Some(&b'<') { cur[open..].find('(').map(|p| open + p).unwrap_or(open) } else { open };
-            let Some(close) = (b.get(open) == Some(&b'(')).then(|| matching(b, open)).flatten() else { continue };
+            let open = if b.get(open) == Some(&b'<') {
+                cur[open..].find('(').map(|p| open + p).unwrap_or(open)
+            } else {
+                open
+            };
+            let Some(close) = (b.get(open) == Some(&b'('))
+                .then(|| matching(b, open))
+                .flatten()
+            else {
+                continue;
+            };
             let mut header_args = top_args(&cur, open, close);
             let offset = usize::from(d.recv.is_some());
             let sites = find_sites(&cur, d);
-            if header_args.len() != d.params.len() + offset || (sites.is_empty() && !d.params.is_empty() && ns == 0) {
+            if header_args.len() != d.params.len() + offset
+                || (sites.is_empty() && !d.params.is_empty() && ns == 0)
+            {
                 continue;
             }
             header_args = header_args.into_iter().collect();
-            let pointers = if d.recv.is_none() { pointer_arg_lists(&cur, d) } else { Vec::new() };
+            let pointers = if d.recv.is_none() {
+                pointer_arg_lists(&cur, d)
+            } else {
+                Vec::new()
+            };
             for pi in (0..d.params.len()).rev() {
                 let mut cuts = vec![list_removal(&cur, &header_args[offset..], pi)];
                 for s in &sites {
@@ -261,7 +344,11 @@ pub fn remove_params(it: &dyn Oracle, src: &str, deadline: Instant) -> String {
         }
         match accepted {
             Some(next) => {
-                info!("a parameter and its arguments removed ({} -> {} bytes)", cur.len(), next.len());
+                info!(
+                    "a parameter and its arguments removed ({} -> {} bytes)",
+                    cur.len(),
+                    next.len()
+                );
                 cur = next;
             }
             None => break,
@@ -280,12 +367,22 @@ pub fn remove_fields(it: &dyn Oracle, src: &str, deadline: Instant) -> String {
         let items = item_ranges(&cur);
         let b = cur.as_bytes();
         let mut cands: Vec<String> = Vec::new();
-        for item in items.iter().filter(|i| i.kw == "struct" && b.get(i.header_end) == Some(&b'{')) {
-            let Some(name) = item.name_in(&cur) else { continue };
+        for item in items
+            .iter()
+            .filter(|i| i.kw == "struct" && b.get(i.header_end) == Some(&b'{'))
+        {
+            let Some(name) = item.name_in(&cur) else {
+                continue;
+            };
             let fields = top_args(&cur, item.header_end, item.end - 1);
             for (fi, &(fs, fe)) in fields.iter().enumerate().rev() {
                 let text = cur[fs..fe].trim();
-                let fname: String = text.trim_start_matches("pub ").trim().chars().take_while(|c| is_ident(*c as u8)).collect();
+                let fname: String = text
+                    .trim_start_matches("pub ")
+                    .trim()
+                    .chars()
+                    .take_while(|c| is_ident(*c as u8))
+                    .collect();
                 if fname.is_empty() {
                     continue;
                 }
@@ -299,11 +396,15 @@ pub fn remove_fields(it: &dyn Oracle, src: &str, deadline: Instant) -> String {
                     if before.ends_with("struct") || before.ends_with("impl") {
                         continue;
                     }
-                    let Some(c) = matching(b, after) else { continue };
+                    let Some(c) = matching(b, after) else {
+                        continue;
+                    };
                     let entries = top_args(&cur, after, c);
                     if let Some(ei) = entries.iter().position(|&(s, e)| {
                         let t = cur[s..e].trim();
-                        t == fname || t.strip_prefix(fname.as_str()).is_some_and(|r| r.trim_start().starts_with(':'))
+                        t == fname
+                            || t.strip_prefix(fname.as_str())
+                                .is_some_and(|r| r.trim_start().starts_with(':'))
                     }) {
                         cuts.push(list_removal(&cur, &entries, ei));
                     }
@@ -327,7 +428,11 @@ pub fn remove_fields(it: &dyn Oracle, src: &str, deadline: Instant) -> String {
         }
         match accepted {
             Some(next) => {
-                info!("a struct field removed ({} -> {} bytes)", cur.len(), next.len());
+                info!(
+                    "a struct field removed ({} -> {} bytes)",
+                    cur.len(),
+                    next.len()
+                );
                 cur = next;
             }
             None => break,
@@ -360,7 +465,9 @@ pub fn remove_variants_and_arms(it: &dyn Oracle, src: &str, deadline: Instant) -
             k += 1;
         }
         let Some(open) = open else { continue };
-        let Some(close) = matching(b, open) else { continue };
+        let Some(close) = matching(b, open) else {
+            continue;
+        };
         let mut arms: Vec<(usize, usize)> = Vec::new();
         let mut start = open + 1;
         let mut i = open + 1;
@@ -372,7 +479,11 @@ pub fn remove_variants_and_arms(it: &dyn Oracle, src: &str, deadline: Instant) -
                         i = c;
                         // `pat => { .. }` ends here unless a comma follows
                         let next = skip_ws(b, c + 1);
-                        if was_block && b.get(next) != Some(&b',') && src[start..i].contains("=>") && !matches!(b.get(next), Some(b'.') | Some(b'?')) {
+                        if was_block
+                            && b.get(next) != Some(&b',')
+                            && src[start..i].contains("=>")
+                            && !matches!(b.get(next), Some(b'.') | Some(b'?'))
+                        {
                             arms.push((start, c + 1));
                             start = c + 1;
                         }
@@ -394,13 +505,20 @@ pub fn remove_variants_and_arms(it: &dyn Oracle, src: &str, deadline: Instant) -
         }
     }
     let mut groups: Vec<Vec<(usize, usize)>> = all_arms.iter().map(|&a| vec![a]).collect();
-    for item in items.iter().filter(|i| i.kw == "enum" && b.get(i.header_end) == Some(&b'{')) {
+    for item in items
+        .iter()
+        .filter(|i| i.kw == "enum" && b.get(i.header_end) == Some(&b'{'))
+    {
         let variants = top_args(src, item.header_end, item.end - 1);
         if variants.len() < 2 {
             continue;
         }
         for (vi, &(vs, ve)) in variants.iter().enumerate() {
-            let vname: String = src[vs..ve].trim().chars().take_while(|c| is_ident(*c as u8)).collect();
+            let vname: String = src[vs..ve]
+                .trim()
+                .chars()
+                .take_while(|c| is_ident(*c as u8))
+                .collect();
             let mut group = vec![list_removal(src, &variants, vi)];
             // arms that name the variant (`E::V`, `V`) go with it
             for &(s, e) in &all_arms {

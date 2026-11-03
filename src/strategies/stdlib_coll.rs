@@ -58,35 +58,89 @@ const HASH: &[&str] = &[
 
 fn map_lit(rng: &mut Rng, ty: &str) -> String {
     let n = rng.range(0, 6);
-    let items: Vec<String> = (0..n).map(|_| format!("({}, {}u64)", if rng.chance(50) { lit(rng, ty) } else { small_ints(rng, ty) }, rng.below(100))).collect();
+    let items: Vec<String> = (0..n)
+        .map(|_| {
+            format!(
+                "({}, {}u64)",
+                if rng.chance(50) {
+                    lit(rng, ty)
+                } else {
+                    small_ints(rng, ty)
+                },
+                rng.below(100)
+            )
+        })
+        .collect();
     format!("std::collections::BTreeMap::from([{}])", items.join(", "))
 }
 
 fn set_lit(rng: &mut Rng, ty: &str) -> String {
     let n = rng.range(0, 6);
-    let items: Vec<String> = (0..n).map(|_| if rng.chance(50) { lit(rng, ty) } else { small_ints(rng, ty) }).collect();
+    let items: Vec<String> = (0..n)
+        .map(|_| {
+            if rng.chance(50) {
+                lit(rng, ty)
+            } else {
+                small_ints(rng, ty)
+            }
+        })
+        .collect();
     format!("std::collections::BTreeSet::from([{}])", items.join(", "))
 }
 
 fn vec_lit(rng: &mut Rng, ty: &str) -> String {
     let n = rng.range(0, 7);
-    let items: Vec<String> = (0..n).map(|_| if rng.chance(40) { lit(rng, ty) } else { small_ints(rng, ty) }).collect();
+    let items: Vec<String> = (0..n)
+        .map(|_| {
+            if rng.chance(40) {
+                lit(rng, ty)
+            } else {
+                small_ints(rng, ty)
+            }
+        })
+        .collect();
     format!("vec![{}]", items.join(", "))
 }
 
 pub fn generate(rng: &mut Rng) -> String {
-    let ty = *rng.pick(&["u8", "i8", "u16", "i16", "u32", "i32", "u64", "i64", "usize", "u128", "i128", "isize"]);
+    let ty = *rng.pick(&[
+        "u8", "i8", "u16", "i16", "u32", "i32", "u64", "i64", "usize", "u128", "i128", "isize",
+    ]);
     let mut p = format!("        type T = {ty};\n");
     for v in ["a", "b", "c"] {
-        let l = if rng.chance(50) { lit(rng, ty) } else { small_ints(rng, ty) };
+        let l = if rng.chance(50) {
+            lit(rng, ty)
+        } else {
+            small_ints(rng, ty)
+        };
         p += &format!("        let {v}: T = {};\n", bbv(rng, l));
     }
     let (v, m, s) = (vec_lit(rng, ty), map_lit(rng, ty), set_lit(rng, ty));
-    p += &format!("        let v: Vec<T> = {}; let m: std::collections::BTreeMap<T, u64> = {}; let s: std::collections::BTreeSet<T> = {};\n", bbv(rng, v), bbv(rng, m), bbv(rng, s));
+    p += &format!(
+        "        let v: Vec<T> = {}; let m: std::collections::BTreeMap<T, u64> = {}; let s: std::collections::BTreeSet<T> = {};\n",
+        bbv(rng, v),
+        bbv(rng, m),
+        bbv(rng, s)
+    );
     let k = rng.below(7);
-    p += &format!("        let k: usize = {};\n", bbv(rng, format!("{k}usize")));
+    p += &format!(
+        "        let k: usize = {};\n",
+        bbv(rng, format!("{k}usize"))
+    );
     let n = rng.range(5, 10);
-    let table = pick_table(rng, &[("bmap", BMAP), ("bmap", BMAP), ("bset", BSET), ("bset", BSET), ("heap", HEAP), ("list", LIST), ("hash", HASH), ("hash", HASH)]);
+    let table = pick_table(
+        rng,
+        &[
+            ("bmap", BMAP),
+            ("bmap", BMAP),
+            ("bset", BSET),
+            ("bset", BSET),
+            ("heap", HEAP),
+            ("list", LIST),
+            ("hash", HASH),
+            ("hash", HASH),
+        ],
+    );
     let body = emit(rng, &p, &[table], n);
     wrap("", &body)
 }

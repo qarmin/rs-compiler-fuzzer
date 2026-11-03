@@ -35,7 +35,10 @@ pub fn children<'a>(items: &'a [Item], parent: Option<&Item>) -> Vec<&'a Item> {
     items
         .iter()
         .filter(|i| {
-            let innermost = items.iter().filter(|p| p.contains(i)).max_by_key(|p| p.start);
+            let innermost = items
+                .iter()
+                .filter(|p| p.contains(i))
+                .max_by_key(|p| p.start);
             match (innermost, parent) {
                 (None, None) => true,
                 (Some(a), Some(b)) => a.start == b.start,
@@ -45,7 +48,20 @@ pub fn children<'a>(items: &'a [Item], parent: Option<&Item>) -> Vec<&'a Item> {
         .collect()
 }
 
-const KEYWORDS: [&str; 12] = ["fn", "struct", "enum", "impl", "trait", "mod", "use", "const", "static", "type", "union", "macro_rules"];
+const KEYWORDS: [&str; 12] = [
+    "fn",
+    "struct",
+    "enum",
+    "impl",
+    "trait",
+    "mod",
+    "use",
+    "const",
+    "static",
+    "type",
+    "union",
+    "macro_rules",
+];
 const PREFIXES: [&str; 5] = ["pub", "unsafe", "async", "extern", "default"];
 
 fn skip_string(b: &[u8], mut i: usize) -> usize {
@@ -91,10 +107,11 @@ pub fn item_ranges(src: &str) -> Vec<Item> {
             }
             let word = &src[i..j];
             let item_position = matches!(prev, b';' | b'{' | b'}' | b']');
-            if item_position && (KEYWORDS.contains(&word) || PREFIXES.contains(&word)) {
-                if let Some(item) = parse_item(src, i) {
-                    out.push(item);
-                }
+            if item_position
+                && (KEYWORDS.contains(&word) || PREFIXES.contains(&word))
+                && let Some(item) = parse_item(src, i)
+            {
+                out.push(item);
             }
             prev = b[j - 1];
             i = j;
@@ -138,7 +155,10 @@ fn parse_item(src: &str, start: usize) -> Option<Item> {
     if matches!(kw.as_str(), "const" | "static") && matches!(b.get(n), Some(b'{') | Some(b'|')) {
         return None;
     }
-    let name = if matches!(kw.as_str(), "fn" | "struct" | "enum" | "trait" | "mod" | "const" | "static" | "type" | "union") {
+    let name = if matches!(
+        kw.as_str(),
+        "fn" | "struct" | "enum" | "trait" | "mod" | "const" | "static" | "type" | "union"
+    ) {
         let n = skip_ws(b, i);
         let mut e = n;
         while e < b.len() && is_ident(b[e]) {
@@ -165,9 +185,23 @@ fn parse_item(src: &str, start: usize) -> Option<Item> {
                         end = n + 1;
                     }
                 }
-                return Some(Item { start, end, header_end: k, kw, name });
+                return Some(Item {
+                    start,
+                    end,
+                    header_end: k,
+                    kw,
+                    name,
+                });
             }
-            b';' if depth == 0 => return Some(Item { start, end: k + 1, header_end: k, kw, name }),
+            b';' if depth == 0 => {
+                return Some(Item {
+                    start,
+                    end: k + 1,
+                    header_end: k,
+                    kw,
+                    name,
+                });
+            }
             _ => {}
         }
         k += 1;
@@ -188,11 +222,11 @@ pub fn attribute_ranges(src: &str) -> Vec<(usize, usize)> {
             if b.get(j) == Some(&b'!') {
                 j += 1;
             }
-            if b.get(j) == Some(&b'[') {
-                if let Some(close) = matching(b, j) {
-                    out.push((i, close + 1));
-                    i = close;
-                }
+            if b.get(j) == Some(&b'[')
+                && let Some(close) = matching(b, j)
+            {
+                out.push((i, close + 1));
+                i = close;
             }
         }
         i += 1;
@@ -202,7 +236,12 @@ pub fn attribute_ranges(src: &str) -> Vec<(usize, usize)> {
 
 /// Greedy deletion of ranges, last ones first, `par_checks()` candidates per round; earlier ranges keep their meaning when a
 /// later one is removed.
-pub(crate) fn delete_ranges(it: &dyn Oracle, src: &str, mut ranges: Vec<(usize, usize)>, deadline: Instant) -> String {
+pub(crate) fn delete_ranges(
+    it: &dyn Oracle,
+    src: &str,
+    mut ranges: Vec<(usize, usize)>,
+    deadline: Instant,
+) -> String {
     let mut cur = src.to_string();
     ranges.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
     let width = par_checks();
@@ -211,9 +250,17 @@ pub(crate) fn delete_ranges(it: &dyn Oracle, src: &str, mut ranges: Vec<(usize, 
             break;
         }
         let batch: Vec<(usize, usize)> = ranges.iter().take(width).copied().collect();
-        let cands: Vec<String> = batch.iter().map(|&(s, e)| format!("{}{}", &cur[..s], &cur[e..])).collect();
+        let cands: Vec<String> = batch
+            .iter()
+            .map(|&(s, e)| format!("{}{}", &cur[..s], &cur[e..]))
+            .collect();
         let res = par_map(&cands, width, |c| !c.trim().is_empty() && it.check(c));
-        let winners: Vec<usize> = res.iter().enumerate().filter(|(_, ok)| **ok).map(|(k, _)| k).collect();
+        let winners: Vec<usize> = res
+            .iter()
+            .enumerate()
+            .filter(|(_, ok)| **ok)
+            .map(|(k, _)| k)
+            .collect();
         let Some(first) = winners.first().copied() else {
             ranges.drain(..batch.len());
             continue;
@@ -222,15 +269,22 @@ pub(crate) fn delete_ranges(it: &dyn Oracle, src: &str, mut ranges: Vec<(usize, 
         let build = |subset: &[usize]| -> Option<String> {
             let sets: Vec<Vec<(usize, usize)>> = subset.iter().map(|&k| vec![batch[k]]).collect();
             let refs: Vec<&[(usize, usize)]> = sets.iter().map(|v| v.as_slice()).collect();
-            Some(crate::combine::without_ranges(&cur, &crate::combine::disjoint_union(&refs)))
+            Some(crate::combine::without_ranges(
+                &cur,
+                &crate::combine::disjoint_union(&refs),
+            ))
         };
-        let (applied, text) = crate::combine::merge_winners(it, &winners, build).unwrap_or((vec![first], cands[first].clone()));
+        let (applied, text) = crate::combine::merge_winners(it, &winners, build)
+            .unwrap_or((vec![first], cands[first].clone()));
         let sets: Vec<Vec<(usize, usize)>> = applied.iter().map(|&k| vec![batch[k]]).collect();
         let refs: Vec<&[(usize, usize)]> = sets.iter().map(|v| v.as_slice()).collect();
         let removed = crate::combine::disjoint_union(&refs);
         cur = text;
         // what lay inside is gone, what lay after moved; what lay before is untouched
-        ranges = ranges.into_iter().filter_map(|r| remap(r, &removed)).collect();
+        ranges = ranges
+            .into_iter()
+            .filter_map(|r| remap(r, &removed))
+            .collect();
         ranges.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
     }
     cur
@@ -250,21 +304,35 @@ pub fn shrink_items(it: &dyn Oracle, src: &str, deadline: Instant) -> String {
                 }
                 t
             };
-            cur = if it.check(&all) { all } else { delete_ranges(it, &cur, attrs, deadline) };
+            cur = if it.check(&all) {
+                all
+            } else {
+                delete_ranges(it, &cur, attrs, deadline)
+            };
         }
-        let items: Vec<(usize, usize)> = item_ranges(&cur).into_iter().map(|i| (i.start, i.end)).collect();
+        let items: Vec<(usize, usize)> = item_ranges(&cur)
+            .into_iter()
+            .map(|i| (i.start, i.end))
+            .collect();
         cur = delete_ranges(it, &cur, items, deadline);
         if cur.len() == before || expired(deadline) {
             break;
         }
     }
     if cur.len() < src.len() {
-        info!("items and attributes: {} -> {} lines", src.lines().count(), cur.lines().count());
+        info!(
+            "items and attributes: {} -> {} lines",
+            src.lines().count(),
+            cur.lines().count()
+        );
     }
     cur
 }
 
-const BLOCK_STARTS: [&str; 13] = ["if", "while", "for", "loop", "match", "unsafe", "fn", "struct", "enum", "impl", "trait", "mod", "const"];
+const BLOCK_STARTS: [&str; 13] = [
+    "if", "while", "for", "loop", "match", "unsafe", "fn", "struct", "enum", "impl", "trait",
+    "mod", "const",
+];
 
 fn statements_in(src: &str, open: usize, close: usize, out: &mut Vec<(usize, usize)>) {
     let b = src.as_bytes();
@@ -284,10 +352,16 @@ fn statements_in(src: &str, open: usize, close: usize, out: &mut Vec<(usize, usi
                 statements_in(src, i, c, out);
                 i = c;
                 let text = src[start..].trim_start();
-                let word: String = text.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
-                let blocky = text.starts_with('{') || BLOCK_STARTS.contains(&word.as_str()) || (word == "pub");
+                let word: String = text
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
+                let blocky = text.starts_with('{')
+                    || BLOCK_STARTS.contains(&word.as_str())
+                    || (word == "pub");
                 let next = skip_ws(b, c + 1);
-                let continues = src[next..].starts_with("else") || matches!(b.get(next), Some(b'.') | Some(b'?'));
+                let continues = src[next..].starts_with("else")
+                    || matches!(b.get(next), Some(b'.') | Some(b'?'));
                 if blocky && !continues && b.get(next) != Some(&b';') {
                     out.push((first(start), c + 1));
                     start = c + 1;
@@ -310,7 +384,10 @@ fn statements_in(src: &str, open: usize, close: usize, out: &mut Vec<(usize, usi
 /// Statements (up to `;`, or a whole `if`/`loop`/block) of every function body, at every nesting depth.
 pub fn statement_ranges(src: &str) -> Vec<(usize, usize)> {
     let mut out = Vec::new();
-    for item in item_ranges(src).iter().filter(|i| i.kw == "fn" && src.as_bytes().get(i.header_end) == Some(&b'{')) {
+    for item in item_ranges(src)
+        .iter()
+        .filter(|i| i.kw == "fn" && src.as_bytes().get(i.header_end) == Some(&b'{'))
+    {
         statements_in(src, item.header_end, item.end - 1, &mut out);
     }
     out.sort();
@@ -322,14 +399,20 @@ pub fn statement_ranges(src: &str) -> Vec<(usize, usize)> {
 pub fn shrink_statements(it: &dyn Oracle, src: &str, deadline: Instant) -> String {
     let cur = delete_ranges(it, src, statement_ranges(src), deadline);
     if cur.len() < src.len() {
-        info!("statements: {} -> {} lines", src.lines().count(), cur.lines().count());
+        info!(
+            "statements: {} -> {} lines",
+            src.lines().count(),
+            cur.lines().count()
+        );
     }
     cur
 }
 
 fn mentions(text: &str, word: &str) -> bool {
     let b = text.as_bytes();
-    text.match_indices(word).any(|(i, _)| (i == 0 || !is_ident(b[i - 1])) && b.get(i + word.len()).is_none_or(|&c| !is_ident(c)))
+    text.match_indices(word).any(|(i, _)| {
+        (i == 0 || !is_ident(b[i - 1])) && b.get(i + word.len()).is_none_or(|&c| !is_ident(c))
+    })
 }
 
 /// Where `(s, e)` lands after the ranges in `removed` (sorted, disjoint) are cut out; `None` if it overlaps one of them.
@@ -360,7 +443,12 @@ fn merge_ranges(mut ranges: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
 
 /// Groups of ranges deleted together (an item and everything that mentions it): ddmin over the groups, chunks of neighbouring
 /// groups first, then smaller ones, down to single groups.
-pub fn delete_groups(it: &dyn Oracle, src: &str, mut groups: Vec<Vec<(usize, usize)>>, deadline: Instant) -> String {
+pub fn delete_groups(
+    it: &dyn Oracle,
+    src: &str,
+    mut groups: Vec<Vec<(usize, usize)>>,
+    deadline: Instant,
+) -> String {
     let mut cur = src.to_string();
     // neighbours in the text are neighbours in the list
     groups.sort_by_key(|g| g.iter().map(|r| r.0).min().unwrap_or(0));
@@ -379,29 +467,63 @@ pub fn delete_groups(it: &dyn Oracle, src: &str, mut groups: Vec<Vec<(usize, usi
             if expired(deadline) {
                 return cur;
             }
-            let starts: Vec<isize> = (0..width as isize).map(|k| i - k * n as isize).take_while(|&s| s >= 0).collect();
-            let merged: Vec<Vec<(usize, usize)>> = starts.iter().map(|&s| merge_ranges(groups[s as usize..s as usize + n].iter().flatten().copied().collect())).collect();
+            let starts: Vec<isize> = (0..width as isize)
+                .map(|k| i - k * n as isize)
+                .take_while(|&s| s >= 0)
+                .collect();
+            let merged: Vec<Vec<(usize, usize)>> = starts
+                .iter()
+                .map(|&s| {
+                    merge_ranges(
+                        groups[s as usize..s as usize + n]
+                            .iter()
+                            .flatten()
+                            .copied()
+                            .collect(),
+                    )
+                })
+                .collect();
             let cands: Vec<String> = merged.iter().map(|m| cut(&cur, m)).collect();
             let res = par_map(&cands, width, |c| !c.trim().is_empty() && it.check(c));
-            let winners: Vec<usize> = res.iter().enumerate().filter(|(_, ok)| **ok).map(|(k, _)| k).collect();
+            let winners: Vec<usize> = res
+                .iter()
+                .enumerate()
+                .filter(|(_, ok)| **ok)
+                .map(|(k, _)| k)
+                .collect();
             match winners.first().copied() {
                 Some(first) => {
                     let build = |subset: &[usize]| -> Option<String> {
-                        let sets: Vec<&[(usize, usize)]> = subset.iter().map(|&k| merged[k].as_slice()).collect();
-                        Some(crate::combine::without_ranges(&cur, &crate::combine::disjoint_union(&sets)))
+                        let sets: Vec<&[(usize, usize)]> =
+                            subset.iter().map(|&k| merged[k].as_slice()).collect();
+                        Some(crate::combine::without_ranges(
+                            &cur,
+                            &crate::combine::disjoint_union(&sets),
+                        ))
                     };
-                    let (applied, text) = crate::combine::merge_winners(it, &winners, build).unwrap_or((vec![first], cands[first].clone()));
-                    let sets: Vec<&[(usize, usize)]> = applied.iter().map(|&k| merged[k].as_slice()).collect();
+                    let (applied, text) = crate::combine::merge_winners(it, &winners, build)
+                        .unwrap_or((vec![first], cands[first].clone()));
+                    let sets: Vec<&[(usize, usize)]> =
+                        applied.iter().map(|&k| merged[k].as_slice()).collect();
                     let removed = crate::combine::disjoint_union(&sets);
                     cur = text;
                     // the chunks that were applied leave the list, highest first (the lower ones keep their index)
-                    let mut chunk_starts: Vec<usize> = applied.iter().map(|&k| starts[k] as usize).collect();
+                    let mut chunk_starts: Vec<usize> =
+                        applied.iter().map(|&k| starts[k] as usize).collect();
                     chunk_starts.sort_unstable_by(|a, b| b.cmp(a));
                     for s in &chunk_starts {
                         groups.drain(*s..*s + n);
                     }
-                    groups = groups.into_iter().filter_map(|g| g.into_iter().map(|r| remap(r, &removed)).collect::<Option<Vec<_>>>()).collect();
-                    i = (*chunk_starts.last().unwrap() as isize).min(groups.len() as isize - n as isize);
+                    groups = groups
+                        .into_iter()
+                        .filter_map(|g| {
+                            g.into_iter()
+                                .map(|r| remap(r, &removed))
+                                .collect::<Option<Vec<_>>>()
+                        })
+                        .collect();
+                    i = (*chunk_starts.last().unwrap() as isize)
+                        .min(groups.len() as isize - n as isize);
                 }
                 None => i = starts.last().copied().unwrap_or(0) - n as isize,
             }
@@ -420,17 +542,29 @@ pub fn shrink_items_with_users(it: &dyn Oracle, src: &str, deadline: Instant) ->
     let statements = statement_ranges(src);
     let mut groups: Vec<Vec<(usize, usize)>> = Vec::new();
     for item in &items {
-        let Some(name) = item.name_in(src) else { continue };
+        let Some(name) = item.name_in(src) else {
+            continue;
+        };
         if name == "main" {
             continue;
         }
         let own = (item.start, item.end);
         let outside = |s: usize, e: usize| e <= own.0 || s >= own.1;
         // items whose header mentions the name (`impl Name`, `fn f(x: Name)`) and the innermost statements that mention it
-        let mut hits: Vec<(usize, usize)> = items.iter().filter(|o| outside(o.start, o.end) && mentions(&src[o.start..o.header_end], name)).map(|o| (o.start, o.end)).collect();
-        let mentioning: Vec<(usize, usize)> = statements.iter().copied().filter(|&(s, e)| outside(s, e) && mentions(&src[s..e], name)).collect();
+        let mut hits: Vec<(usize, usize)> = items
+            .iter()
+            .filter(|o| outside(o.start, o.end) && mentions(&src[o.start..o.header_end], name))
+            .map(|o| (o.start, o.end))
+            .collect();
+        let mentioning: Vec<(usize, usize)> = statements
+            .iter()
+            .copied()
+            .filter(|&(s, e)| outside(s, e) && mentions(&src[s..e], name))
+            .collect();
         for &(s, e) in &mentioning {
-            let innermost = !mentioning.iter().any(|&(s2, e2)| (s2, e2) != (s, e) && s <= s2 && e2 <= e);
+            let innermost = !mentioning
+                .iter()
+                .any(|&(s2, e2)| (s2, e2) != (s, e) && s <= s2 && e2 <= e);
             let inside_hit_item = hits.iter().any(|&(hs, he)| hs <= s && e <= he);
             if innermost && !inside_hit_item {
                 hits.push((s, e));
@@ -451,7 +585,10 @@ pub fn shrink_items_with_users(it: &dyn Oracle, src: &str, deadline: Instant) ->
     let before = src.lines().count();
     let cur = delete_groups(it, src, groups, deadline);
     if cur.len() < src.len() {
-        info!("items with their users: {before} -> {} lines", cur.lines().count());
+        info!(
+            "items with their users: {before} -> {} lines",
+            cur.lines().count()
+        );
     }
     cur
 }
@@ -476,10 +613,15 @@ fn block_statement_lists(src: &str, open: usize, close: usize, out: &mut Vec<Vec
                 block_statement_lists(src, i, c, out);
                 i = c;
                 let text = src[start..].trim_start();
-                let word: String = text.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
-                let blocky = text.starts_with('{') || BLOCK_STARTS.contains(&word.as_str()) || word == "pub";
+                let word: String = text
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
+                let blocky =
+                    text.starts_with('{') || BLOCK_STARTS.contains(&word.as_str()) || word == "pub";
                 let next = skip_ws(b, c + 1);
-                let continues = src[next..].starts_with("else") || matches!(b.get(next), Some(b'.') | Some(b'?'));
+                let continues = src[next..].starts_with("else")
+                    || matches!(b.get(next), Some(b'.') | Some(b'?'));
                 if blocky && !continues && b.get(next) != Some(&b';') {
                     mine.push((first(start), c + 1));
                     start = c + 1;
@@ -505,7 +647,10 @@ fn block_statement_lists(src: &str, open: usize, close: usize, out: &mut Vec<Vec
 /// An item's range including the attributes in front of it.
 fn with_attributes(attrs: &[(usize, usize)], src: &str, start: usize) -> usize {
     let mut s = start;
-    while let Some(&(a, _)) = attrs.iter().find(|&&(a, e)| a < s && e <= s && src[e..s].trim().is_empty()) {
+    while let Some(&(a, _)) = attrs
+        .iter()
+        .find(|&&(a, e)| a < s && e <= s && src[e..s].trim().is_empty())
+    {
         s = a;
     }
     s
@@ -520,16 +665,25 @@ fn sibling_lists(src: &str) -> Vec<(u8, Vec<(usize, usize)>)> {
     let range_of = |i: &Item| (with_attributes(&attrs, src, i.start), i.end);
     let mut lists: Vec<(u8, Vec<(usize, usize)>)> = Vec::new();
     let mut push_items = |parent: Option<&Item>| {
-        let kids: Vec<(usize, usize)> = children(&items, parent).into_iter().filter(|k| k.kw != "use").map(&range_of).collect();
+        let kids: Vec<(usize, usize)> = children(&items, parent)
+            .into_iter()
+            .filter(|k| k.kw != "use")
+            .map(&range_of)
+            .collect();
         if kids.len() >= 2 {
             lists.push((if parent.is_some() { 1 } else { 2 }, kids));
         }
     };
     push_items(None);
-    for item in items.iter().filter(|i| matches!(i.kw.as_str(), "mod" | "impl" | "trait") && b.get(i.header_end) == Some(&b'{')) {
+    for item in items.iter().filter(|i| {
+        matches!(i.kw.as_str(), "mod" | "impl" | "trait") && b.get(i.header_end) == Some(&b'{')
+    }) {
         push_items(Some(item));
     }
-    for item in items.iter().filter(|i| i.kw == "fn" && b.get(i.header_end) == Some(&b'{')) {
+    for item in items
+        .iter()
+        .filter(|i| i.kw == "fn" && b.get(i.header_end) == Some(&b'{'))
+    {
         let mut found = Vec::new();
         block_statement_lists(src, item.header_end, item.end - 1, &mut found);
         lists.extend(found.into_iter().map(|l| (0, l)));
@@ -551,22 +705,31 @@ fn list_key(src: &str, list: &[(usize, usize)]) -> u64 {
 /// Name bound by a plain `let name = ..;` / `let mut name = ..;` statement.
 fn let_name(text: &str) -> Option<&str> {
     let rest = text.strip_prefix("let ")?.trim_start();
-    let rest = rest.strip_prefix("mut ").map(str::trim_start).unwrap_or(rest);
-    let name: &str = &rest[..rest.find(|c: char| !(c.is_alphanumeric() || c == '_')).unwrap_or(rest.len())];
-    (!name.is_empty() && name != "_" && rest[name.len()..].trim_start().starts_with(['=', ':'])).then_some(name)
+    let rest = rest
+        .strip_prefix("mut ")
+        .map(str::trim_start)
+        .unwrap_or(rest);
+    let name: &str = &rest[..rest
+        .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .unwrap_or(rest.len())];
+    (!name.is_empty() && name != "_" && rest[name.len()..].trim_start().starts_with(['=', ':']))
+        .then_some(name)
 }
 
 /// Statements that only existed for the removed ones: a `let x = ..;` whose name no remaining statement behind it mentions. One
 /// oracle call then removes a result together with everything that computed it (a backward slice).
-fn cascade(src: &str, list: &[(usize, usize)], removed: &mut Vec<bool>) {
+fn cascade(src: &str, list: &[(usize, usize)], removed: &mut [bool]) {
     loop {
         let mut changed = false;
         for j in (0..list.len()).rev() {
             if removed[j] {
                 continue;
             }
-            let Some(name) = let_name(&src[list[j].0..list[j].1]) else { continue };
-            let used = (j + 1..list.len()).any(|k| !removed[k] && mentions(&src[list[k].0..list[k].1], name));
+            let Some(name) = let_name(&src[list[j].0..list[j].1]) else {
+                continue;
+            };
+            let used = (j + 1..list.len())
+                .any(|k| !removed[k] && mentions(&src[list[k].0..list[k].1], name));
             if !used {
                 removed[j] = true;
                 changed = true;
@@ -580,13 +743,25 @@ fn cascade(src: &str, list: &[(usize, usize)], removed: &mut Vec<bool>) {
 
 /// ddmin over one list of siblings: chunks of consecutive siblings are deleted, halving the chunk size. For statement lists a
 /// deleted statement takes the `let`s that only fed it with it.
-fn ddmin_siblings(it: &dyn Oracle, cur: &mut String, mut list: Vec<(usize, usize)>, with_cascade: bool, deadline: Instant) {
+fn ddmin_siblings(
+    it: &dyn Oracle,
+    cur: &mut String,
+    mut list: Vec<(usize, usize)>,
+    with_cascade: bool,
+    deadline: Instant,
+) {
     let width = par_checks();
     // what ddmin deletes: all siblings, or for statement lists only the statements that are not plain `let`s (the lets go with
     // the statements that used them, see `cascade`)
     let units_of = |cur: &str, list: &[(usize, usize)]| -> Vec<usize> {
-        let roots: Vec<usize> = (0..list.len()).filter(|&j| let_name(&cur[list[j].0..list[j].1]).is_none()).collect();
-        let mut units = if with_cascade && roots.len() >= 2 { roots } else { (0..list.len()).collect() };
+        let roots: Vec<usize> = (0..list.len())
+            .filter(|&j| let_name(&cur[list[j].0..list[j].1]).is_none())
+            .collect();
+        let mut units = if with_cascade && roots.len() >= 2 {
+            roots
+        } else {
+            (0..list.len()).collect()
+        };
         // a higher effort deletes random subsets instead of neighbours: what is needed is often scattered
         if crate::control::effort() > 0 {
             crate::control::shuffled(&mut units, crate::control::seed());
@@ -601,7 +776,10 @@ fn ddmin_siblings(it: &dyn Oracle, cur: &mut String, mut list: Vec<(usize, usize
             if expired(deadline) {
                 return;
             }
-            let starts: Vec<isize> = (0..width as isize).map(|k| i - k * n as isize).take_while(|&s| s >= 0).collect();
+            let starts: Vec<isize> = (0..width as isize)
+                .map(|k| i - k * n as isize)
+                .take_while(|&s| s >= 0)
+                .collect();
             let plans: Vec<Vec<bool>> = starts
                 .iter()
                 .map(|&s| {
@@ -626,7 +804,12 @@ fn ddmin_siblings(it: &dyn Oracle, cur: &mut String, mut list: Vec<(usize, usize
             };
             let cands: Vec<String> = plans.iter().map(|p| cut(p)).collect();
             let res = par_map(&cands, width, |c| !c.trim().is_empty() && it.check(c));
-            let winners: Vec<usize> = res.iter().enumerate().filter(|(_, ok)| **ok).map(|(k, _)| k).collect();
+            let winners: Vec<usize> = res
+                .iter()
+                .enumerate()
+                .filter(|(_, ok)| **ok)
+                .map(|(k, _)| k)
+                .collect();
             match winners.first().copied() {
                 Some(first) => {
                     // chunks that were each fine on their own: all together in one more oracle call
@@ -639,7 +822,8 @@ fn ddmin_siblings(it: &dyn Oracle, cur: &mut String, mut list: Vec<(usize, usize
                         }
                         Some(cut(&all))
                     };
-                    let (applied, text) = crate::combine::merge_winners(it, &winners, build).unwrap_or((vec![first], cands[first].clone()));
+                    let (applied, text) = crate::combine::merge_winners(it, &winners, build)
+                        .unwrap_or((vec![first], cands[first].clone()));
                     let mut removed = vec![false; list.len()];
                     for &k in &applied {
                         for (j, r) in plans[k].iter().enumerate() {
@@ -691,22 +875,50 @@ pub fn shrink_siblings(it: &dyn Oracle, src: &str, deadline: Instant) -> String 
 }
 
 /// At most `max_lists` lists of `shrink_siblings`; `done` remembers the finished ones between calls. Returns whether no list is left.
-pub fn shrink_siblings_step(it: &dyn Oracle, src: &str, deadline: Instant, max_lists: usize, done: &mut std::collections::HashSet<u64>) -> (String, bool) {
+pub fn shrink_siblings_step(
+    it: &dyn Oracle,
+    src: &str,
+    deadline: Instant,
+    max_lists: usize,
+    done: &mut std::collections::HashSet<u64>,
+) -> (String, bool) {
     let mut cur = src.to_string();
     for _ in 0..max_lists.min(400) {
         if expired(deadline) {
             return (cur, false);
         }
         let mut lists = sibling_lists(&cur);
-        lists.sort_by_key(|(prio, l)| (*prio, std::cmp::Reverse(l.last().map(|r| r.1).unwrap_or(0) - l.first().map(|r| r.0).unwrap_or(0))));
-        let Some((prio, list)) = lists.into_iter().find(|(_, l)| !done.contains(&list_key(&cur, l))) else { return (cur, true) };
+        lists.sort_by_key(|(prio, l)| {
+            (
+                *prio,
+                std::cmp::Reverse(
+                    l.last().map(|r| r.1).unwrap_or(0) - l.first().map(|r| r.0).unwrap_or(0),
+                ),
+            )
+        });
+        let Some((prio, list)) = lists
+            .into_iter()
+            .find(|(_, l)| !done.contains(&list_key(&cur, l)))
+        else {
+            return (cur, true);
+        };
         done.insert(list_key(&cur, &list));
         let before = cur.len();
         ddmin_siblings(it, &mut cur, list.clone(), prio == 0, deadline);
         if cur.len() != before {
             // deleted statements leave empty lines behind; they carry no meaning
-            cur = cur.lines().filter(|l| !l.trim().is_empty()).collect::<Vec<_>>().join("\n") + "\n";
-            info!("siblings ({} items or statements in a list): {} -> {} bytes", list.len(), before, cur.len());
+            cur = cur
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n";
+            info!(
+                "siblings ({} items or statements in a list): {} -> {} bytes",
+                list.len(),
+                before,
+                cur.len()
+            );
         }
         for (_, l) in sibling_lists(&cur) {
             if l.len() <= 1 {

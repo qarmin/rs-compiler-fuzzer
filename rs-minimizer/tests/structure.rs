@@ -10,7 +10,10 @@ fn modules_are_hoisted_with_their_paths_and_uses() {
     let o = prints("42 2\n");
     check_oracle(&o, src);
     let out = hoist_modules(&o, src, &|_| false, &[]);
-    assert!(!out.contains("mod util") && !out.contains("mod app"), "{out}");
+    assert!(
+        !out.contains("mod util") && !out.contains("mod app"),
+        "{out}"
+    );
     assert_prints(&out, "42 2\n");
 }
 
@@ -21,7 +24,10 @@ fn modules_whose_names_collide_are_hoisted_with_renamed_items() {
     check_oracle(&o, src);
     let out = hoist_modules(&o, src, &|_| false, &[]);
     assert_prints(&out, "1 2\n");
-    assert!(!out.contains("mod a") && !out.contains("mod b"), "the colliding `f` is renamed, so no module has to stay:\n{out}");
+    assert!(
+        !out.contains("mod a") && !out.contains("mod b"),
+        "the colliding `f` is renamed, so no module has to stay:\n{out}"
+    );
 }
 
 #[test]
@@ -41,7 +47,10 @@ fn item_ranges_find_nested_items_and_skip_expressions() {
     let texts: Vec<&str> = items.iter().map(|i| &src[i.start..i.end]).collect();
     assert!(texts.contains(&"pub struct S(u32);"), "{texts:?}");
     assert!(texts.iter().any(|t| t.starts_with("impl S {")), "{texts:?}");
-    assert!(texts.contains(&"pub fn get(&self) -> u32 { self.0 }"), "{texts:?}");
+    assert!(
+        texts.contains(&"pub fn get(&self) -> u32 { self.0 }"),
+        "{texts:?}"
+    );
     assert!(texts.contains(&"const K: u32 = { 3 };"), "{texts:?}");
     assert!(texts.contains(&"static X: [u8; 2] = [1, 2];"), "{texts:?}");
     assert!(texts.contains(&"fn inner() {}"), "{texts:?}");
@@ -65,10 +74,15 @@ fn whole_unused_items_go_in_one_step_and_used_ones_stay() {
 #[test]
 fn an_item_the_oracle_needs_is_kept_with_its_attribute() {
     let src = "#[inline(never)]\nfn keep_me() -> u32 { 3 }\nfn junk() {}\nfn main() { println!(\"{}\", keep_me()); }\n";
-    let o = rs_minimizer::Cached::new(|s: &str| s.contains("#[inline(never)]") && run_program(s).as_deref() == Some("3\n"));
+    let o = rs_minimizer::Cached::new(|s: &str| {
+        s.contains("#[inline(never)]") && run_program(s).as_deref() == Some("3\n")
+    });
     check_oracle(&o, src);
     let out = shrink_items(&o, src, far());
-    assert!(out.contains("#[inline(never)]") && out.contains("keep_me") && !out.contains("junk"), "{out}");
+    assert!(
+        out.contains("#[inline(never)]") && out.contains("keep_me") && !out.contains("junk"),
+        "{out}"
+    );
 }
 
 #[test]
@@ -100,7 +114,11 @@ fn comments_and_blank_lines_are_stripped() {
 
 #[test]
 fn modules_with_colliding_names_are_hoisted_after_renaming() {
-    let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/renamed.rs")).unwrap();
+    let src = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/data/renamed.rs"
+    ))
+    .unwrap();
     let o = prints("0\n");
     check_oracle(&o, &src);
     let out = hoist_modules(&o, &src, &|_| false, &["rustc".to_string()]);
@@ -113,26 +131,40 @@ fn an_item_goes_together_with_the_statements_that_use_it() {
     use rs_minimizer::items::shrink_items_with_users;
     let mut src = String::new();
     for i in 0..30 {
-        src.push_str(&format!("mod case_{i} {{ pub fn run() -> u32 {{ {i} }} }}\n"));
+        src.push_str(&format!(
+            "mod case_{i} {{ pub fn run() -> u32 {{ {i} }} }}\n"
+        ));
     }
     src.push_str("fn main() {\n    let mut t = 0u32;\n");
     for i in 0..30 {
         src.push_str(&format!("    t += case_{i}::run();\n"));
     }
     src.push_str("    println!(\"{}\", t);\n}\n");
-    let o = rs_minimizer::Cached::new(|s: &str| s.contains("case_7::run") && run_program(s).is_some_and(|out| out.trim().parse::<u32>().is_ok_and(|n| n >= 7)));
+    let o = rs_minimizer::Cached::new(|s: &str| {
+        s.contains("case_7::run")
+            && run_program(s).is_some_and(|out| out.trim().parse::<u32>().is_ok_and(|n| n >= 7))
+    });
     check_oracle(&o, &src);
     rs_minimizer::control::set_parallel(8);
     let out = shrink_items_with_users(&o, &src, far());
-    assert!(out.contains("case_7") && !out.contains("case_8") && !out.contains("case_29"), "{out}");
+    assert!(
+        out.contains("case_7") && !out.contains("case_8") && !out.contains("case_29"),
+        "{out}"
+    );
     assert_eq!(out.matches("mod case_").count(), 1, "{out}");
 }
 
-fn counting_oracle<'a>(calls: &'a std::sync::atomic::AtomicUsize, needle: &'a str, expected: u32) -> rs_minimizer::Cached<impl Fn(&str) -> bool + Sync + 'a> {
+fn counting_oracle<'a>(
+    calls: &'a std::sync::atomic::AtomicUsize,
+    needle: &'a str,
+    expected: u32,
+) -> rs_minimizer::Cached<impl Fn(&str) -> bool + Sync + 'a> {
     use std::sync::atomic::Ordering;
     rs_minimizer::Cached::new(move |s: &str| {
         calls.fetch_add(1, Ordering::Relaxed);
-        s.contains(needle) && run_program(s).is_some_and(|out| out.trim().parse::<u32>().is_ok_and(|n| n == expected))
+        s.contains(needle)
+            && run_program(s)
+                .is_some_and(|out| out.trim().parse::<u32>().is_ok_and(|n| n == expected))
     })
 }
 
@@ -151,8 +183,15 @@ fn chunks_of_statements_are_deleted_with_few_oracle_calls() {
     calls.store(0, Ordering::Relaxed);
     rs_minimizer::control::set_parallel(8);
     let out = shrink_siblings(&o, &src, far());
-    assert!(out.lines().filter(|l| !l.trim().is_empty()).count() <= 4, "{out}");
-    assert!(calls.load(Ordering::Relaxed) < 80, "one statement at a time needs 200 oracle calls, ddmin far fewer: {}", calls.load(Ordering::Relaxed));
+    assert!(
+        out.lines().filter(|l| !l.trim().is_empty()).count() <= 4,
+        "{out}"
+    );
+    assert!(
+        calls.load(Ordering::Relaxed) < 80,
+        "one statement at a time needs 200 oracle calls, ddmin far fewer: {}",
+        calls.load(Ordering::Relaxed)
+    );
 }
 
 #[test]
@@ -161,7 +200,9 @@ fn items_and_their_users_are_deleted_in_chunks_too() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     let mut src = String::new();
     for i in 0..64 {
-        src.push_str(&format!("mod m{i} {{\n    pub fn run() -> u32 {{\n        {i}\n    }}\n}}\n"));
+        src.push_str(&format!(
+            "mod m{i} {{\n    pub fn run() -> u32 {{\n        {i}\n    }}\n}}\n"
+        ));
     }
     src.push_str("fn main() {\n    let mut t = 0u32;\n");
     for i in 0..64 {
@@ -176,8 +217,15 @@ fn items_and_their_users_are_deleted_in_chunks_too() {
     calls.store(0, Ordering::Relaxed);
     rs_minimizer::control::set_parallel(8);
     let out = shrink_items_with_users(&o, &src, far());
-    assert!(out.contains("mod m5") && !out.contains("mod m6 ") && !out.contains("mod m4 "), "{out}");
-    assert!(calls.load(Ordering::Relaxed) < 50, "{} oracle calls", calls.load(Ordering::Relaxed));
+    assert!(
+        out.contains("mod m5") && !out.contains("mod m6 ") && !out.contains("mod m4 "),
+        "{out}"
+    );
+    assert!(
+        calls.load(Ordering::Relaxed) < 50,
+        "{} oracle calls",
+        calls.load(Ordering::Relaxed)
+    );
 }
 
 #[test]
@@ -200,5 +248,9 @@ fn a_statement_takes_the_lets_that_only_fed_it_with_it() {
     let out = shrink_siblings(&o, &src, far());
     assert_eq!(out.matches("out.push").count(), 1, "{out}");
     assert!(!out.contains("a30") && !out.contains("c59"), "{out}");
-    assert!(calls.load(Ordering::Relaxed) < 60, "chains removed with their push: {} oracle calls (one statement at a time is 240)", calls.load(Ordering::Relaxed));
+    assert!(
+        calls.load(Ordering::Relaxed) < 60,
+        "chains removed with their push: {} oracle calls (one statement at a time is 240)",
+        calls.load(Ordering::Relaxed)
+    );
 }

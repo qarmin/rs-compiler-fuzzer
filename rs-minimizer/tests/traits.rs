@@ -1,6 +1,8 @@
 mod common;
 use common::*;
-use rs_minimizer::traits::{monomorphize, remove_bounds, remove_trait_methods, specialize_trait_paths};
+use rs_minimizer::traits::{
+    monomorphize, remove_bounds, remove_trait_methods, specialize_trait_paths,
+};
 
 const SRC: &str = include_str!("data/generic_trait.rs");
 
@@ -13,7 +15,10 @@ fn trait_paths_point_at_the_only_impl() {
     let want: &'static str = Box::leak(expected().into_boxed_str());
     let o = prints(want);
     let out = specialize_trait_paths(&o, SRC, far());
-    assert!(out.contains("i128::from_u64(2961832378146261130u64)"), "{out}");
+    assert!(
+        out.contains("i128::from_u64(2961832378146261130u64)"),
+        "{out}"
+    );
 }
 
 #[test]

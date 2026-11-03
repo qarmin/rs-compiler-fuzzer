@@ -14,13 +14,34 @@ pub fn far() -> Instant {
 
 /// `Some(stdout)` of the program when it compiles and exits successfully.
 pub fn run_program(src: &str) -> Option<String> {
-    let dir = std::env::temp_dir().join(format!("rsmin-test-{}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
+    let dir = std::env::temp_dir().join(format!(
+        "rsmin-test-{}-{}",
+        std::process::id(),
+        N.fetch_add(1, Ordering::Relaxed)
+    ));
     std::fs::create_dir_all(&dir).ok()?;
     let file = dir.join("main.rs");
     std::fs::write(&file, src).ok()?;
     let bin = dir.join("bin");
-    let compiled = Command::new("rustc").args(["--edition", "2021", "-C", "opt-level=0", "-A", "warnings", "-o"]).arg(&bin).arg(&file).output().ok()?;
-    let out = if compiled.status.success() { run_with_timeout(&bin, Duration::from_secs(10)) } else { None };
+    let compiled = Command::new("rustc")
+        .args([
+            "--edition",
+            "2021",
+            "-C",
+            "opt-level=0",
+            "-A",
+            "warnings",
+            "-o",
+        ])
+        .arg(&bin)
+        .arg(&file)
+        .output()
+        .ok()?;
+    let out = if compiled.status.success() {
+        run_with_timeout(&bin, Duration::from_secs(10))
+    } else {
+        None
+    };
     let _ = std::fs::remove_dir_all(&dir);
     out
 }
@@ -44,17 +65,28 @@ pub fn contains(needle: &'static str) -> Cached<impl Fn(&str) -> bool + Sync> {
 }
 
 pub fn assert_prints(src: &str, expected: &str) {
-    assert_eq!(run_program(src).as_deref(), Some(expected), "program does not print {expected:?}:\n{src}");
+    assert_eq!(
+        run_program(src).as_deref(),
+        Some(expected),
+        "program does not print {expected:?}:\n{src}"
+    );
 }
 
 pub fn check_oracle(o: &dyn Oracle, src: &str) {
-    assert!(o.check(src), "the oracle must accept the starting program:\n{src}");
+    assert!(
+        o.check(src),
+        "the oracle must accept the starting program:\n{src}"
+    );
 }
 
 /// Stdout of the program when it exits successfully within `limit`.
 fn run_with_timeout(bin: &std::path::Path, limit: Duration) -> Option<String> {
     use std::io::Read;
-    let mut child = Command::new(bin).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).spawn().ok()?;
+    let mut child = Command::new(bin)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
     let mut stdout = child.stdout.take()?;
     let reader = std::thread::spawn(move || {
         let mut text = String::new();

@@ -20,7 +20,10 @@ fn repeated_item_macro_with_and_without_commas() {
     check_oracle(&o, src);
     let out = expand_macros(&o, src);
     assert!(!out.contains("macro_rules"), "{out}");
-    assert!(out.contains("impl T for u8") && out.contains("impl T for u32"), "{out}");
+    assert!(
+        out.contains("impl T for u8") && out.contains("impl T for u32"),
+        "{out}"
+    );
     assert_prints(&out, "1 2 4\n");
 }
 
@@ -37,7 +40,9 @@ fn macros_with_the_same_name_are_expanded_by_their_own_definition() {
 #[test]
 fn macro_that_the_bug_depends_on_is_kept() {
     let src = "macro_rules! m { () => { 5 } }\nfn main() { println!(\"{}\", m!()); }\n";
-    let o = rs_minimizer::Cached::new(|s: &str| s.contains("macro_rules") && common::run_program(s).as_deref() == Some("5\n"));
+    let o = rs_minimizer::Cached::new(|s: &str| {
+        s.contains("macro_rules") && common::run_program(s).as_deref() == Some("5\n")
+    });
     check_oracle(&o, src);
     let out = expand_macros(&o, src);
     assert_eq!(out, src);
@@ -45,7 +50,8 @@ fn macro_that_the_bug_depends_on_is_kept() {
 
 #[test]
 fn unsupported_macros_are_left_alone() {
-    let src = "macro_rules! m { (a) => { 1 }; (b) => { 2 }; }\nfn main() { println!(\"{}\", m!(a)); }\n";
+    let src =
+        "macro_rules! m { (a) => { 1 }; (b) => { 2 }; }\nfn main() { println!(\"{}\", m!(a)); }\n";
     let o = prints("1\n");
     check_oracle(&o, src);
     assert_eq!(expand_macros(&o, src), src);

@@ -17,7 +17,11 @@ pub struct Config {
 
 impl Config {
     pub fn new(name: &str, flags: &str) -> Config {
-        Config { name: name.to_string(), flags: flags.split_whitespace().map(String::from).collect(), slow: false }
+        Config {
+            name: name.to_string(),
+            flags: flags.split_whitespace().map(String::from).collect(),
+            slow: false,
+        }
     }
 
     pub fn slow(mut self) -> Config {
@@ -44,7 +48,8 @@ pub const COMMON_FLAGS: &[&str] = &[
 /// The address of a function differs on every run (ASLR), so a program that turns one into an integer is no test case. The lint is
 /// forced to warn (`--cap-lints` cannot hide it) and a compilation that shows it counts as failed.
 pub fn casts_function_address(stderr: &str) -> bool {
-    stderr.contains("direct cast of function item") || stderr.contains("function_casts_as_integer") && stderr.contains("warning")
+    stderr.contains("direct cast of function item")
+        || stderr.contains("function_casts_as_integer") && stderr.contains("warning")
 }
 
 /// The pinned flags as they are shown in reports: without the lint that only guards the test cases.
@@ -66,7 +71,8 @@ pub fn compiler_for(_flags: &str) -> &'static str {
     "rustc +nightly"
 }
 
-const FN_ADDRESS_MESSAGE: &str = "the program casts a function item into an integer: the address differs on every run";
+const FN_ADDRESS_MESSAGE: &str =
+    "the program casts a function item into an integer: the address differs on every run";
 
 static COMMON_OVERRIDE: std::sync::Mutex<Option<Vec<String>>> = std::sync::Mutex::new(None);
 
@@ -77,7 +83,11 @@ pub fn set_common_flags(flags: Option<Vec<String>>) {
 }
 
 pub fn common_flags() -> Vec<String> {
-    COMMON_OVERRIDE.lock().unwrap().clone().unwrap_or_else(|| COMMON_FLAGS.iter().map(|s| s.to_string()).collect())
+    COMMON_OVERRIDE
+        .lock()
+        .unwrap()
+        .clone()
+        .unwrap_or_else(|| COMMON_FLAGS.iter().map(|s| s.to_string()).collect())
 }
 
 pub struct Exec {
@@ -110,12 +120,23 @@ fn drain<R: Read + Send + 'static>(mut r: R, limit: usize) -> thread::JoinHandle
 /// oracle per core, so a candidate that makes rustc or the program grow without bound must not take the machine down.
 fn mem_limit_mb() -> u64 {
     static LIMIT: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-    *LIMIT.get_or_init(|| std::env::var("RS_MEM_MB").ok().and_then(|v| v.parse().ok()).unwrap_or(4096))
+    *LIMIT.get_or_init(|| {
+        std::env::var("RS_MEM_MB")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(4096)
+    })
 }
 
 fn rss_mb(pid: u32) -> Option<u64> {
     let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
-    let kb: u64 = status.lines().find(|l| l.starts_with("VmRSS:"))?.split_whitespace().nth(1)?.parse().ok()?;
+    let kb: u64 = status
+        .lines()
+        .find(|l| l.starts_with("VmRSS:"))?
+        .split_whitespace()
+        .nth(1)?
+        .parse()
+        .ok()?;
     Some(kb / 1024)
 }
 
@@ -124,7 +145,10 @@ unsafe extern "C" {
 }
 
 pub fn exec(mut cmd: Command, timeout: Duration) -> std::io::Result<Exec> {
-    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).process_group(0);
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0);
     // a test binary must not outlive the process that started it (a killed reducer left them spinning for the rest of the job):
     // PR_SET_PDEATHSIG = 1, SIGKILL = 9
     #[cfg(target_os = "linux")]
@@ -146,7 +170,9 @@ pub fn exec(mut cmd: Command, timeout: Duration) -> std::io::Result<Exec> {
         }
         if start.elapsed() > timeout || rss_mb(pid).is_some_and(|m| m > mem_limit_mb()) {
             // kill the whole process group (rustc spawns linkers etc.)
-            let _ = Command::new("kill").args(["-KILL", "--", &format!("-{pid}")]).status();
+            let _ = Command::new("kill")
+                .args(["-KILL", "--", &format!("-{pid}")])
+                .status();
             let _ = child.kill();
             let _ = child.wait();
             break (None, true);
@@ -170,7 +196,12 @@ pub enum Outcome {
     CompileFail(String),
     CompileTimeout,
     RunTimeout,
-    Ran { code: Option<i32>, signal: Option<i32>, stdout: String, stderr: String },
+    Ran {
+        code: Option<i32>,
+        signal: Option<i32>,
+        stdout: String,
+        stderr: String,
+    },
 }
 
 impl Outcome {
@@ -180,7 +211,12 @@ impl Outcome {
             Outcome::CompileFail(_) => "compile-fail".into(),
             Outcome::CompileTimeout => "compile-timeout".into(),
             Outcome::RunTimeout => "run-timeout".into(),
-            Outcome::Ran { code, signal, stdout, .. } => format!("exit={code:?} signal={signal:?}\n{stdout}"),
+            Outcome::Ran {
+                code,
+                signal,
+                stdout,
+                ..
+            } => format!("exit={code:?} signal={signal:?}\n{stdout}"),
         }
     }
 
@@ -189,8 +225,16 @@ impl Outcome {
             Outcome::CompileFail(_) => "compilation failed".into(),
             Outcome::CompileTimeout => "compilation timed out".into(),
             Outcome::RunTimeout => "execution timed out".into(),
-            Outcome::Ran { code, signal, stdout, .. } => {
-                format!("exit code {code:?}, signal {signal:?}, {} output lines", stdout.lines().count())
+            Outcome::Ran {
+                code,
+                signal,
+                stdout,
+                ..
+            } => {
+                format!(
+                    "exit code {code:?}, signal {signal:?}, {} output lines",
+                    stdout.lines().count()
+                )
             }
         }
     }
@@ -199,11 +243,19 @@ impl Outcome {
 /// (overflow-checks, debug-assertions) as the configuration builds with them (the common flags, then the configuration's own).
 fn checks_of(c: &Config) -> (bool, bool) {
     let (mut overflow, mut debug): (Option<bool>, bool) = (None, false);
-    let flags: Vec<String> = common_flags().into_iter().chain(c.flags.iter().cloned()).collect();
+    let flags: Vec<String> = common_flags()
+        .into_iter()
+        .chain(c.flags.iter().cloned())
+        .collect();
     let mut i = 0;
     while i < flags.len() {
         let f = flags[i].as_str();
-        let arg = if f == "-C" { i += 1; flags.get(i).map(String::as_str).unwrap_or("") } else { f.strip_prefix("-C").unwrap_or("") };
+        let arg = if f == "-C" {
+            i += 1;
+            flags.get(i).map(String::as_str).unwrap_or("")
+        } else {
+            f.strip_prefix("-C").unwrap_or("")
+        };
         let on = |v: &str| matches!(v, "on" | "yes" | "y" | "true" | "");
         if let Some(v) = arg.strip_prefix("overflow-checks=") {
             overflow = Some(on(v));
@@ -227,10 +279,23 @@ pub fn differs(a: &Outcome, b: &Outcome, ca: &Config, cb: &Config) -> bool {
         // happened: the checks did what they are for. The message cannot be relied on (a program may silence the panic hook).
         let more = |x: (bool, bool), y: (bool, bool)| x.0 >= y.0 && x.1 >= y.1 && x != y;
         let cut_short = |strict: &Outcome, lax: &Outcome| match (strict, lax) {
-            (Outcome::Ran { code: Some(101), stdout: s1, .. }, Outcome::Ran { code: Some(0), stdout: s2, .. }) => s2.starts_with(s1.as_str()),
+            (
+                Outcome::Ran {
+                    code: Some(101),
+                    stdout: s1,
+                    ..
+                },
+                Outcome::Ran {
+                    code: Some(0),
+                    stdout: s2,
+                    ..
+                },
+            ) => s2.starts_with(s1.as_str()),
             _ => false,
         };
-        if (more(checks_of(ca), checks_of(cb)) && cut_short(a, b)) || (more(checks_of(cb), checks_of(ca)) && cut_short(b, a)) {
+        if (more(checks_of(ca), checks_of(cb)) && cut_short(a, b))
+            || (more(checks_of(cb), checks_of(ca)) && cut_short(b, a))
+        {
             return false;
         }
         let says = |o: &Outcome| matches!(o, Outcome::Ran { stderr, .. } if stderr.contains("with overflow") || stderr.contains("unsafe precondition") || stderr.contains("debug_assert") || stderr.contains("assertion failed: self.is_char_boundary"));
@@ -247,7 +312,8 @@ fn without_negative_zero(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut i = 0;
     while i < c.len() {
-        let boundary = i == 0 || !(c[i - 1].is_alphanumeric() || c[i - 1] == '.' || c[i - 1] == '_');
+        let boundary =
+            i == 0 || !(c[i - 1].is_alphanumeric() || c[i - 1] == '.' || c[i - 1] == '_');
         if c[i] == '-' && boundary && c.get(i + 1) == Some(&'0') {
             // the number after the minus: only zeros, an optional fraction of zeros, an optional exponent
             let mut j = i + 1;
@@ -260,13 +326,20 @@ fn without_negative_zero(text: &str) -> String {
                     j += 1;
                 }
             }
-            if matches!(c.get(j), Some('e') | Some('E')) && c.get(j + 1).map(|x| x.is_ascii_digit() || *x == '-' || *x == '+').unwrap_or(false) {
+            if matches!(c.get(j), Some('e') | Some('E'))
+                && c.get(j + 1)
+                    .map(|x| x.is_ascii_digit() || *x == '-' || *x == '+')
+                    .unwrap_or(false)
+            {
                 j += 2;
                 while c.get(j).map(|x| x.is_ascii_digit()).unwrap_or(false) {
                     j += 1;
                 }
             }
-            let ends = c.get(j).map(|x| !(x.is_alphanumeric() || *x == '.' || *x == '_')).unwrap_or(true);
+            let ends = c
+                .get(j)
+                .map(|x| !(x.is_alphanumeric() || *x == '.' || *x == '_'))
+                .unwrap_or(true);
             if ends {
                 out.extend(&c[i + 1..j]);
                 i = j;
@@ -282,7 +355,10 @@ fn without_negative_zero(text: &str) -> String {
 /// `f32::min` / `f64::max` / `clamp` return either zero when they compare `0.0` and `-0.0` (the documentation says so): a program that
 /// uses them and differs only in the sign of a zero shows no compiler bug.
 fn uses_float_min_max(src: &str) -> bool {
-    (src.contains("f64") || src.contains("f32") || src.contains("T::")) && [".min(", ".max(", "::min", "::max", ".clamp("].iter().any(|p| src.contains(p))
+    (src.contains("f64") || src.contains("f32") || src.contains("T::"))
+        && [".min(", ".max(", "::min", "::max", ".clamp("]
+            .iter()
+            .any(|p| src.contains(p))
 }
 
 /// [`differs`] for a known program text.
@@ -290,12 +366,26 @@ pub fn differs_src(a: &Outcome, b: &Outcome, ca: &Config, cb: &Config, src: &str
     if !differs(a, b, ca, cb) {
         return false;
     }
-    if uses_float_min_max(src) {
-        if let (Outcome::Ran { code: c1, signal: s1, stdout: o1, .. }, Outcome::Ran { code: c2, signal: s2, stdout: o2, .. }) = (a, b) {
-            if c1 == c2 && s1 == s2 && without_negative_zero(o1) == without_negative_zero(o2) {
-                return false;
-            }
-        }
+    if uses_float_min_max(src)
+        && let (
+            Outcome::Ran {
+                code: c1,
+                signal: s1,
+                stdout: o1,
+                ..
+            },
+            Outcome::Ran {
+                code: c2,
+                signal: s2,
+                stdout: o2,
+                ..
+            },
+        ) = (a, b)
+        && c1 == c2
+        && s1 == s2
+        && without_negative_zero(o1) == without_negative_zero(o2)
+    {
+        return false;
     }
     true
 }
@@ -313,13 +403,23 @@ pub fn rustc_cmd(rustc: &[String]) -> Command {
 }
 
 pub fn compile_args(src: &Path, bin: &Path, cfg: &Config) -> Vec<String> {
-    let mut a: Vec<String> = vec![src.display().to_string(), "-o".into(), bin.display().to_string()];
+    let mut a: Vec<String> = vec![
+        src.display().to_string(),
+        "-o".into(),
+        bin.display().to_string(),
+    ];
     a.extend(common_flags());
     a.extend(cfg.flags.iter().cloned());
     a
 }
 
-pub fn build_and_run(rustc: &[String], src: &Path, bin: &Path, cfg: &Config, lim: &Limits) -> Outcome {
+pub fn build_and_run(
+    rustc: &[String],
+    src: &Path,
+    bin: &Path,
+    cfg: &Config,
+    lim: &Limits,
+) -> Outcome {
     let mut c = rustc_cmd(rustc);
     c.args(compile_args(src, bin, cfg));
     let r = match exec(c, lim.compile) {
@@ -352,14 +452,26 @@ pub fn build_and_run(rustc: &[String], src: &Path, bin: &Path, cfg: &Config, lim
 }
 
 /// Type/borrow-check only (cheap): returns rustc's stderr on failure.
-pub fn check_only(rustc: &[String], src: &Path, out_dir: &Path, timeout: Duration) -> Result<(), String> {
+pub fn check_only(
+    rustc: &[String],
+    src: &Path,
+    out_dir: &Path,
+    timeout: Duration,
+) -> Result<(), String> {
     let mut c = rustc_cmd(rustc);
-    c.args([src.display().to_string(), "--emit=metadata".into(), "--crate-type=bin".into(), "--crate-name=fuzz_check".into()]);
+    c.args([
+        src.display().to_string(),
+        "--emit=metadata".into(),
+        "--crate-type=bin".into(),
+        "--crate-name=fuzz_check".into(),
+    ]);
     c.arg("--out-dir").arg(out_dir);
     c.args(COMMON_FLAGS);
     match exec(c, timeout) {
         Ok(r) if r.timed_out => Err("check timed out".into()),
-        Ok(r) if r.code == Some(0) && casts_function_address(&r.stderr) => Err(FN_ADDRESS_MESSAGE.into()),
+        Ok(r) if r.code == Some(0) && casts_function_address(&r.stderr) => {
+            Err(FN_ADDRESS_MESSAGE.into())
+        }
         Ok(r) if r.code == Some(0) => Ok(()),
         Ok(r) => Err(r.stderr),
         Err(e) => Err(format!("cannot spawn rustc: {e}")),
@@ -372,26 +484,49 @@ pub use rs_minimizer::par_map;
 /// Stable fingerprint of a compiler crash, so the same crash found again (other batch, other
 /// run) is recognised: the first line naming an LLVM error / ICE / signal, digits normalised.
 pub fn crash_signature(o: &Outcome) -> Option<String> {
-    let Outcome::CompileFail(e) = o else { return None };
+    let Outcome::CompileFail(e) = o else {
+        return None;
+    };
     let line = e
         .lines()
-        .find(|l| l.contains("LLVM ERROR") || l.contains("internal compiler error") || l.contains("interrupted by SIG") || l.contains("panicked at") || l.contains("Assertion"))
+        .find(|l| {
+            l.contains("LLVM ERROR")
+                || l.contains("internal compiler error")
+                || l.contains("interrupted by SIG")
+                || l.contains("panicked at")
+                || l.contains("Assertion")
+        })
         .or_else(|| e.lines().find(|l| l.starts_with("error")))?;
-    let norm: String = line.chars().map(|c| if c.is_ascii_digit() { '#' } else { c }).collect();
+    let norm: String = line
+        .chars()
+        .map(|c| if c.is_ascii_digit() { '#' } else { c })
+        .collect();
     Some(norm.chars().take(160).collect())
 }
-
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn run(src: &str) -> Outcome {
-        let dir = std::env::temp_dir().join(format!("rsfuzz-runner-test-{}-{}", std::process::id(), src.len()));
+        let dir = std::env::temp_dir().join(format!(
+            "rsfuzz-runner-test-{}-{}",
+            std::process::id(),
+            src.len()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("main.rs");
         std::fs::write(&file, src).unwrap();
-        let out = build_and_run(&["rustc".to_string()], &file, &dir.join("bin"), &Config::new("O0", "-C opt-level=0"), &Limits { compile: Duration::from_secs(120), run: Duration::from_secs(10) });
+        let out = build_and_run(
+            &["rustc".to_string()],
+            &file,
+            &dir.join("bin"),
+            &Config::new("O0", "-C opt-level=0"),
+            &Limits {
+                compile: Duration::from_secs(120),
+                run: Duration::from_secs(10),
+            },
+        );
         let _ = std::fs::remove_dir_all(&dir);
         out
     }
@@ -419,11 +554,17 @@ mod display_tests {
 
     #[test]
     fn every_command_names_nightly_and_the_guard_lint_is_not_shown() {
-        assert_eq!(compiler_for("-C opt-level=3 -Zmir-opt-level=0"), "rustc +nightly");
+        assert_eq!(
+            compiler_for("-C opt-level=3 -Zmir-opt-level=0"),
+            "rustc +nightly"
+        );
         assert_eq!(compiler_for("-C opt-level=3"), "rustc +nightly");
         let flags: Vec<String> = COMMON_FLAGS.iter().map(|s| s.to_string()).collect();
         let shown = shown_flags(&flags);
-        assert!(!shown.contains("function_casts_as_integer") && shown.contains("--cap-lints allow"), "{shown}");
+        assert!(
+            !shown.contains("function_casts_as_integer") && shown.contains("--cap-lints allow"),
+            "{shown}"
+        );
     }
 }
 
@@ -432,18 +573,52 @@ mod overflow_tests {
     use super::*;
 
     fn ran(code: i32, stderr: &str) -> Outcome {
-        Outcome::Ran { code: Some(code), signal: None, stdout: String::new(), stderr: stderr.to_string() }
+        Outcome::Ran {
+            code: Some(code),
+            signal: None,
+            stdout: String::new(),
+            stderr: stderr.to_string(),
+        }
     }
 
     #[test]
     fn the_sign_of_a_zero_from_min_or_max_is_no_difference() {
         let (off, on) = (Config::new("a", ""), Config::new("b", "-C opt-level=3"));
-        let printed = |t: &str| Outcome::Ran { code: Some(0), signal: None, stdout: t.to_string(), stderr: String::new() };
+        let printed = |t: &str| Outcome::Ran {
+            code: Some(0),
+            signal: None,
+            stdout: t.to_string(),
+            stderr: String::new(),
+        };
         let src = "fn main() { let v = [-0f64, 0f64]; println!(\"{:?}\", v.iter().copied().fold(f64::INFINITY, f64::min)) }";
-        assert!(!differs_src(&printed("0.0\n"), &printed("-0.0\n"), &off, &on, src));
-        assert!(differs_src(&printed("0.0\n"), &printed("-0.0\n"), &off, &on, "fn main() { println!(\"{:?}\", (-0f64).abs()) }"), "no min/max in the program: still a difference");
-        assert!(differs_src(&printed("1.0\n"), &printed("-1.0\n"), &off, &on, src), "other values still count");
-        assert!(differs_src(&printed("-0.5\n"), &printed("0.5\n"), &off, &on, src));
+        assert!(!differs_src(
+            &printed("0.0\n"),
+            &printed("-0.0\n"),
+            &off,
+            &on,
+            src
+        ));
+        assert!(
+            differs_src(
+                &printed("0.0\n"),
+                &printed("-0.0\n"),
+                &off,
+                &on,
+                "fn main() { println!(\"{:?}\", (-0f64).abs()) }"
+            ),
+            "no min/max in the program: still a difference"
+        );
+        assert!(
+            differs_src(&printed("1.0\n"), &printed("-1.0\n"), &off, &on, src),
+            "other values still count"
+        );
+        assert!(differs_src(
+            &printed("-0.5\n"),
+            &printed("0.5\n"),
+            &off,
+            &on,
+            src
+        ));
     }
 
     #[test]
@@ -458,8 +633,23 @@ mod overflow_tests {
         let other = Config::new("O3", "-C opt-level=3");
         assert!(differs(&ran(0, ""), &panic, &off, &other));
         // output that is not a prefix of the other one is a real difference even with a panic
-        let printed = |code: i32, out: &str| Outcome::Ran { code: Some(code), signal: None, stdout: out.to_string(), stderr: String::new() };
-        assert!(differs(&printed(0, "A\nB\n"), &printed(101, "X\n"), &off, &on));
-        assert!(!differs(&printed(0, "A\nB\n"), &printed(101, "A\n"), &off, &on));
+        let printed = |code: i32, out: &str| Outcome::Ran {
+            code: Some(code),
+            signal: None,
+            stdout: out.to_string(),
+            stderr: String::new(),
+        };
+        assert!(differs(
+            &printed(0, "A\nB\n"),
+            &printed(101, "X\n"),
+            &off,
+            &on
+        ));
+        assert!(!differs(
+            &printed(0, "A\nB\n"),
+            &printed(101, "A\n"),
+            &off,
+            &on
+        ));
     }
 }

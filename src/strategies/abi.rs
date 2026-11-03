@@ -39,7 +39,17 @@ fn fold(g: &Gen, k: &Kind, v: &str) -> String {
         Kind::Float("f32") => format!("({v}.to_bits() as u64)"),
         Kind::Float(_) => format!("{v}.to_bits()"),
         Kind::Struct(i) => {
-            let parts: Vec<String> = g.structs[*i].iter().enumerate().map(|(j, f)| format!("{}.rotate_left({})", fold(g, f, &format!("{v}.f{j}")), j * 7 + 3)).collect();
+            let parts: Vec<String> = g.structs[*i]
+                .iter()
+                .enumerate()
+                .map(|(j, f)| {
+                    format!(
+                        "{}.rotate_left({})",
+                        fold(g, f, &format!("{v}.f{j}")),
+                        j * 7 + 3
+                    )
+                })
+                .collect();
             format!("({})", parts.join(" ^ "))
         }
     }
@@ -50,9 +60,15 @@ fn make(g: &Gen, k: &Kind, d: &str, salt: u32) -> String {
     match k {
         Kind::Int(t) => format!("({d}.rotate_left({salt}) as {t})"),
         Kind::Bool => format!("({d}.rotate_left({salt}) & 1 == 1)"),
-        Kind::Float(t) => format!("((({d}.rotate_left({salt}) % 2000) as i64 - 1000) as {t} * 0.25)"),
+        Kind::Float(t) => {
+            format!("((({d}.rotate_left({salt}) % 2000) as i64 - 1000) as {t} * 0.25)")
+        }
         Kind::Struct(i) => {
-            let fs: Vec<String> = g.structs[*i].iter().enumerate().map(|(j, f)| format!("f{j}: {}", make(g, f, d, salt + j as u32 * 5 + 1))).collect();
+            let fs: Vec<String> = g.structs[*i]
+                .iter()
+                .enumerate()
+                .map(|(j, f)| format!("f{j}: {}", make(g, f, d, salt + j as u32 * 5 + 1)))
+                .collect();
             format!("St{i} {{ {} }}", fs.join(", "))
         }
     }
@@ -64,7 +80,11 @@ fn lit(g: &Gen, rng: &mut Rng, k: &Kind) -> String {
         Kind::Bool => rng.chance(50).to_string(),
         Kind::Float(t) => format!("{}.{}{t}", rng.below(2000), rng.below(100)),
         Kind::Struct(i) => {
-            let fs: Vec<String> = g.structs[*i].iter().enumerate().map(|(j, f)| format!("f{j}: {}", lit(g, rng, f))).collect();
+            let fs: Vec<String> = g.structs[*i]
+                .iter()
+                .enumerate()
+                .map(|(j, f)| format!("f{j}: {}", lit(g, rng, f)))
+                .collect();
             format!("St{i} {{ {} }}", fs.join(", "))
         }
     }
@@ -76,7 +96,7 @@ fn rand_kind(rng: &mut Rng, nstructs: usize, allow_struct: bool) -> Kind {
         1 => Kind::Int("u16"),
         2 => Kind::Int("i32"),
         3 => Kind::Int("u64"),
-        4 => Kind::Int(*rng.pick(&["i128", "u128", "i8", "i64"])),
+        4 => Kind::Int(rng.pick(&["i128", "u128", "i8", "i64"])),
         5 => Kind::Bool,
         6 => Kind::Float("f32"),
         7 => Kind::Float("f64"),
@@ -96,12 +116,22 @@ pub fn generate(rng: &mut Rng) -> String {
     let mut body = String::new();
     // repr(C) structs of 1..5 scalar fields
     let ns = rng.range(1, 3);
-    let mut g = Gen { structs: Vec::new() };
+    let mut g = Gen {
+        structs: Vec::new(),
+    };
     for i in 0..ns {
         let nf = rng.range(1, 5);
         let fields: Vec<Kind> = (0..nf).map(|_| rand_kind(rng, 0, false)).collect();
-        let decl: Vec<String> = fields.iter().enumerate().map(|(j, f)| format!("f{j}: {}", ty(&g, f))).collect();
-        w!(items, "    #[cfg(target_arch = \"x86_64\")] #[repr(C)] #[derive(Clone, Copy, Debug)] struct St{i} {{ {} }}", decl.join(", "));
+        let decl: Vec<String> = fields
+            .iter()
+            .enumerate()
+            .map(|(j, f)| format!("f{j}: {}", ty(&g, f)))
+            .collect();
+        w!(
+            items,
+            "    #[cfg(target_arch = \"x86_64\")] #[repr(C)] #[derive(Clone, Copy, Debug)] struct St{i} {{ {} }}",
+            decl.join(", ")
+        );
         g.structs.push(fields);
     }
     let mut funcs: Vec<Func> = Vec::new();
@@ -111,11 +141,21 @@ pub fn generate(rng: &mut Rng) -> String {
         let params: Vec<Kind> = (0..np).map(|_| rand_kind(rng, ns, true)).collect();
         let ret = rand_kind(rng, ns, true);
         let name = format!("ab{k}");
-        let sig: Vec<String> = params.iter().enumerate().map(|(i, p)| format!("p{i}: {}", ty(&g, p))).collect();
+        let sig: Vec<String> = params
+            .iter()
+            .enumerate()
+            .map(|(i, p)| format!("p{i}: {}", ty(&g, p)))
+            .collect();
         let mut b = String::new();
         w!(b, "        let mut d: u64 = {}u64;", rng.next_u64() | 1);
         for (i, p) in params.iter().enumerate() {
-            w!(b, "        d = d.rotate_left({}).wrapping_mul({}) ^ {};", rng.below(60) + 1, rng.next_u64() | 1, fold(&g, p, &format!("p{i}")));
+            w!(
+                b,
+                "        d = d.rotate_left({}).wrapping_mul({}) ^ {};",
+                rng.below(60) + 1,
+                rng.next_u64() | 1,
+                fold(&g, p, &format!("p{i}"))
+            );
         }
         // call an earlier function (possibly with another ABI) and keep our parameters live across the call
         if !funcs.is_empty() && rng.chance(75) {
@@ -126,38 +166,88 @@ pub fn generate(rng: &mut Rng) -> String {
                 .enumerate()
                 .map(|(ai, ck)| {
                     // pass one of our parameters of the same kind if there is one
-                    let same: Vec<usize> = params.iter().enumerate().filter(|(_, pk)| ty(&g, pk) == ty(&g, ck)).map(|(i, _)| i).collect();
-                    if !same.is_empty() && rng.chance(70) { format!("p{}", rng.pick(&same)) } else { make(&g, ck, "d", ai as u32 + 1) }
+                    let same: Vec<usize> = params
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, pk)| ty(&g, pk) == ty(&g, ck))
+                        .map(|(i, _)| i)
+                        .collect();
+                    if !same.is_empty() && rng.chance(70) {
+                        format!("p{}", rng.pick(&same))
+                    } else {
+                        make(&g, ck, "d", ai as u32 + 1)
+                    }
                 })
                 .collect();
             let via_ptr = rng.chance(50);
             let call = if via_ptr {
                 let ptys: Vec<String> = c.params.iter().map(|p| ty(&g, p)).collect();
-                format!("{{ let fp: extern \"{}\" fn({}) -> {} = bb({}); fp({}) }}", c.abi, ptys.join(", "), ty(&g, &c.ret), c.name, args.join(", "))
+                format!(
+                    "{{ let fp: extern \"{}\" fn({}) -> {} = bb({}); fp({}) }}",
+                    c.abi,
+                    ptys.join(", "),
+                    ty(&g, &c.ret),
+                    c.name,
+                    args.join(", ")
+                )
             } else {
                 format!("{}({})", c.name, args.join(", "))
             };
             w!(b, "        let r = {call};");
-            w!(b, "        d = d.rotate_left(13) ^ {};", fold(&g, &c.ret, "r"));
+            w!(
+                b,
+                "        d = d.rotate_left(13) ^ {};",
+                fold(&g, &c.ret, "r")
+            );
             for (i, p) in params.iter().enumerate() {
-                w!(b, "        d = d.wrapping_add({}); // live across the call", fold(&g, p, &format!("p{i}")));
+                w!(
+                    b,
+                    "        d = d.wrapping_add({}); // live across the call",
+                    fold(&g, p, &format!("p{i}"))
+                );
             }
         }
         let retexpr = make(&g, &ret, "d", 3);
-        w!(items, "    #[cfg(target_arch = \"x86_64\")]\n    {}\n    extern \"{abi}\" fn {name}({}) -> {} {{\n{b}        {retexpr}\n    }}", rng.pick(&["#[inline(never)]", "#[inline(never)]", "#[inline]", ""]), sig.join(", "), ty(&g, &ret));
-        funcs.push(Func { name, abi, params, ret });
+        w!(
+            items,
+            "    #[cfg(target_arch = \"x86_64\")]\n    {}\n    extern \"{abi}\" fn {name}({}) -> {} {{\n{b}        {retexpr}\n    }}",
+            rng.pick(&["#[inline(never)]", "#[inline(never)]", "#[inline]", ""]),
+            sig.join(", "),
+            ty(&g, &ret)
+        );
+        funcs.push(Func {
+            name,
+            abi,
+            params,
+            ret,
+        });
     }
     w!(body, "        #[cfg(target_arch = \"x86_64\")]\n        {{");
     for _ in 0..rng.range(3, 8) {
         let f = &funcs[rng.below(funcs.len())];
-        let args: Vec<String> = f.params.iter().map(|p| format!("bb({})", lit(&g, rng, p))).collect();
+        let args: Vec<String> = f
+            .params
+            .iter()
+            .map(|p| format!("bb({})", lit(&g, rng, p)))
+            .collect();
         let ptys: Vec<String> = f.params.iter().map(|p| ty(&g, p)).collect();
         let call = if rng.chance(50) {
             format!("{}({})", f.name, args.join(", "))
         } else {
-            format!("{{ let fp: extern \"{}\" fn({}) -> {} = bb({}); fp({}) }}", f.abi, ptys.join(", "), ty(&g, &f.ret), f.name, args.join(", "))
+            format!(
+                "{{ let fp: extern \"{}\" fn({}) -> {} = bb({}); fp({}) }}",
+                f.abi,
+                ptys.join(", "),
+                ty(&g, &f.ret),
+                f.name,
+                args.join(", ")
+            )
         };
-        w!(body, "        let r = {call}; h.put(&{});", fold(&g, &f.ret, "r"));
+        w!(
+            body,
+            "        let r = {call}; h.put(&{});",
+            fold(&g, &f.ret, "r")
+        );
     }
     w!(body, "        }}");
     format!("{items}    pub fn run(h: &mut H) {{\n{body}    }}\n")

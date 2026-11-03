@@ -94,27 +94,59 @@ const SMART: &[&str] = &[
 ];
 
 fn opt(rng: &mut Rng, ty: &str) -> String {
-    if rng.chance(30) { format!("None::<{ty}>") } else { format!("Some({})", lit(rng, ty)) }
+    if rng.chance(30) {
+        format!("None::<{ty}>")
+    } else {
+        format!("Some({})", lit(rng, ty))
+    }
 }
 
 fn res(rng: &mut Rng, ty: &str) -> String {
-    if rng.chance(40) { format!("Err::<{ty}, {ty}>({})", lit(rng, ty)) } else { format!("Ok::<{ty}, {ty}>({})", lit(rng, ty)) }
+    if rng.chance(40) {
+        format!("Err::<{ty}, {ty}>({})", lit(rng, ty))
+    } else {
+        format!("Ok::<{ty}, {ty}>({})", lit(rng, ty))
+    }
 }
 
 pub fn generate(rng: &mut Rng) -> String {
-    let ty = *rng.pick(&["u8", "i8", "u16", "i16", "u32", "i32", "u64", "i64", "usize", "u128", "i128", "isize"]);
+    let ty = *rng.pick(&[
+        "u8", "i8", "u16", "i16", "u32", "i32", "u64", "i64", "usize", "u128", "i128", "isize",
+    ]);
     let mut p = format!("        type T = {ty};\n");
     for v in ["a", "b", "c"] {
         let l = lit(rng, ty);
         p += &format!("        let {v}: T = {};\n", bbv(rng, l));
     }
     let (o1, o2, r1, r2) = (opt(rng, ty), opt(rng, ty), res(rng, ty), res(rng, ty));
-    p += &format!("        let o1: Option<T> = {}; let o2: Option<T> = {};\n", bbv(rng, o1), bbv(rng, o2));
-    p += &format!("        let r1: Result<T, T> = {}; let r2: Result<T, T> = {};\n", bbv(rng, r1), bbv(rng, r2));
+    p += &format!(
+        "        let o1: Option<T> = {}; let o2: Option<T> = {};\n",
+        bbv(rng, o1),
+        bbv(rng, o2)
+    );
+    p += &format!(
+        "        let r1: Result<T, T> = {}; let r2: Result<T, T> = {};\n",
+        bbv(rng, r1),
+        bbv(rng, r2)
+    );
     let (k, f) = (rng.below(7), rng.chance(50));
-    p += &format!("        let k: usize = {}; let f: bool = {};\n", bbv(rng, format!("{k}usize")), bbv(rng, format!("{f}")));
+    p += &format!(
+        "        let k: usize = {}; let f: bool = {};\n",
+        bbv(rng, format!("{k}usize")),
+        bbv(rng, format!("{f}"))
+    );
     let n = rng.range(5, 10);
-    let table = pick_table(rng, &[("option", OPTION), ("result", RESULT), ("cmp", CMP), ("mem", MEM), ("cell", CELL), ("smart", SMART)]);
+    let table = pick_table(
+        rng,
+        &[
+            ("option", OPTION),
+            ("result", RESULT),
+            ("cmp", CMP),
+            ("mem", MEM),
+            ("cell", CELL),
+            ("smart", SMART),
+        ],
+    );
     let body = emit(rng, &p, &[table], n);
     wrap("", &body)
 }

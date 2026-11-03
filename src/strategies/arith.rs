@@ -39,7 +39,12 @@ fn cond(rng: &mut Rng, cx: &Ctx, depth: u32) -> String {
     let c = match rng.below(8) {
         0 => format!("matches!({a}, {})", super::range_pat(rng, ty)),
         1 => format!("({}..={}).contains(&{a})", lit(rng, ty), lit(rng, ty)),
-        2 => format!("matches!({a}, {} | {} | {})", super::plit(rng, ty), super::plit(rng, ty), super::range_pat(rng, ty)),
+        2 => format!(
+            "matches!({a}, {} | {} | {})",
+            super::plit(rng, ty),
+            super::plit(rng, ty),
+            super::range_pat(rng, ty)
+        ),
         _ => format!("{a} {op} {b}"),
     };
     match rng.below(6) {
@@ -70,14 +75,40 @@ fn expr(rng: &mut Rng, cx: &Ctx, ty: &'static str, depth: u32) -> String {
         3 => format!("({} & {})", sub(rng), sub(rng)),
         4 => format!("({} | {})", sub(rng), sub(rng)),
         5 => format!("({} ^ {})", sub(rng), sub(rng)),
-        6 => format!("{}.wrapping_shl({} as u32)", sub(rng), expr(rng, cx, "u8", d)),
-        7 => format!("{}.wrapping_shr({} as u32)", sub(rng), expr(rng, cx, "u8", d)),
-        8 => format!("{}.rotate_left({} as u32)", sub(rng), expr(rng, cx, "u8", d)),
-        9 => format!("{}.rotate_right({} as u32)", sub(rng), expr(rng, cx, "u8", d)),
+        6 => format!(
+            "{}.wrapping_shl({} as u32)",
+            sub(rng),
+            expr(rng, cx, "u8", d)
+        ),
+        7 => format!(
+            "{}.wrapping_shr({} as u32)",
+            sub(rng),
+            expr(rng, cx, "u8", d)
+        ),
+        8 => format!(
+            "{}.rotate_left({} as u32)",
+            sub(rng),
+            expr(rng, cx, "u8", d)
+        ),
+        9 => format!(
+            "{}.rotate_right({} as u32)",
+            sub(rng),
+            expr(rng, cx, "u8", d)
+        ),
         10 => format!("{}.saturating_add({})", sub(rng), sub(rng)),
         11 => format!("{}.saturating_sub({})", sub(rng), sub(rng)),
-        12 => format!("{}.checked_add({}).unwrap_or({})", sub(rng), sub(rng), sub(rng)),
-        13 => format!("{}.checked_mul({}).unwrap_or({})", sub(rng), sub(rng), sub(rng)),
+        12 => format!(
+            "{}.checked_add({}).unwrap_or({})",
+            sub(rng),
+            sub(rng),
+            sub(rng)
+        ),
+        13 => format!(
+            "{}.checked_mul({}).unwrap_or({})",
+            sub(rng),
+            sub(rng),
+            sub(rng)
+        ),
         14 => format!("{}.overflowing_mul({}).0", sub(rng), sub(rng)),
         15 => format!("({}.overflowing_sub({}).1 as {ty})", sub(rng), sub(rng)),
         16 => {
@@ -115,7 +146,12 @@ fn expr(rng: &mut Rng, cx: &Ctx, ty: &'static str, depth: u32) -> String {
             let other = *rng.pick(&all_ints());
             format!("({} as {ty})", expr(rng, cx, other, d))
         }
-        22 => format!("(if {} {{ {} }} else {{ {} }})", cond(rng, cx, d), sub(rng), sub(rng)),
+        22 => format!(
+            "(if {} {{ {} }} else {{ {} }})",
+            cond(rng, cx, d),
+            sub(rng),
+            sub(rng)
+        ),
         23 => {
             if b >= 16 && !signed(ty) {
                 format!("(({} | 1).ilog2() as {ty})", sub(rng))
@@ -137,7 +173,11 @@ fn expr(rng: &mut Rng, cx: &Ctx, ty: &'static str, depth: u32) -> String {
                     0 => format!("({}.isqrt() as {ty})", sub(rng)),
                     1 => format!("{}.midpoint({})", sub(rng), sub(rng)),
                     2 => format!("({}.is_power_of_two() as {ty})", sub(rng)),
-                    3 => format!("{}.checked_next_power_of_two().unwrap_or({})", sub(rng), sub(rng)),
+                    3 => format!(
+                        "{}.checked_next_power_of_two().unwrap_or({})",
+                        sub(rng),
+                        sub(rng)
+                    ),
                     _ => format!("(({} | 1).ilog10() as {ty})", sub(rng)),
                 }
             }
@@ -149,11 +189,25 @@ fn expr(rng: &mut Rng, cx: &Ctx, ty: &'static str, depth: u32) -> String {
             1 => format!("({}.trailing_ones() as {ty})", sub(rng)),
             _ => format!("({}.count_zeros() as {ty})", sub(rng)),
         },
-        29 => format!("{}.checked_shl({} as u32).unwrap_or({})", sub(rng), expr(rng, cx, "u8", d), sub(rng)),
-        30 => format!("{}.checked_pow({}).unwrap_or({})", sub(rng), rng.below(5), sub(rng)),
+        29 => format!(
+            "{}.checked_shl({} as u32).unwrap_or({})",
+            sub(rng),
+            expr(rng, cx, "u8", d),
+            sub(rng)
+        ),
+        30 => format!(
+            "{}.checked_pow({}).unwrap_or({})",
+            sub(rng),
+            rng.below(5),
+            sub(rng)
+        ),
         31 => match rng.below(4) {
             0 => format!("{}.saturating_mul({})", sub(rng), sub(rng)),
-            1 => format!("{}.overflowing_shl({} as u32).0", sub(rng), expr(rng, cx, "u8", d)),
+            1 => format!(
+                "{}.overflowing_shl({} as u32).0",
+                sub(rng),
+                expr(rng, cx, "u8", d)
+            ),
             2 => format!("{}.overflowing_neg().0", sub(rng)),
             _ => format!("{}.overflowing_pow({}).0", sub(rng), rng.below(6)),
         },
@@ -178,25 +232,59 @@ pub fn generate(rng: &mut Rng) -> String {
     let mut calls = String::new();
     for f in 0..nfn {
         let nparams = rng.range(1, 4);
-        let params: Vec<Var> = (0..nparams).map(|i| Var { name: format!("p{i}"), ty: *rng.pick(&types) }).collect();
+        let params: Vec<Var> = (0..nparams)
+            .map(|i| Var {
+                name: format!("p{i}"),
+                ty: rng.pick(&types),
+            })
+            .collect();
         let ret = *rng.pick(&types);
-        let attr = *rng.pick(&["#[inline(never)]", "#[inline(always)]", "#[inline]", "", "#[cold] #[inline(never)]"]);
-        let sig: Vec<String> = params.iter().map(|p| format!("{}: {}", p.name, p.ty)).collect();
-        let mut locals: Vec<Var> = params.iter().map(|p| Var { name: p.name.clone(), ty: p.ty }).collect();
+        let attr = *rng.pick(&[
+            "#[inline(never)]",
+            "#[inline(always)]",
+            "#[inline]",
+            "",
+            "#[cold] #[inline(never)]",
+        ]);
+        let sig: Vec<String> = params
+            .iter()
+            .map(|p| format!("{}: {}", p.name, p.ty))
+            .collect();
+        let mut locals: Vec<Var> = params
+            .iter()
+            .map(|p| Var {
+                name: p.name.clone(),
+                ty: p.ty,
+            })
+            .collect();
         let mut body = String::new();
         for l in 0..rng.range(1, 3) {
             let ty = *rng.pick(&types);
             let depth_ = rng.range(2, 4) as u32;
             let e = expr(rng, &Ctx { vars: &locals }, ty, depth_);
             w!(body, "        let l{l}: {ty} = {e};");
-            locals.push(Var { name: format!("l{l}"), ty });
+            locals.push(Var {
+                name: format!("l{l}"),
+                ty,
+            });
         }
         let depth_ = rng.range(2, 4) as u32;
         let tail = expr(rng, &Ctx { vars: &locals }, ret, depth_);
-        w!(s, "    {attr}\n    fn f{f}({}) -> {ret} {{\n{body}        {tail}\n    }}", sig.join(", "));
+        w!(
+            s,
+            "    {attr}\n    fn f{f}({}) -> {ret} {{\n{body}        {tail}\n    }}",
+            sig.join(", ")
+        );
         for _ in 0..rng.range(1, 3) {
-            let args: Vec<String> = params.iter().map(|p| format!("bb({})", lit(rng, p.ty))).collect();
-            w!(calls, "        let r = f{f}({});\n        h.put(&r);", args.join(", "));
+            let args: Vec<String> = params
+                .iter()
+                .map(|p| format!("bb({})", lit(rng, p.ty)))
+                .collect();
+            w!(
+                calls,
+                "        let r = f{f}({});\n        h.put(&r);",
+                args.join(", ")
+            );
         }
     }
 
@@ -207,7 +295,10 @@ pub fn generate(rng: &mut Rng) -> String {
     for i in 0..nin {
         let ty = *rng.pick(&types);
         w!(s, "        let v{i}: {ty} = bb({});", lit(rng, ty));
-        vars.push(Var { name: format!("v{i}"), ty });
+        vars.push(Var {
+            name: format!("v{i}"),
+            ty,
+        });
     }
     for i in 0..rng.range(2, 4) {
         let ty = *rng.pick(&types);
@@ -215,7 +306,10 @@ pub fn generate(rng: &mut Rng) -> String {
         let e = expr(rng, &Ctx { vars: &vars }, ty, depth_);
         w!(s, "        let t{i}: {ty} = {e};");
         s.push_str(&feed(&format!("t{i}")));
-        vars.push(Var { name: format!("t{i}"), ty });
+        vars.push(Var {
+            name: format!("t{i}"),
+            ty,
+        });
     }
     s.push_str(&calls);
 
@@ -224,10 +318,19 @@ pub fn generate(rng: &mut Rng) -> String {
         let ty = *rng.pick(&types);
         let n = rng.range(3, 40);
         let mut lv: Vec<Var> = Vec::new();
-        lv.push(Var { name: "acc".into(), ty });
-        lv.push(Var { name: "i".into(), ty: "u32" });
+        lv.push(Var {
+            name: "acc".into(),
+            ty,
+        });
+        lv.push(Var {
+            name: "i".into(),
+            ty: "u32",
+        });
         for v in vars.iter().take(3) {
-            lv.push(Var { name: v.name.clone(), ty: v.ty });
+            lv.push(Var {
+                name: v.name.clone(),
+                ty: v.ty,
+            });
         }
         let depth_ = rng.range(2, 4) as u32;
         let step = expr(rng, &Ctx { vars: &lv }, ty, depth_);

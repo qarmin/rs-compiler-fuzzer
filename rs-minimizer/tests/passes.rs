@@ -2,7 +2,7 @@ mod common;
 use common::*;
 use rs_minimizer::deadcode::remove_dead_code;
 use rs_minimizer::exprs::{drop_calls, simplify_exprs, simplify_lets, strip_parens};
-use rs_minimizer::{Oracle, Options, ReduceLog, minimize};
+use rs_minimizer::{Options, Oracle, ReduceLog, minimize};
 use std::time::Duration;
 
 #[test]
@@ -28,7 +28,9 @@ fn compiler_reported_dead_code_is_removed() {
 #[test]
 fn dead_code_removal_keeps_what_the_oracle_needs() {
     let src = "fn marker() {}\nfn main() { println!(\"1\"); }\n";
-    let o = rs_minimizer::Cached::new(|s: &str| s.contains("fn marker") && run_program(s).as_deref() == Some("1\n"));
+    let o = rs_minimizer::Cached::new(|s: &str| {
+        s.contains("fn marker") && run_program(s).as_deref() == Some("1\n")
+    });
     check_oracle(&o, src);
     let out = remove_dead_code(&o, src, &["rustc".to_string()], far());
     assert!(out.contains("fn marker"), "{out}");
@@ -72,16 +74,29 @@ fn a_batch_harness_is_reduced_to_plain_code_for_the_needed_case() {
     let expected = "1 1018\n2 131\n3 38\n";
     let full = prints(expected);
     // the "bug": the line of case 2 is printed
-    let o = rs_minimizer::Cached::new(|s: &str| run_program(s).map(|out| out.contains("2 131\n")).unwrap_or(false));
+    let o = rs_minimizer::Cached::new(|s: &str| {
+        run_program(s)
+            .map(|out| out.contains("2 131\n"))
+            .unwrap_or(false)
+    });
     let _ = full;
     check_oracle(&o, BATCH);
     rs_minimizer::control::set_parallel(8);
     let opts = Options::new(Duration::from_secs(120));
     let mut log = ReduceLog::default();
     let out = minimize(&o, BATCH, &opts, &mut log, &mut |_, _, _| None);
-    assert!(!out.contains("macro_rules") && !out.contains("catch_unwind") && !out.contains("set_hook"), "{out}");
-    assert!(!out.contains("case_1") && !out.contains("case_3") && !out.contains("unused_helper"), "{out}");
-    assert!(!out.contains("mod ") && !out.contains("fn run") && !out.contains("trait "), "everything is plain code in main:\n{out}");
+    assert!(
+        !out.contains("macro_rules") && !out.contains("catch_unwind") && !out.contains("set_hook"),
+        "{out}"
+    );
+    assert!(
+        !out.contains("case_1") && !out.contains("case_3") && !out.contains("unused_helper"),
+        "{out}"
+    );
+    assert!(
+        !out.contains("mod ") && !out.contains("fn run") && !out.contains("trait "),
+        "everything is plain code in main:\n{out}"
+    );
     assert!(out.lines().count() <= 25, "{out}");
     assert!(run_program(&out).unwrap().contains("2 131\n"), "{out}");
 }
@@ -95,7 +110,10 @@ fn calls_are_pasted_into_their_callers_and_the_functions_go() {
     let out = rs_minimizer::inline::inline_calls(&o, src, &["rustc".to_string()], far());
     let main_body = &out[out.find("fn main").unwrap()..];
     for gone in ["P::new(", ".add(", ".get(", "twice("] {
-        assert!(!main_body.contains(gone), "{gone} should be inlined:\n{out}");
+        assert!(
+            !main_body.contains(gone),
+            "{gone} should be inlined:\n{out}"
+        );
     }
     assert_prints(&out, "11\n");
 }
@@ -105,12 +123,19 @@ fn inlining_is_refused_when_the_behaviour_would_change() {
     let src = "fn early(v: u32) -> u32 { if v > 1 { return 10; } v }\nfn main() { println!(\"{}\", early(5) + 1); }\n";
     let o = prints("11\n");
     let out = rs_minimizer::inline::inline_calls(&o, src, &["rustc".to_string()], far());
-    assert!(out.contains("early(5)"), "a body with `return` must not be pasted:\n{out}");
+    assert!(
+        out.contains("early(5)"),
+        "a body with `return` must not be pasted:\n{out}"
+    );
 }
 
 #[test]
 fn the_renamed_program_with_modules_traits_and_generics_becomes_plain_code() {
-    let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/renamed.rs")).unwrap();
+    let src = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/data/renamed.rs"
+    ))
+    .unwrap();
     let o = prints("0\n");
     check_oracle(&o, &src);
     rs_minimizer::control::set_parallel(8);
@@ -166,7 +191,10 @@ fn an_unused_binding_keeps_only_its_initialiser() {
     check_oracle(&o, src);
     let out = rs_minimizer::exprs::drop_let_bindings(&o, src, far());
     assert!(!out.contains("let ok"), "{out}");
-    assert!(out.contains("let keep") || out.contains("let mut n"), "used bindings stay:\n{out}");
+    assert!(
+        out.contains("let keep") || out.contains("let mut n"),
+        "used bindings stay:\n{out}"
+    );
     assert_prints(&out, "42\n");
 }
 
@@ -186,7 +214,10 @@ fn single_use_lets_are_substituted() {
     let o = prints("42\n");
     check_oracle(&o, src);
     let out = rs_minimizer::inline::substitute_lets(&o, src, far());
-    assert!(out.matches("let ").count() < src.matches("let ").count(), "{out}");
+    assert!(
+        out.matches("let ").count() < src.matches("let ").count(),
+        "{out}"
+    );
     assert_prints(&out, "42\n");
 }
 
@@ -209,9 +240,18 @@ fn a_hook_that_loses_the_bug_is_discarded() {
     let opts = Options::new(Duration::from_secs(60));
     let mut log = ReduceLog::default();
     // a hook that "rebuilds" the program and breaks it
-    let out = minimize(&o, src, &opts, &mut log, &mut |stage, cur, _| (stage == rs_minimizer::Stage::Flatten).then(|| cur.replace("42", "43").replace("6u32 * 7", "6u32 * 8")));
+    let out = minimize(&o, src, &opts, &mut log, &mut |stage, cur, _| {
+        (stage == rs_minimizer::Stage::Flatten)
+            .then(|| cur.replace("42", "43").replace("6u32 * 7", "6u32 * 8"))
+    });
     assert_prints(&out, "42\n");
-    assert!(log.0.iter().any(|l| l.contains("not interesting - discarded")), "{:?}", log.0);
+    assert!(
+        log.0
+            .iter()
+            .any(|l| l.contains("not interesting - discarded")),
+        "{:?}",
+        log.0
+    );
 }
 
 #[test]
@@ -248,7 +288,10 @@ fn constants_are_folded_and_integers_made_smaller() {
     check_oracle(&o, src);
     rs_minimizer::control::set_parallel(8);
     let out = rs_minimizer::peep::peep(&o, src, far());
-    assert!(!out.contains("1000u32 + 234u32") && !out.contains("64 / 8"), "{out}");
+    assert!(
+        !out.contains("1000u32 + 234u32") && !out.contains("64 / 8"),
+        "{out}"
+    );
     assert_prints(&out, "4\n");
 }
 
@@ -259,7 +302,13 @@ fn declared_names_get_single_letters() {
     check_oracle(&o, src);
     rs_minimizer::control::set_parallel(8);
     let out = rs_minimizer::inline::shorten_names(&o, src, far());
-    assert!(!out.contains("compute_value") && !out.contains("first_input") && !out.contains("result_total") && out.contains("fn main"), "{out}");
+    assert!(
+        !out.contains("compute_value")
+            && !out.contains("first_input")
+            && !out.contains("result_total")
+            && out.contains("fn main"),
+        "{out}"
+    );
     assert_prints(&out, "41\n");
 }
 
@@ -272,5 +321,8 @@ fn a_run_that_finds_nothing_hands_the_input_back_unchanged() {
     let mut log = ReduceLog::default();
     let out = minimize(&o, src, &opts, &mut log, &mut |_, _, _| None);
     assert_prints(&out, "42\n");
-    assert!(out.lines().count() <= src.lines().count(), "never bigger than what it was given:\n{out}");
+    assert!(
+        out.lines().count() <= src.lines().count(),
+        "never bigger than what it was given:\n{out}"
+    );
 }

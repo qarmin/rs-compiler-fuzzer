@@ -106,9 +106,33 @@ const BYTE: &[&str] = &[
 
 fn prelude(rng: &mut Rng, ty: &str) -> String {
     let b = bits(ty);
-    let u = if signed_ty(ty) { counterpart(ty) } else { ty.to_string() };
-    let i = if signed_ty(ty) { ty.to_string() } else { counterpart(ty) };
-    let ds = *rng.pick(&["0", "7", "ff", "-1", "+5", "1z", "zz", "", "00012", "7fffffff", "-80", "101", "255", "256", "12345678901234567890"]);
+    let u = if signed_ty(ty) {
+        counterpart(ty)
+    } else {
+        ty.to_string()
+    };
+    let i = if signed_ty(ty) {
+        ty.to_string()
+    } else {
+        counterpart(ty)
+    };
+    let ds = *rng.pick(&[
+        "0",
+        "7",
+        "ff",
+        "-1",
+        "+5",
+        "1z",
+        "zz",
+        "",
+        "00012",
+        "7fffffff",
+        "-80",
+        "101",
+        "255",
+        "256",
+        "12345678901234567890",
+    ]);
     let mut p = String::new();
     p += &format!("        type T = {ty}; type U = {u}; type I = {i};\n");
     for v in ["a", "b", "c"] {
@@ -116,9 +140,23 @@ fn prelude(rng: &mut Rng, ty: &str) -> String {
         p += &format!("        let {v}: T = {l};\n");
     }
     let (ul, il) = (lit(rng, &u), lit(rng, &i));
-    p += &format!("        let ua: U = {}; let ib: I = {};\n", bbv(rng, ul), bbv(rng, il));
-    let (nv, ev, dv, radix) = (small(rng, "u32", (b - 1) as usize), small(rng, "u32", 4), format!("\"{ds}\""), rng.range(2, 36));
-    p += &format!("        let n: u32 = {}; let e: u32 = {}; let d: &str = {}; let r: u32 = {radix};\n", bbv(rng, nv), bbv(rng, ev), bbv(rng, dv));
+    p += &format!(
+        "        let ua: U = {}; let ib: I = {};\n",
+        bbv(rng, ul),
+        bbv(rng, il)
+    );
+    let (nv, ev, dv, radix) = (
+        small(rng, "u32", (b - 1) as usize),
+        small(rng, "u32", 4),
+        format!("\"{ds}\""),
+        rng.range(2, 36),
+    );
+    p += &format!(
+        "        let n: u32 = {}; let e: u32 = {}; let d: &str = {}; let r: u32 = {radix};\n",
+        bbv(rng, nv),
+        bbv(rng, ev),
+        bbv(rng, dv)
+    );
     p
 }
 

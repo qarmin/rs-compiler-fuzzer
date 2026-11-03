@@ -3,17 +3,27 @@
 //! produced plug in through `Hook`.
 
 use crate::bracket::{debracket, hollow, lexeme_deletions, lift_braces};
-use crate::control::{effort, interrupted, last_run_complete, oracle_runs, par_checks, reset_deadline_flag, set_effort, set_stage};
+use crate::control::{
+    effort, interrupted, last_run_complete, oracle_runs, par_checks, reset_deadline_flag,
+    set_effort, set_stage,
+};
 use crate::deadcode::remove_dead_code;
-use crate::exprs::{drop_calls, drop_let_bindings, flatten_blocks, simplify_exprs, simplify_let_tuples, simplify_lets, strip_parens};
+use crate::exprs::{
+    drop_calls, drop_let_bindings, flatten_blocks, simplify_exprs, simplify_let_tuples,
+    simplify_lets, strip_parens,
+};
 use crate::format::format_if_interesting;
 use crate::inline::{inline_calls, shorten_names, substitute_lets};
-use crate::items::{shrink_items, shrink_items_with_users, shrink_pairs, shrink_siblings_step, shrink_statements};
+use crate::items::{
+    shrink_items, shrink_items_with_users, shrink_pairs, shrink_siblings_step, shrink_statements,
+};
 use crate::lines::{shrink_lines, strip_comments};
 use crate::modules::hoist_modules;
 use crate::oracle::Oracle;
 use crate::peep::peep;
-use crate::structure::{remove_fields, remove_params, remove_variants_and_arms, stub_bodies, unwrap_newtypes};
+use crate::structure::{
+    remove_fields, remove_params, remove_variants_and_arms, stub_bodies, unwrap_newtypes,
+};
 use crate::tokens::shrink_tokens;
 use crate::traits::{monomorphize, remove_bounds, remove_trait_methods, specialize_trait_paths};
 use crate::unroll::unroll;
@@ -55,17 +65,35 @@ pub struct Options {
 
 impl Options {
     pub fn new(budget: Duration) -> Self {
-        Options { budget, rustc: vec!["rustc".into()], keep_module: Box::new(|_| false) }
+        Options {
+            budget,
+            rustc: vec!["rustc".into()],
+            keep_module: Box::new(|_| false),
+        }
     }
 }
 
-fn stage(it: &dyn Oracle, hook: Hook, st: Stage, cur: &mut String, deadline: Instant, log: &mut ReduceLog) {
+fn stage(
+    it: &dyn Oracle,
+    hook: Hook,
+    st: Stage,
+    cur: &mut String,
+    deadline: Instant,
+    log: &mut ReduceLog,
+) {
     if let Some(next) = hook(st, cur, deadline) {
         // what a hook builds is checked like everything else: a rebuilt program that lost the bug would poison every later step
         if next != *cur && !it.check(&next) {
-            log.push(format!("{st:?}: the hook's program ({} lines) is not interesting - discarded", next.lines().count()));
+            log.push(format!(
+                "{st:?}: the hook's program ({} lines) is not interesting - discarded",
+                next.lines().count()
+            ));
         } else if next != *cur {
-            log.push(format!("{st:?}: the hook changed the program ({} -> {} lines)", cur.lines().count(), next.lines().count()));
+            log.push(format!(
+                "{st:?}: the hook changed the program ({} -> {} lines)",
+                cur.lines().count(),
+                next.lines().count()
+            ));
             *cur = next;
         }
     }
@@ -98,7 +126,13 @@ impl Progress {
     }
 
     fn pass(&self, name: &str) {
-        log::debug!("pass `{name}` starts at {:.0}s, {} lines / {} bytes, {} oracle calls so far", self.start.elapsed().as_secs_f32(), self.lines, self.bytes, oracle_runs());
+        log::debug!(
+            "pass `{name}` starts at {:.0}s, {} lines / {} bytes, {} oracle calls so far",
+            self.start.elapsed().as_secs_f32(),
+            self.lines,
+            self.bytes,
+            oracle_runs()
+        );
         set_stage(&Self::label(name));
     }
 
@@ -111,20 +145,35 @@ impl Progress {
             std::cmp::Ordering::Greater => format!("+{}", new - old),
         };
         let runs = oracle_runs();
-        let cost = format!("{} oracle calls in {:.1}s", runs - self.last_runs, self.last_at.elapsed().as_secs_f32());
+        let cost = format!(
+            "{} oracle calls in {:.1}s",
+            runs - self.last_runs,
+            self.last_at.elapsed().as_secs_f32()
+        );
         if l == self.lines && b == self.bytes {
-            log.push(format!("RESULT [{tool}]: no change ({l} lines, {b} bytes); cost: {cost}; {:.0}s in total", self.start.elapsed().as_secs_f32()));
+            log.push(format!(
+                "RESULT [{tool}]: no change ({l} lines, {b} bytes); cost: {cost}; {:.0}s in total",
+                self.start.elapsed().as_secs_f32()
+            ));
         } else {
             log.push(format!("RESULT [{tool}]: {} -> {l} lines ({}), {} -> {b} bytes ({}); cost: {cost}; {:.0}s in total", self.lines, delta(self.lines, l), self.bytes, delta(self.bytes, b), self.start.elapsed().as_secs_f32()));
         }
-        crate::ui::pass_result(tool, self.bytes, b, runs - self.last_runs, self.last_at.elapsed().as_secs_f32());
+        crate::ui::pass_result(
+            tool,
+            self.bytes,
+            b,
+            runs - self.last_runs,
+            self.last_at.elapsed().as_secs_f32(),
+        );
         let removed = self.bytes as i64 - b as i64;
         match self.gains.iter_mut().find(|g| &g.0 == tool) {
             Some(g) => {
                 g.1 += removed;
                 g.2 += runs - self.last_runs;
             }
-            None => self.gains.push((tool.to_string(), removed, runs - self.last_runs)),
+            None => self
+                .gains
+                .push((tool.to_string(), removed, runs - self.last_runs)),
         }
         self.last_runs = runs;
         self.last_at = Instant::now();
@@ -137,7 +186,13 @@ impl Progress {
     /// The last words of a run: from what to what, how long, how much work, and who did the shrinking.
     fn summary(&self, log: &mut ReduceLog, finished: bool) {
         let (l0, b0) = self.initial;
-        let pct = |a: usize, b: usize| if a == 0 { 0.0 } else { 100.0 * (a as f64 - b as f64) / a as f64 };
+        let pct = |a: usize, b: usize| {
+            if a == 0 {
+                0.0
+            } else {
+                100.0 * (a as f64 - b as f64) / a as f64
+            }
+        };
         let secs = self.start.elapsed().as_secs_f64().max(0.001);
         let runs = oracle_runs() - self.runs0;
         log.push(format!(
@@ -150,9 +205,22 @@ impl Progress {
             secs,
             runs as f64 / secs
         ));
-        let mut by_gain: Vec<&(String, i64, usize)> = self.gains.iter().filter(|g| g.1 != 0).collect();
+        let mut by_gain: Vec<&(String, i64, usize)> =
+            self.gains.iter().filter(|g| g.1 != 0).collect();
         by_gain.sort_by_key(|g| std::cmp::Reverse(g.1.abs()));
-        let top: Vec<String> = by_gain.iter().take(6).map(|g| format!("{} {}{} bytes ({} calls)", g.0.trim_start_matches("rs-minimizer: "), if g.1 > 0 { "-" } else { "+" }, g.1.abs(), g.2)).collect();
+        let top: Vec<String> = by_gain
+            .iter()
+            .take(6)
+            .map(|g| {
+                format!(
+                    "{} {}{} bytes ({} calls)",
+                    g.0.trim_start_matches("rs-minimizer: "),
+                    if g.1 > 0 { "-" } else { "+" },
+                    g.1.abs(),
+                    g.2
+                )
+            })
+            .collect();
         log.push(format!("SUMMARY biggest contributions: {}", top.join("; ")));
         let refused = crate::control::refused_without_a_run();
         if refused > 0 {
@@ -160,16 +228,24 @@ impl Progress {
         }
         let invalid = crate::control::invalid_candidates();
         if invalid > 0 {
-            let reasons: Vec<String> = crate::control::rejection_reasons(5).iter().map(|(r, c)| format!("{c}x {r}")).collect();
+            let reasons: Vec<String> = crate::control::rejection_reasons(5)
+                .iter()
+                .map(|(r, c)| format!("{c}x {r}"))
+                .collect();
             log.push(format!("SUMMARY candidates that did not compile: {invalid} of {} oracle calls; most frequent: {}", oracle_runs(), reasons.join(" | ")));
         }
     }
 }
 
-
 /// The program that came out of the last pass must still show the problem. If a pass lost it (a buggy pass, a hook, a flaky
 /// oracle), the run goes back to the last program that did, instead of reducing something that is no test case any more.
-fn guard(it: &dyn Oracle, cur: &mut String, good: &mut String, log: &mut ReduceLog, after: &str) -> bool {
+fn guard(
+    it: &dyn Oracle,
+    cur: &mut String,
+    good: &mut String,
+    log: &mut ReduceLog,
+    after: &str,
+) -> bool {
     if *cur == *good {
         return true;
     }
@@ -206,41 +282,129 @@ struct PassDef {
 
 fn passes() -> Vec<PassDef> {
     const ANY: usize = usize::MAX;
-    let p = |name, prior, max_lines, needs_rustc, run: fn(&PassCtx, &str) -> String| PassDef { name, prior, max_lines, big_after_secs: None, needs_rustc, min_effort: 0, run };
+    let p = |name, prior, max_lines, needs_rustc, run: fn(&PassCtx, &str) -> String| PassDef {
+        name,
+        prior,
+        max_lines,
+        big_after_secs: None,
+        needs_rustc,
+        min_effort: 0,
+        run,
+    };
     vec![
-        p("comments", 0.0005, ANY, false, |c, s| strip_comments(c.it, s)),
-        p("items with their users", 0.02, ANY, false, |c, s| shrink_items_with_users(c.it, s, c.deadline)),
-        p("dead code", 0.05, ANY, true, |c, s| remove_dead_code(c.it, s, &c.opts.rustc, c.deadline)),
-        p("siblings", 0.006, ANY, false, |c, s| shrink_siblings_step(c.it, s, c.deadline, usize::MAX, &mut c.siblings_done.borrow_mut()).0),
-        p("hollow", 0.004, 3000, false, |c, s| hollow(c.it, s, c.deadline)),
-        p("lexeme deletions", 0.002, 4000, false, |c, s| lexeme_deletions(c.it, s, c.deadline)),
-        p("items", 0.003, 3000, false, |c, s| shrink_items(c.it, s, c.deadline)),
-        p("lines", 0.001, 600, false, |c, s| shrink_lines(c.it, s, c.deadline)),
-        PassDef { big_after_secs: Some(30), ..p("unroll", 0.002, 2000, false, |c, s| unroll(c.it, s)) },
-        PassDef { big_after_secs: Some(30), ..p("hoist modules", 0.001, 2000, false, |c, s| hoist_modules(c.it, s, &*c.opts.keep_module, &c.opts.rustc)) },
-        p("function bodies", 0.003, 2000, false, |c, s| stub_bodies(c.it, s, c.deadline)),
-        p("newtypes", 0.001, 2000, false, |c, s| unwrap_newtypes(c.it, s, c.deadline)),
-        p("parameters", 0.001, 2000, false, |c, s| remove_params(c.it, s, c.deadline)),
-        p("fields", 0.001, 2000, false, |c, s| remove_fields(c.it, s, c.deadline)),
-        p("variants and arms", 0.001, 2000, false, |c, s| remove_variants_and_arms(c.it, s, c.deadline)),
-        p("statements", 0.002, 1500, false, |c, s| shrink_statements(c.it, s, c.deadline)),
-        p("lift braces", 0.002, 1500, false, |c, s| lift_braces(c.it, s, c.deadline)),
-        p("debracket", 0.001, 1500, false, |c, s| debracket(c.it, s, c.deadline)),
-        p("method calls", 0.001, 1500, false, |c, s| drop_calls(c.it, s, c.deadline)),
-        p("expressions", 0.001, 1500, false, |c, s| simplify_exprs(c.it, s, c.deadline)),
-        p("let simplification", 0.0005, 1500, false, |c, s| simplify_lets(c.it, s, c.deadline)),
-        p("trait methods", 0.002, 2000, false, |c, s| remove_trait_methods(c.it, s, c.deadline)),
-        p("bounds", 0.001, 1500, false, |c, s| remove_bounds(c.it, s, c.deadline)),
-        p("trait paths", 0.001, 1500, false, |c, s| specialize_trait_paths(c.it, s, c.deadline)),
-        p("monomorphize", 0.002, 1500, false, |c, s| monomorphize(c.it, s, c.deadline)),
-        p("inline", 0.001, 400, true, |c, s| inline_calls(c.it, s, &c.opts.rustc, c.deadline)),
-        p("let bindings", 0.001, 400, false, |c, s| drop_let_bindings(c.it, s, c.deadline)),
-        p("blocks", 0.001, 400, false, |c, s| flatten_blocks(c.it, s, c.deadline)),
-        p("let tuples", 0.0005, 400, false, |c, s| simplify_let_tuples(c.it, s, c.deadline)),
-        p("let substitution", 0.0005, 400, false, |c, s| substitute_lets(c.it, s, c.deadline)),
-        p("peephole", 0.0005, 800, false, |c, s| peep(c.it, s, c.deadline)),
-        p("tokens", 0.0003, 600, false, |c, s| shrink_tokens(c.it, s, c.deadline)),
-        PassDef { min_effort: 1, ..p("pairs", 0.0002, 400, false, |c, s| shrink_pairs(c.it, s, c.deadline)) },
+        p("comments", 0.0005, ANY, false, |c, s| {
+            strip_comments(c.it, s)
+        }),
+        p("items with their users", 0.02, ANY, false, |c, s| {
+            shrink_items_with_users(c.it, s, c.deadline)
+        }),
+        p("dead code", 0.05, ANY, true, |c, s| {
+            remove_dead_code(c.it, s, &c.opts.rustc, c.deadline)
+        }),
+        p("siblings", 0.006, ANY, false, |c, s| {
+            shrink_siblings_step(
+                c.it,
+                s,
+                c.deadline,
+                usize::MAX,
+                &mut c.siblings_done.borrow_mut(),
+            )
+            .0
+        }),
+        p("hollow", 0.004, 3000, false, |c, s| {
+            hollow(c.it, s, c.deadline)
+        }),
+        p("lexeme deletions", 0.002, 4000, false, |c, s| {
+            lexeme_deletions(c.it, s, c.deadline)
+        }),
+        p("items", 0.003, 3000, false, |c, s| {
+            shrink_items(c.it, s, c.deadline)
+        }),
+        p("lines", 0.001, 600, false, |c, s| {
+            shrink_lines(c.it, s, c.deadline)
+        }),
+        PassDef {
+            big_after_secs: Some(30),
+            ..p("unroll", 0.002, 2000, false, |c, s| unroll(c.it, s))
+        },
+        PassDef {
+            big_after_secs: Some(30),
+            ..p("hoist modules", 0.001, 2000, false, |c, s| {
+                hoist_modules(c.it, s, &*c.opts.keep_module, &c.opts.rustc)
+            })
+        },
+        p("function bodies", 0.003, 2000, false, |c, s| {
+            stub_bodies(c.it, s, c.deadline)
+        }),
+        p("newtypes", 0.001, 2000, false, |c, s| {
+            unwrap_newtypes(c.it, s, c.deadline)
+        }),
+        p("parameters", 0.001, 2000, false, |c, s| {
+            remove_params(c.it, s, c.deadline)
+        }),
+        p("fields", 0.001, 2000, false, |c, s| {
+            remove_fields(c.it, s, c.deadline)
+        }),
+        p("variants and arms", 0.001, 2000, false, |c, s| {
+            remove_variants_and_arms(c.it, s, c.deadline)
+        }),
+        p("statements", 0.002, 1500, false, |c, s| {
+            shrink_statements(c.it, s, c.deadline)
+        }),
+        p("lift braces", 0.002, 1500, false, |c, s| {
+            lift_braces(c.it, s, c.deadline)
+        }),
+        p("debracket", 0.001, 1500, false, |c, s| {
+            debracket(c.it, s, c.deadline)
+        }),
+        p("method calls", 0.001, 1500, false, |c, s| {
+            drop_calls(c.it, s, c.deadline)
+        }),
+        p("expressions", 0.001, 1500, false, |c, s| {
+            simplify_exprs(c.it, s, c.deadline)
+        }),
+        p("let simplification", 0.0005, 1500, false, |c, s| {
+            simplify_lets(c.it, s, c.deadline)
+        }),
+        p("trait methods", 0.002, 2000, false, |c, s| {
+            remove_trait_methods(c.it, s, c.deadline)
+        }),
+        p("bounds", 0.001, 1500, false, |c, s| {
+            remove_bounds(c.it, s, c.deadline)
+        }),
+        p("trait paths", 0.001, 1500, false, |c, s| {
+            specialize_trait_paths(c.it, s, c.deadline)
+        }),
+        p("monomorphize", 0.002, 1500, false, |c, s| {
+            monomorphize(c.it, s, c.deadline)
+        }),
+        p("inline", 0.001, 400, true, |c, s| {
+            inline_calls(c.it, s, &c.opts.rustc, c.deadline)
+        }),
+        p("let bindings", 0.001, 400, false, |c, s| {
+            drop_let_bindings(c.it, s, c.deadline)
+        }),
+        p("blocks", 0.001, 400, false, |c, s| {
+            flatten_blocks(c.it, s, c.deadline)
+        }),
+        p("let tuples", 0.0005, 400, false, |c, s| {
+            simplify_let_tuples(c.it, s, c.deadline)
+        }),
+        p("let substitution", 0.0005, 400, false, |c, s| {
+            substitute_lets(c.it, s, c.deadline)
+        }),
+        p("peephole", 0.0005, 800, false, |c, s| {
+            peep(c.it, s, c.deadline)
+        }),
+        p("tokens", 0.0003, 600, false, |c, s| {
+            shrink_tokens(c.it, s, c.deadline)
+        }),
+        PassDef {
+            min_effort: 1,
+            ..p("pairs", 0.0002, 400, false, |c, s| {
+                shrink_pairs(c.it, s, c.deadline)
+            })
+        },
     ]
 }
 
@@ -258,7 +422,17 @@ struct Stat {
 /// prior (scaled by the size of the program) for those that have not. A pass that changed nothing waits until another one changes the
 /// program; when none is left the effort goes up (more variants), and when it is at its highest the run is finished.
 #[allow(clippy::too_many_arguments)]
-fn schedule(it: &dyn Oracle, opts: &Options, cur: &mut String, good: &mut String, pr: &mut Progress, log: &mut ReduceLog, hook: Hook, start: Instant, end: Instant) {
+fn schedule(
+    it: &dyn Oracle,
+    opts: &Options,
+    cur: &mut String,
+    good: &mut String,
+    pr: &mut Progress,
+    log: &mut ReduceLog,
+    hook: Hook,
+    start: Instant,
+    end: Instant,
+) {
     let defs = passes();
     let mut stats: Vec<Stat> = vec![Stat::default(); defs.len()];
     let budget = end.saturating_duration_since(start);
@@ -288,20 +462,40 @@ fn schedule(it: &dyn Oracle, opts: &Options, cur: &mut String, good: &mut String
             }
             level += 1;
             set_effort(level);
-            log.push(format!("no pass finds anything more: trying harder (effort {level})"));
+            log.push(format!(
+                "no pass finds anything more: trying harder (effort {level})"
+            ));
             for s in stats.iter_mut() {
                 s.idle_at = 0;
             }
             continue;
         }
-        let score = |i: usize| if stats[i].runs == 0 { defs[i].prior * cur.len() as f64 } else { stats[i].rate };
-        let pick = *eligible.iter().max_by(|&&a, &&b| score(a).partial_cmp(&score(b)).unwrap_or(std::cmp::Ordering::Equal)).unwrap();
+        let score = |i: usize| {
+            if stats[i].runs == 0 {
+                defs[i].prior * cur.len() as f64
+            } else {
+                stats[i].rate
+            }
+        };
+        let pick = *eligible
+            .iter()
+            .max_by(|&&a, &&b| {
+                score(a)
+                    .partial_cmp(&score(b))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .unwrap();
         let def = &defs[pick];
         let before = cur.clone();
         let pass_start = Instant::now();
         let runs_before = oracle_runs();
         pr.pass(def.name);
-        let ctx = PassCtx { it, opts, deadline: (Instant::now() + slice).min(end), siblings_done: &siblings_done };
+        let ctx = PassCtx {
+            it,
+            opts,
+            deadline: (Instant::now() + slice).min(end),
+            siblings_done: &siblings_done,
+        };
         let mut next = (def.run)(&ctx, cur);
         let secs = pass_start.elapsed().as_secs_f64().max(0.001);
         let st = &mut stats[pick];
@@ -332,7 +526,13 @@ fn schedule(it: &dyn Oracle, opts: &Options, cur: &mut String, good: &mut String
     }
 }
 
-pub fn minimize(it: &dyn Oracle, src: &str, opts: &Options, log: &mut ReduceLog, hook: Hook) -> String {
+pub fn minimize(
+    it: &dyn Oracle,
+    src: &str,
+    opts: &Options,
+    log: &mut ReduceLog,
+    hook: Hook,
+) -> String {
     reset_deadline_flag();
     crate::control::start_clock();
     let start = Instant::now();
@@ -341,22 +541,62 @@ pub fn minimize(it: &dyn Oracle, src: &str, opts: &Options, log: &mut ReduceLog,
     let mut good = src.to_string();
     crate::control::set_current_size(src.lines().count(), src.len());
     crate::control::require_nesting(src);
-    let mut pr = Progress { start, lines: cur.lines().count(), bytes: cur.len(), n: 0, last_runs: oracle_runs(), last_at: start, initial: (cur.lines().count(), cur.len()), runs0: oracle_runs(), gains: Vec::new() };
+    let mut pr = Progress {
+        start,
+        lines: cur.lines().count(),
+        bytes: cur.len(),
+        n: 0,
+        last_runs: oracle_runs(),
+        last_at: start,
+        initial: (cur.lines().count(), cur.len()),
+        runs0: oracle_runs(),
+        gains: Vec::new(),
+    };
     info!("system: {}", crate::control::describe_system());
-    info!("compiler for the passes that compile: {}", if opts.rustc.is_empty() { "none (they are off)".to_string() } else { opts.rustc.join(" ") });
-    info!("reduction starts: {} lines, {} bytes, budget {}s, {} oracle calls at once", pr.lines, pr.bytes, budget.as_secs(), par_checks());
+    info!(
+        "compiler for the passes that compile: {}",
+        if opts.rustc.is_empty() {
+            "none (they are off)".to_string()
+        } else {
+            opts.rustc.join(" ")
+        }
+    );
+    info!(
+        "reduction starts: {} lines, {} bytes, budget {}s, {} oracle calls at once",
+        pr.lines,
+        pr.bytes,
+        budget.as_secs(),
+        par_checks()
+    );
     // a bug that shows in some runs only (addresses, timing, load) makes every verdict a coin toss: say so before spending hours
     let stable = (0..3).filter(|_| it.recheck(&cur)).count();
     if stable == 3 {
         info!("the starting program is interesting in 3 of 3 runs");
     } else {
-        warn!("the starting program is interesting in only {stable} of 3 runs - the problem is flaky or the setup differs from the one that found it. {}", it.explain(&cur));
-        log.push(format!("the starting program was interesting in {stable} of 3 runs"));
+        warn!(
+            "the starting program is interesting in only {stable} of 3 runs - the problem is flaky or the setup differs from the one that found it. {}",
+            it.explain(&cur)
+        );
+        log.push(format!(
+            "the starting program was interesting in {stable} of 3 runs"
+        ));
     }
-    info!("plan: the pass that removed the most per second goes next (bigger programs: deletions of whole items and statements; smaller ones: expressions, tokens)");
+    info!(
+        "plan: the pass that removed the most per second goes next (bigger programs: deletions of whole items and statements; smaller ones: expressions, tokens)"
+    );
 
     pr.banner("passes, best yield first");
-    schedule(it, opts, &mut cur, &mut good, &mut pr, log, hook, start, start + budget * 19 / 20);
+    schedule(
+        it,
+        opts,
+        &mut cur,
+        &mut good,
+        &mut pr,
+        log,
+        hook,
+        start,
+        start + budget * 19 / 20,
+    );
 
     if interrupted() {
         log.push("interrupted, final polish skipped");
@@ -369,7 +609,8 @@ pub fn minimize(it: &dyn Oracle, src: &str, opts: &Options, log: &mut ReduceLog,
     stage(it, hook, Stage::Polish, &mut cur, start + budget, log);
     // a run that found nothing smaller than the input hands the input back (formatting or growing passes must not make it worse)
     // measured in tokens: inlining and splitting traits may add lines, and layout must not decide
-    if crate::tokens::tokenize(&cur).len() >= crate::tokens::tokenize(src).len() && it.recheck(src) {
+    if crate::tokens::tokenize(&cur).len() >= crate::tokens::tokenize(src).len() && it.recheck(src)
+    {
         log.push("nothing smaller than the input was found: the input is kept as it is");
         cur = src.to_string();
         pr.result(log, "polish", &cur);

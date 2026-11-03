@@ -22,7 +22,7 @@ pub fn simplify_lets(it: &dyn Oracle, src: &str, deadline: Instant) -> String {
         let lit = match ty.trim() {
             "bool" => "false",
             t if t.starts_with('f') => "0.0",
-            t if t.starts_with(|c: char| c == 'i' || c == 'u') => "0",
+            t if t.starts_with(['i', 'u']) => "0",
             _ => return None,
         };
         let indent = &lines[i][..lines[i].len() - lines[i].trim_start().len()];
@@ -35,7 +35,12 @@ pub fn simplify_lets(it: &dyn Oracle, src: &str, deadline: Instant) -> String {
         if expired(deadline) {
             break;
         }
-        let batch: Vec<usize> = todo.iter().copied().filter(|&i| replacement(&lines, i).is_some()).take(width).collect();
+        let batch: Vec<usize> = todo
+            .iter()
+            .copied()
+            .filter(|&i| replacement(&lines, i).is_some())
+            .take(width)
+            .collect();
         if batch.is_empty() {
             break;
         }
@@ -121,7 +126,10 @@ pub fn drop_calls(it: &dyn Oracle, src: &str, deadline: Instant) -> String {
             }
             let lo = segs.len().saturating_sub(par_checks());
             let batch: Vec<(usize, usize)> = segs[lo..].iter().rev().copied().collect();
-            let cands: Vec<String> = batch.iter().map(|&(s, e)| format!("{}{}", &cur[..s], &cur[e..])).collect();
+            let cands: Vec<String> = batch
+                .iter()
+                .map(|&(s, e)| format!("{}{}", &cur[..s], &cur[e..]))
+                .collect();
             let res = par_map(&cands, par_checks(), |c| it.check(c));
             match res.iter().position(|&ok| ok) {
                 Some(p) => {
@@ -146,7 +154,10 @@ pub fn drop_calls(it: &dyn Oracle, src: &str, deadline: Instant) -> String {
 fn expr_candidates(src: &str) -> Vec<(usize, usize, String)> {
     let b = src.as_bytes();
     let mut out: Vec<(usize, usize, String)> = Vec::new();
-    let keywords = ["if", "while", "match", "for", "fn", "return", "in", "else", "let", "mut", "loop", "unsafe", "as"];
+    let keywords = [
+        "if", "while", "match", "for", "fn", "return", "in", "else", "let", "mut", "loop",
+        "unsafe", "as",
+    ];
     let mut i = 0;
     while i < b.len() {
         let c = b[i];
@@ -168,31 +179,41 @@ fn expr_candidates(src: &str) -> Vec<(usize, usize, String)> {
             while j < b.len() && (b[j].is_ascii_alphanumeric() || b[j] == b'_') {
                 j += 1;
             }
-            if j < b.len() && b[j] == b'(' {
-                if let Some(close) = matching(b, j) {
-                    let rs = postfix_start(b, i);
-                    for (s, e) in top_args(src, j, close) {
-                        let arg = src[s..e].trim();
-                        out.push((rs, close + 1, format!("({arg})")));
-                    }
+            if j < b.len()
+                && b[j] == b'('
+                && let Some(close) = matching(b, j)
+            {
+                let rs = postfix_start(b, i);
+                for (s, e) in top_args(src, j, close) {
+                    let arg = src[s..e].trim();
+                    out.push((rs, close + 1, format!("({arg})")));
                 }
             }
             i += 1;
             continue;
         }
         // plain call `name(args)` / `Some(x)` / `bb(x)`: replace by one argument
-        if (c.is_ascii_alphabetic() || c == b'_') && (i == 0 || !(b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_' || b[i - 1] == b'.' || b[i - 1] == b':')) {
+        if (c.is_ascii_alphabetic() || c == b'_')
+            && (i == 0
+                || !(b[i - 1].is_ascii_alphanumeric()
+                    || b[i - 1] == b'_'
+                    || b[i - 1] == b'.'
+                    || b[i - 1] == b':'))
+        {
             let mut j = i;
             while j < b.len() && (b[j].is_ascii_alphanumeric() || b[j] == b'_' || b[j] == b':') {
                 j += 1;
             }
             let word = &src[i..j];
-            if j < b.len() && b[j] == b'(' && !keywords.contains(&word) && !word.ends_with(':') {
-                if let Some(close) = matching(b, j) {
-                    for (s, e) in top_args(src, j, close) {
-                        let arg = src[s..e].trim();
-                        out.push((i, close + 1, format!("({arg})")));
-                    }
+            if j < b.len()
+                && b[j] == b'('
+                && !keywords.contains(&word)
+                && !word.ends_with(':')
+                && let Some(close) = matching(b, j)
+            {
+                for (s, e) in top_args(src, j, close) {
+                    let arg = src[s..e].trim();
+                    out.push((i, close + 1, format!("({arg})")));
                 }
             }
             // `if COND { A } else { B }`  ->  `{ A }` / `{ B }`
@@ -214,19 +235,19 @@ fn expr_candidates(src: &str) -> Vec<(usize, usize, String)> {
                     }
                     k += 1;
                 }
-                if let Some(o1) = open {
-                    if let Some(c1) = matching(b, o1) {
-                        let rest = &src[c1 + 1..];
-                        let tail = rest.trim_start();
-                        if tail.starts_with("else") {
-                            let o2 = c1 + 1 + (rest.len() - tail.len()) + 4;
-                            let o2 = o2 + src[o2..].find('{').unwrap_or(0);
-                            if src[c1 + 1..o2].trim() == "else" {
-                                if let Some(c2) = matching(b, o2) {
-                                    out.push((i, c2 + 1, src[o1..=c1].to_string()));
-                                    out.push((i, c2 + 1, src[o2..=c2].to_string()));
-                                }
-                            }
+                if let Some(o1) = open
+                    && let Some(c1) = matching(b, o1)
+                {
+                    let rest = &src[c1 + 1..];
+                    let tail = rest.trim_start();
+                    if tail.starts_with("else") {
+                        let o2 = c1 + 1 + (rest.len() - tail.len()) + 4;
+                        let o2 = o2 + src[o2..].find('{').unwrap_or(0);
+                        if src[c1 + 1..o2].trim() == "else"
+                            && let Some(c2) = matching(b, o2)
+                        {
+                            out.push((i, c2 + 1, src[o1..=c1].to_string()));
+                            out.push((i, c2 + 1, src[o2..=c2].to_string()));
                         }
                     }
                 }
@@ -249,18 +270,27 @@ fn expr_candidates(src: &str) -> Vec<(usize, usize, String)> {
             continue;
         }
         // unary minus in front of a literal
-        if c == b'-' && i + 1 < b.len() && b[i + 1].is_ascii_digit() && (i == 0 || matches!(b[i - 1], b'(' | b' ' | b',' | b'=')) {
+        if c == b'-'
+            && i + 1 < b.len()
+            && b[i + 1].is_ascii_digit()
+            && (i == 0 || matches!(b[i - 1], b'(' | b' ' | b',' | b'='))
+        {
             out.push((i, i + 1, String::new()));
         }
         // integer literals: try 0 and 1 (suffix kept)
-        if c.is_ascii_digit() && (i == 0 || !(b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_' || b[i - 1] == b'.')) {
+        if c.is_ascii_digit()
+            && (i == 0
+                || !(b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_' || b[i - 1] == b'.'))
+        {
             let mut j = i;
             while j < b.len() && (b[j].is_ascii_digit() || b[j] == b'_') {
                 j += 1;
             }
             let digits = &src[i..j];
-            let is_float = j < b.len() && b[j] == b'.' && j + 1 < b.len() && b[j + 1].is_ascii_digit();
-            let hex = digits == "0" && j < b.len() && (b[j] == b'x' || b[j] == b'b' || b[j] == b'o');
+            let is_float =
+                j < b.len() && b[j] == b'.' && j + 1 < b.len() && b[j + 1].is_ascii_digit();
+            let hex =
+                digits == "0" && j < b.len() && (b[j] == b'x' || b[j] == b'b' || b[j] == b'o');
             if !is_float && !hex {
                 let mut k = j;
                 while k < b.len() && (b[k].is_ascii_alphanumeric() || b[k] == b'_') {
@@ -302,14 +332,20 @@ pub fn simplify_exprs(it: &dyn Oracle, src: &str, deadline: Instant) -> String {
             let lo = cands.len().saturating_sub(par_checks());
             let batch: Vec<(usize, usize, String)> = cands[lo..].iter().rev().cloned().collect();
             let texts: Vec<String> = batch.iter().map(|e| apply(&cur, e)).collect();
-            let res = par_map(&texts, par_checks(), |c| (c.len() < cur.len() || (c.len() == cur.len() && c.as_str() < cur.as_str())) && it.check(c));
+            let res = par_map(&texts, par_checks(), |c| {
+                (c.len() < cur.len() || (c.len() == cur.len() && c.as_str() < cur.as_str()))
+                    && it.check(c)
+            });
             match res.iter().position(|&ok| ok) {
                 Some(p) => {
                     let pos = batch[p].0;
                     cur = texts[p].clone();
                     progress = true;
                     // earlier candidates keep their meaning (they only touch text before `pos`)
-                    cands = expr_candidates(&cur).into_iter().filter(|c| c.0 < pos).collect();
+                    cands = expr_candidates(&cur)
+                        .into_iter()
+                        .filter(|c| c.0 < pos)
+                        .collect();
                 }
                 None => cands.truncate(lo),
             }
@@ -327,12 +363,23 @@ pub fn strip_parens(it: &dyn Oracle, src: &str) -> String {
         if b[i] != b'(' {
             continue;
         }
-        let Some(close) = matching(b, i) else { continue };
+        let Some(close) = matching(b, i) else {
+            continue;
+        };
         let inner = &src[i + 1..close];
-        let simple = !inner.is_empty() && inner.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
-        let prev_ok = i == 0 || !(b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_' || b[i - 1] == b'!' || b[i - 1] == b'>');
+        let simple =
+            !inner.is_empty() && inner.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+        let prev_ok = i == 0
+            || !(b[i - 1].is_ascii_alphanumeric()
+                || b[i - 1] == b'_'
+                || b[i - 1] == b'!'
+                || b[i - 1] == b'>');
         let next_ok = close + 1 >= b.len() || !matches!(b[close + 1], b'.' | b'[' | b'(');
-        if simple && prev_ok && (next_ok || !inner.starts_with(|c: char| c.is_ascii_digit())) && !(close + 1 < b.len() && b[close + 1] == b'(') {
+        if simple
+            && prev_ok
+            && (next_ok || !inner.starts_with(|c: char| c.is_ascii_digit()))
+            && !(close + 1 < b.len() && b[close + 1] == b'(')
+        {
             drop.push(i);
             drop.push(close);
         }
@@ -344,12 +391,21 @@ pub fn strip_parens(it: &dyn Oracle, src: &str) -> String {
             out.push(ch);
         }
     }
-    if out != src && it.check(&out) { out } else { src.to_string() }
+    if out != src && it.check(&out) {
+        out
+    } else {
+        src.to_string()
+    }
 }
 
 /// Edits `(start, end, replacement)` applied greedily from the end of the text, `par_checks()` candidates per round; what lies
 /// before an applied edit keeps its position.
-pub(crate) fn greedy_edits(it: &dyn Oracle, src: &str, mut edits: Vec<(usize, usize, String)>, deadline: Instant) -> String {
+pub(crate) fn greedy_edits(
+    it: &dyn Oracle,
+    src: &str,
+    mut edits: Vec<(usize, usize, String)>,
+    deadline: Instant,
+) -> String {
     let mut cur = src.to_string();
     edits.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
     let width = par_checks();
@@ -358,16 +414,25 @@ pub(crate) fn greedy_edits(it: &dyn Oracle, src: &str, mut edits: Vec<(usize, us
             break;
         }
         let batch: Vec<(usize, usize, String)> = edits.iter().take(width).cloned().collect();
-        let cands: Vec<String> = batch.iter().map(|(s, e, t)| format!("{}{}{}", &cur[..*s], t, &cur[*e..])).collect();
+        let cands: Vec<String> = batch
+            .iter()
+            .map(|(s, e, t)| format!("{}{}{}", &cur[..*s], t, &cur[*e..]))
+            .collect();
         let res = par_map(&cands, width, |c| !c.trim().is_empty() && it.check(c));
-        let winners: Vec<usize> = res.iter().enumerate().filter(|(_, ok)| **ok).map(|(i, _)| i).collect();
+        let winners: Vec<usize> = res
+            .iter()
+            .enumerate()
+            .filter(|(_, ok)| **ok)
+            .map(|(i, _)| i)
+            .collect();
         if winners.is_empty() {
             edits.drain(..batch.len());
             continue;
         }
         // several accepted on their own: all of them together in one more oracle call (when they do not overlap)
         let build = |subset: &[usize]| -> Option<String> {
-            let mut chosen: Vec<&(usize, usize, String)> = subset.iter().map(|&i| &batch[i]).collect();
+            let mut chosen: Vec<&(usize, usize, String)> =
+                subset.iter().map(|&i| &batch[i]).collect();
             chosen.sort_by_key(|e| e.0);
             if chosen.windows(2).any(|w| w[0].1 > w[1].0) {
                 return None;
@@ -386,7 +451,12 @@ pub(crate) fn greedy_edits(it: &dyn Oracle, src: &str, mut edits: Vec<(usize, us
         cur = text;
         // edits behind the changed text are recomputed by the caller's next round; the others of this batch that were fine on their own
         // and lie before the change are tried again
-        let again: Vec<(usize, usize, String)> = winners.iter().filter(|w| !applied.contains(w)).map(|&i| batch[i].clone()).filter(|e| e.1 <= lowest).collect();
+        let again: Vec<(usize, usize, String)> = winners
+            .iter()
+            .filter(|w| !applied.contains(w))
+            .map(|&i| batch[i].clone())
+            .filter(|e| e.1 <= lowest)
+            .collect();
         edits.drain(..batch.len());
         edits.retain(|e| e.1 <= lowest);
         edits.extend(again);
@@ -419,12 +489,30 @@ pub fn flatten_blocks(it: &dyn Oracle, src: &str, deadline: Instant) -> String {
                     match prev {
                         Some(b';') | Some(b'{') | Some(b'}') => {
                             // the block's last expression becomes a statement when more code follows
-                            let more = cur[close + 1..].trim_start().bytes().next().is_some_and(|c| c != b'}');
+                            let more = cur[close + 1..]
+                                .trim_start()
+                                .bytes()
+                                .next()
+                                .is_some_and(|c| c != b'}');
                             let t = inner.trim_end();
-                            let text = if more && !t.is_empty() && !t.ends_with(';') && !t.ends_with('}') { format!("{t};") } else { inner.to_string() };
+                            let text = if more
+                                && !t.is_empty()
+                                && !t.ends_with(';')
+                                && !t.ends_with('}')
+                            {
+                                format!("{t};")
+                            } else {
+                                inner.to_string()
+                            };
                             edits.push((i, close + 1, text));
                         }
-                        Some(b'=') | Some(b'(') | Some(b',') if !inner.contains(';') && !inner.trim().is_empty() && !inner.contains("let ") => edits.push((i, close + 1, format!("({})", inner.trim()))),
+                        Some(b'=') | Some(b'(') | Some(b',')
+                            if !inner.contains(';')
+                                && !inner.trim().is_empty()
+                                && !inner.contains("let ") =>
+                        {
+                            edits.push((i, close + 1, format!("({})", inner.trim())))
+                        }
                         _ => {}
                     }
                 }
@@ -463,13 +551,16 @@ fn trivial_matches(src: &str) -> Vec<(usize, usize, String)> {
         if b.get(k) != Some(&b'{') {
             continue;
         }
-        let Some(close) = matching(b, k) else { continue };
+        let Some(close) = matching(b, k) else {
+            continue;
+        };
         // `match 0 { 0 => a, _ => b }`: the arm whose pattern is the literal scrutinee
         let scrutinee_text = src[at + 5..k].trim();
         if !scrutinee_text.is_empty() && scrutinee_text.bytes().all(|c| c.is_ascii_digit()) {
             let picked = top_args(src, k, close).into_iter().find_map(|(s, e)| {
                 let (pat, expr) = src[s..e].split_once("=>")?;
-                (pat.trim() == scrutinee_text && !expr.contains("=>")).then(|| expr.trim().trim_end_matches(',').trim().to_string())
+                (pat.trim() == scrutinee_text && !expr.contains("=>"))
+                    .then(|| expr.trim().trim_end_matches(',').trim().to_string())
             });
             if let Some(expr) = picked.filter(|e| !e.is_empty()) {
                 out.push((at, close + 1, format!("({expr})")));
@@ -480,10 +571,15 @@ fn trivial_matches(src: &str) -> Vec<(usize, usize, String)> {
         // `_ => e`, and `name => name` (the scrutinee itself)
         let arm = match body.strip_prefix("_ =>") {
             Some(arm) => Some(arm),
-            None => body.split_once("=>").filter(|(pat, rest)| {
-                let pat = pat.trim();
-                !pat.is_empty() && pat.bytes().all(is_ident) && rest.trim().trim_end_matches(',').trim() == pat
-            }).map(|_| ""),
+            None => body
+                .split_once("=>")
+                .filter(|(pat, rest)| {
+                    let pat = pat.trim();
+                    !pat.is_empty()
+                        && pat.bytes().all(is_ident)
+                        && rest.trim().trim_end_matches(',').trim() == pat
+                })
+                .map(|_| ""),
         };
         let Some(arm) = arm else { continue };
         if arm.is_empty() {
@@ -518,17 +614,24 @@ pub fn simplify_let_tuples(it: &dyn Oracle, src: &str, deadline: Instant) -> Str
             if b.get(open) != Some(&b'(') {
                 continue;
             }
-            let Some(close) = matching(b, open) else { continue };
+            let Some(close) = matching(b, open) else {
+                continue;
+            };
             let mut eq = crate::scan::skip_ws(b, close + 1);
             // an annotation `: (T1, T2)` is cut together with the pair
             let mut types: Option<Vec<String>> = None;
             if b.get(eq) == Some(&b':') && b.get(eq + 1) != Some(&b':') {
                 let topen = crate::scan::skip_ws(b, eq + 1);
-                if b.get(topen) == Some(&b'(') {
-                    if let Some(tclose) = matching(b, topen) {
-                        types = Some(top_args(&cur, topen, tclose).into_iter().map(|(s, e)| cur[s..e].trim().to_string()).collect());
-                        eq = crate::scan::skip_ws(b, tclose + 1);
-                    }
+                if b.get(topen) == Some(&b'(')
+                    && let Some(tclose) = matching(b, topen)
+                {
+                    types = Some(
+                        top_args(&cur, topen, tclose)
+                            .into_iter()
+                            .map(|(s, e)| cur[s..e].trim().to_string())
+                            .collect(),
+                    );
+                    eq = crate::scan::skip_ws(b, tclose + 1);
                 }
             }
             if b.get(eq) != Some(&b'=') || b.get(eq + 1) == Some(&b'=') {
@@ -538,22 +641,54 @@ pub fn simplify_let_tuples(it: &dyn Oracle, src: &str, deadline: Instant) -> Str
             if b.get(vopen) != Some(&b'(') {
                 continue;
             }
-            let Some(vclose) = matching(b, vopen) else { continue };
-            let pats: Vec<String> = top_args(&cur, open, close).into_iter().map(|(s, e)| cur[s..e].trim().to_string()).collect();
-            let vals: Vec<String> = top_args(&cur, vopen, vclose).into_iter().map(|(s, e)| cur[s..e].trim().to_string()).collect();
-            if pats.len() != vals.len() || pats.len() < 2 || types.as_ref().is_some_and(|t| t.len() != pats.len()) {
+            let Some(vclose) = matching(b, vopen) else {
+                continue;
+            };
+            let pats: Vec<String> = top_args(&cur, open, close)
+                .into_iter()
+                .map(|(s, e)| cur[s..e].trim().to_string())
+                .collect();
+            let vals: Vec<String> = top_args(&cur, vopen, vclose)
+                .into_iter()
+                .map(|(s, e)| cur[s..e].trim().to_string())
+                .collect();
+            if pats.len() != vals.len()
+                || pats.len() < 2
+                || types.as_ref().is_some_and(|t| t.len() != pats.len())
+            {
                 continue;
             }
             for i in 0..pats.len() {
                 let keep = |k: &usize| *k != i;
-                let rest_p: Vec<&str> = pats.iter().enumerate().filter(|(k, _)| keep(k)).map(|(_, p)| p.as_str()).collect();
-                let rest_v: Vec<&str> = vals.iter().enumerate().filter(|(k, _)| keep(k)).map(|(_, v)| v.as_str()).collect();
-                let rest_t: Option<Vec<&str>> = types.as_ref().map(|t| t.iter().enumerate().filter(|(k, _)| keep(k)).map(|(_, v)| v.as_str()).collect());
+                let rest_p: Vec<&str> = pats
+                    .iter()
+                    .enumerate()
+                    .filter(|(k, _)| keep(k))
+                    .map(|(_, p)| p.as_str())
+                    .collect();
+                let rest_v: Vec<&str> = vals
+                    .iter()
+                    .enumerate()
+                    .filter(|(k, _)| keep(k))
+                    .map(|(_, v)| v.as_str())
+                    .collect();
+                let rest_t: Option<Vec<&str>> = types.as_ref().map(|t| {
+                    t.iter()
+                        .enumerate()
+                        .filter(|(k, _)| keep(k))
+                        .map(|(_, v)| v.as_str())
+                        .collect()
+                });
                 let text = match (&rest_t, rest_p.len()) {
                     (None, 1) => format!("let {} = {}", rest_p[0], rest_v[0]),
                     (None, _) => format!("let ({}) = ({})", rest_p.join(", "), rest_v.join(", ")),
                     (Some(t), 1) => format!("let {}: {} = {}", rest_p[0], t[0], rest_v[0]),
-                    (Some(t), _) => format!("let ({}): ({}) = ({})", rest_p.join(", "), t.join(", "), rest_v.join(", ")),
+                    (Some(t), _) => format!(
+                        "let ({}): ({}) = ({})",
+                        rest_p.join(", "),
+                        t.join(", "),
+                        rest_v.join(", ")
+                    ),
                 };
                 edits.push((at, vclose + 1, text));
             }
@@ -561,8 +696,16 @@ pub fn simplify_let_tuples(it: &dyn Oracle, src: &str, deadline: Instant) -> Str
             if types.is_none() {
                 let line_start = cur[..at].rfind('\n').map_or(0, |n| n + 1);
                 let indent = &cur[line_start..at];
-                let lets: Vec<String> = pats.iter().zip(&vals).map(|(p, v)| format!("let {p} = {v}")).collect();
-                let sep = if indent.trim().is_empty() { format!(";\n{indent}") } else { "; ".to_string() };
+                let lets: Vec<String> = pats
+                    .iter()
+                    .zip(&vals)
+                    .map(|(p, v)| format!("let {p} = {v}"))
+                    .collect();
+                let sep = if indent.trim().is_empty() {
+                    format!(";\n{indent}")
+                } else {
+                    "; ".to_string()
+                };
                 edits.push((at, vclose + 1, lets.join(&sep)));
             }
         }
@@ -606,7 +749,14 @@ pub fn drop_let_bindings(it: &dyn Oracle, src: &str, deadline: Instant) -> Strin
                 }
                 b'(' | b'[' | b'{' => depth += 1,
                 b')' | b']' | b'}' => depth -= 1,
-                b'=' if depth == 0 && eq.is_none() && b.get(k + 1) != Some(&b'=') && b.get(k + 1) != Some(&b'>') && !matches!(b[k - 1], b'<' | b'>' | b'!') => eq = Some(k),
+                b'=' if depth == 0
+                    && eq.is_none()
+                    && b.get(k + 1) != Some(&b'=')
+                    && b.get(k + 1) != Some(&b'>')
+                    && !matches!(b[k - 1], b'<' | b'>' | b'!') =>
+                {
+                    eq = Some(k)
+                }
                 b';' if depth == 0 => {
                     end = Some(k + 1);
                     break;

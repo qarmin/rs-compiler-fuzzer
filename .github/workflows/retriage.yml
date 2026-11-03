@@ -65,6 +65,12 @@ jobs:
             ~/sr
             ~/.cargo/bin/cargo-bisect-rustc
           key: reducers-${{ runner.os }}-v1
+      - name: Cache the LLVM binaries used to verify LLVM culprits (apt.llvm.org packages, tools/llvm_issue.py)
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/llvm-issue
+          key: llvm-issue-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: llvm-issue-${{ runner.os }}-
       - name: Toolchains and reducers
         run: |
           for c in stable beta nightly; do rustup toolchain install $c --profile minimal; done
@@ -156,7 +162,7 @@ jobs:
         run: |
           mkdir -p pkg
           gh release download "$RELEASE" --repo "$GITHUB_REPOSITORY" --pattern findings.zip --dir . 2>/dev/null && unzip -q -o findings.zip -d pkg || true
-          open=0; for f in pkg/findings/*/status.cfg; do [ -f "$f" ] || continue; grep -q '^progress=20/20$' "$f" || open=$((open + 1)); done
+          open=0; for f in pkg/findings/*/status.cfg; do [ -f "$f" ] || continue; grep -q '^progress=\([0-9]*\)/\1$' "$f" || open=$((open + 1)); done
           done_now=$(cat arts/*/retriaged-keys.txt 2>/dev/null | grep -c . || true)
           echo "findings not fully tested: $open; triaged by this run: $done_now; chain position: $CHAIN"
           {

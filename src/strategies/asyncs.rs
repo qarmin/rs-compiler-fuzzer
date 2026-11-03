@@ -49,7 +49,11 @@ const PRELUDE: &str = r#"    use std::cell::RefCell;
 
 fn uexpr(rng: &mut Rng, vars: &[String], depth: u32) -> String {
     if depth == 0 || rng.chance(25) {
-        return if rng.chance(70) { rng.pick(vars).clone() } else { format!("{}u32", rng.below(1000)) };
+        return if rng.chance(70) {
+            rng.pick(vars).clone()
+        } else {
+            format!("{}u32", rng.below(1000))
+        };
     }
     let (a, b) = (uexpr(rng, vars, depth - 1), uexpr(rng, vars, depth - 1));
     match rng.below(6) {
@@ -78,7 +82,11 @@ fn async_fn(rng: &mut Rng, k: usize, items: &mut String) {
             2 | 3 => w!(b, "        yield_now().await;"),
             4 => {
                 guards += 1;
-                w!(b, "        let _g{guards} = Guard({}, log.clone());", 100 * k as u32 + guards as u32 + 1000);
+                w!(
+                    b,
+                    "        let _g{guards} = Guard({}, log.clone());",
+                    100 * k as u32 + guards as u32 + 1000
+                );
             }
             5 if k > 0 => {
                 n += 1;
@@ -89,15 +97,28 @@ fn async_fn(rng: &mut Rng, k: usize, items: &mut String) {
             }
             6 => {
                 let e = uexpr(rng, &vars, 2);
-                w!(b, "        for i in 0..{}u32 {{ yield_now().await; acc = acc.wrapping_mul(31).wrapping_add({e} ^ i); }}", rng.range(1, 4));
+                w!(
+                    b,
+                    "        for i in 0..{}u32 {{ yield_now().await; acc = acc.wrapping_mul(31).wrapping_add({e} ^ i); }}",
+                    rng.range(1, 4)
+                );
             }
             7 => {
                 let e = uexpr(rng, &vars, 1);
-                w!(b, "        {{ let r = &mut acc; yield_now().await; *r = r.wrapping_add({e}); }}");
+                w!(
+                    b,
+                    "        {{ let r = &mut acc; yield_now().await; *r = r.wrapping_add({e}); }}"
+                );
             }
             8 => {
                 let c = uexpr(rng, &vars, 1);
-                w!(b, "        if {c} % {} == {} {{ log.borrow_mut().push(acc); return acc ^ {}; }}", rng.range(2, 6), rng.below(2), rng.below(100));
+                w!(
+                    b,
+                    "        if {c} % {} == {} {{ log.borrow_mut().push(acc); return acc ^ {}; }}",
+                    rng.range(2, 6),
+                    rng.below(2),
+                    rng.below(100)
+                );
             }
             9 => {
                 let e = uexpr(rng, &vars, 2);
@@ -106,7 +127,10 @@ fn async_fn(rng: &mut Rng, k: usize, items: &mut String) {
             10 => {
                 n += 1;
                 let e = uexpr(rng, &vars, 1);
-                w!(b, "        let v{n}: u32 = {{ let blk = async move {{ yield_now().await; {e} }}; blk.await }};");
+                w!(
+                    b,
+                    "        let v{n}: u32 = {{ let blk = async move {{ yield_now().await; {e} }}; blk.await }};"
+                );
                 vars.push(format!("v{n}"));
             }
             _ => {
@@ -116,7 +140,10 @@ fn async_fn(rng: &mut Rng, k: usize, items: &mut String) {
         }
     }
     let last = uexpr(rng, &vars, 2);
-    w!(items, "    async fn f{k}(x: u32, log: Log) -> u32 {{\n        let mut acc: u32 = x;\n{b}        acc ^ {last}\n    }}");
+    w!(
+        items,
+        "    async fn f{k}(x: u32, log: Log) -> u32 {{\n        let mut acc: u32 = x;\n{b}        acc ^ {last}\n    }}"
+    );
 }
 
 pub fn generate(rng: &mut Rng) -> String {
@@ -126,20 +153,41 @@ pub fn generate(rng: &mut Rng) -> String {
     for k in 0..nf {
         async_fn(rng, k, &mut items);
     }
-    w!(body, "        let log: Log = Rc::new(RefCell::new(Vec::new()));");
+    w!(
+        body,
+        "        let log: Log = Rc::new(RefCell::new(Vec::new()));"
+    );
     for _ in 0..rng.range(3, 7) {
         let k = rng.below(nf);
         let arg = rng.next_u64() as u32;
         match rng.below(4) {
-            0 => w!(body, "        h.put(&block_on(f{k}(bb({arg}), log.clone())));"),
-            1 => w!(body, "        h.put(&poll_n(f{k}(bb({arg}), log.clone()), {}));", rng.range(1, 4)),
+            0 => w!(
+                body,
+                "        h.put(&block_on(f{k}(bb({arg}), log.clone())));"
+            ),
+            1 => w!(
+                body,
+                "        h.put(&poll_n(f{k}(bb({arg}), log.clone()), {}));",
+                rng.range(1, 4)
+            ),
             2 => {
                 let k2 = rng.below(nf);
-                w!(body, "        h.put(&join2(f{k}(bb({arg}), log.clone()), f{k2}(bb({}), log.clone())));", rng.next_u64() as u32);
+                w!(
+                    body,
+                    "        h.put(&join2(f{k}(bb({arg}), log.clone()), f{k2}(bb({}), log.clone())));",
+                    rng.next_u64() as u32
+                );
             }
-            _ => w!(body, "        h.put(&block_on(async {{ let a = f{k}(bb({arg}), log.clone()).await; yield_now().await; a.wrapping_add(f{}(a, log.clone()).await) }}));", rng.below(nf)),
+            _ => w!(
+                body,
+                "        h.put(&block_on(async {{ let a = f{k}(bb({arg}), log.clone()).await; yield_now().await; a.wrapping_add(f{}(a, log.clone()).await) }}));",
+                rng.below(nf)
+            ),
         }
-        w!(body, "        h.put(&*log.borrow()); log.borrow_mut().clear();");
+        w!(
+            body,
+            "        h.put(&*log.borrow()); log.borrow_mut().clear();"
+        );
     }
     format!("{items}    pub fn run(h: &mut H) {{\n{body}    }}\n")
 }

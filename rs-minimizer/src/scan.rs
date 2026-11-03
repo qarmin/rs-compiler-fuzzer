@@ -55,7 +55,9 @@ pub fn postfix_start(b: &[u8], mut end: usize) -> usize {
         let c = b[end - 1];
         if c == b'}' {
             // `{ .. }`, `unsafe { .. }`, `if c { .. } else { .. }`: the whole expression is the receiver
-            let Some(start) = block_expr_start(b, end - 1) else { return end };
+            let Some(start) = block_expr_start(b, end - 1) else {
+                return end;
+            };
             end = start;
             if end > 0 && b[end - 1] == b'.' {
                 end -= 1;
@@ -65,7 +67,11 @@ pub fn postfix_start(b: &[u8], mut end: usize) -> usize {
         }
         if c == b')' || c == b']' {
             // jump to the matching open bracket
-            let (open, close) = if c == b')' { (b'(', b')') } else { (b'[', b']') };
+            let (open, close) = if c == b')' {
+                (b'(', b')')
+            } else {
+                (b'[', b']')
+            };
             let mut depth = 0i32;
             let mut k = end - 1;
             loop {
@@ -84,7 +90,12 @@ pub fn postfix_start(b: &[u8], mut end: usize) -> usize {
             }
             end = k;
             // the callee / macro name in front of the bracket
-            while end > 0 && (b[end - 1].is_ascii_alphanumeric() || b[end - 1] == b'_' || b[end - 1] == b':' || b[end - 1] == b'!') {
+            while end > 0
+                && (b[end - 1].is_ascii_alphanumeric()
+                    || b[end - 1] == b'_'
+                    || b[end - 1] == b':'
+                    || b[end - 1] == b'!')
+            {
                 end -= 1;
             }
             // `.name(...)` continues the chain
@@ -97,7 +108,9 @@ pub fn postfix_start(b: &[u8], mut end: usize) -> usize {
             }
             return end;
         } else if c.is_ascii_alphanumeric() || c == b'_' || c == b':' {
-            while end > 0 && (b[end - 1].is_ascii_alphanumeric() || b[end - 1] == b'_' || b[end - 1] == b':') {
+            while end > 0
+                && (b[end - 1].is_ascii_alphanumeric() || b[end - 1] == b'_' || b[end - 1] == b':')
+            {
                 end -= 1;
             }
             if end > 0 && b[end - 1] == b'.' {
@@ -139,7 +152,7 @@ pub fn top_args(src: &str, open: usize, close: usize) -> Vec<(usize, usize)> {
         }
         k += 1;
     }
-    if src[start..close].trim().len() > 0 {
+    if !src[start..close].trim().is_empty() {
         out.push((start, close));
     }
     out
@@ -169,7 +182,9 @@ fn open_of(b: &[u8], close: usize) -> Option<usize> {
 
 fn ends_with_word(b: &[u8], end: usize, word: &str) -> bool {
     let w = word.as_bytes();
-    end >= w.len() && &b[end - w.len()..end] == w && (end == w.len() || !is_ident(b[end - w.len() - 1]))
+    end >= w.len()
+        && &b[end - w.len()..end] == w
+        && (end == w.len() || !is_ident(b[end - w.len() - 1]))
 }
 
 fn trim_end(b: &[u8], mut end: usize) -> usize {
@@ -196,7 +211,25 @@ fn block_expr_start(b: &[u8], close: usize) -> Option<usize> {
         if ends_with_word(b, before, "unsafe") {
             return Some(before - 6);
         }
-        if before > 0 && matches!(b[before - 1], b';' | b'{' | b'}' | b'(' | b',' | b'=' | b'>' | b'<' | b'+' | b'-' | b'*' | b'&' | b'|' | b'!') || before == 0 {
+        if before > 0
+            && matches!(
+                b[before - 1],
+                b';' | b'{'
+                    | b'}'
+                    | b'('
+                    | b','
+                    | b'='
+                    | b'>'
+                    | b'<'
+                    | b'+'
+                    | b'-'
+                    | b'*'
+                    | b'&'
+                    | b'|'
+                    | b'!'
+            )
+            || before == 0
+        {
             return Some(open);
         }
         // a condition sits between `if` and the block: walk back over bracket groups to the `if` keyword
@@ -219,7 +252,11 @@ fn block_expr_start(b: &[u8], close: usize) -> Option<usize> {
                 }
                 return Some(start);
             }
-            if ends_with_word(b, k, "match") || ends_with_word(b, k, "while") || ends_with_word(b, k, "for") || ends_with_word(b, k, "loop") {
+            if ends_with_word(b, k, "match")
+                || ends_with_word(b, k, "while")
+                || ends_with_word(b, k, "for")
+                || ends_with_word(b, k, "loop")
+            {
                 return None;
             }
             k -= 1;

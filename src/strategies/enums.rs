@@ -51,8 +51,23 @@ fn make_enum(rng: &mut Rng, name: String) -> En {
         .map(|i| {
             let kind = if i == 0 { 0 } else { rng.range(0, 2) as u8 };
             let nf = if kind == 0 { 0 } else { rng.range(1, 3) };
-            let fields = (0..nf).map(|j| (if kind == 2 { format!("f{j}") } else { format!("{j}") }, rand_ft(rng))).collect();
-            Variant { name: format!("V{i}"), kind: kind as u8, fields }
+            let fields = (0..nf)
+                .map(|j| {
+                    (
+                        if kind == 2 {
+                            format!("f{j}")
+                        } else {
+                            format!("{j}")
+                        },
+                        rand_ft(rng),
+                    )
+                })
+                .collect();
+            Variant {
+                name: format!("V{i}"),
+                kind,
+                fields,
+            }
         })
         .collect();
     En { name, variants }
@@ -64,11 +79,31 @@ fn decl(e: &En) -> String {
         .iter()
         .map(|v| match v.kind {
             0 => v.name.clone(),
-            1 => format!("{}({})", v.name, v.fields.iter().map(|f| f.1.name()).collect::<Vec<_>>().join(", ")),
-            _ => format!("{} {{ {} }}", v.name, v.fields.iter().map(|f| format!("{}: {}", f.0, f.1.name())).collect::<Vec<_>>().join(", ")),
+            1 => format!(
+                "{}({})",
+                v.name,
+                v.fields
+                    .iter()
+                    .map(|f| f.1.name())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            _ => format!(
+                "{} {{ {} }}",
+                v.name,
+                v.fields
+                    .iter()
+                    .map(|f| format!("{}: {}", f.0, f.1.name()))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
         })
         .collect();
-    format!("    #[derive(Clone, Copy, Debug, PartialEq)] enum {} {{ {} }}", e.name, vs.join(", "))
+    format!(
+        "    #[derive(Clone, Copy, Debug, PartialEq)] enum {} {{ {} }}",
+        e.name,
+        vs.join(", ")
+    )
 }
 
 fn val(rng: &mut Rng, t: Ft, seed: &str) -> String {
@@ -79,7 +114,11 @@ fn val(rng: &mut Rng, t: Ft, seed: &str) -> String {
         Ft::I16 => format!("({seed}.wrapping_shr({}) as i16)", k * 2),
         Ft::U32 => format!("{seed}.wrapping_mul({})", rng.below(7) + 1),
         Ft::Bool => format!("(({seed} >> {}) & 1 == 1)", k),
-        Ft::OptU8 => format!("(if ({seed} >> {}) & 3 == 0 {{ None }} else {{ Some(({seed} >> {}) as u8) }})", k, k + 1),
+        Ft::OptU8 => format!(
+            "(if ({seed} >> {}) & 3 == 0 {{ None }} else {{ Some(({seed} >> {}) as u8) }})",
+            k,
+            k + 1
+        ),
     }
 }
 
@@ -89,12 +128,34 @@ fn ctor(rng: &mut Rng, e: &En) -> String {
     for (i, v) in e.variants.iter().enumerate() {
         let body = match v.kind {
             0 => format!("{}::{}", e.name, v.name),
-            1 => format!("{}::{}({})", e.name, v.name, v.fields.iter().map(|f| val(rng, f.1, "v")).collect::<Vec<_>>().join(", ")),
-            _ => format!("{}::{} {{ {} }}", e.name, v.name, v.fields.iter().map(|f| format!("{}: {}", f.0, val(rng, f.1, "v"))).collect::<Vec<_>>().join(", ")),
+            1 => format!(
+                "{}::{}({})",
+                e.name,
+                v.name,
+                v.fields
+                    .iter()
+                    .map(|f| val(rng, f.1, "v"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            _ => format!(
+                "{}::{} {{ {} }}",
+                e.name,
+                v.name,
+                v.fields
+                    .iter()
+                    .map(|f| format!("{}: {}", f.0, val(rng, f.1, "v")))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
         };
         arms += &format!("{i} => {body}, ");
     }
-    format!("    fn mk_{0}(sel: u32, v: u32) -> {0} {{ match sel % {1} {{ {arms} _ => unreachable!() }} }}", e.name, e.variants.len())
+    format!(
+        "    fn mk_{0}(sel: u32, v: u32) -> {0} {{ match sel % {1} {{ {arms} _ => unreachable!() }} }}",
+        e.name,
+        e.variants.len()
+    )
 }
 
 type Binds = Vec<(String, Ft)>;
@@ -103,7 +164,10 @@ fn lit_pat(rng: &mut Rng, t: Ft) -> String {
     match t {
         Ft::U8 => match rng.below(3) {
             0 => format!("{}", rng.below(256)),
-            1 => { let a = rng.below(200); format!("{}..={}", a, a + rng.below(56)) }
+            1 => {
+                let a = rng.below(200);
+                format!("{}..={}", a, a + rng.below(56))
+            }
             _ => format!("..={}", rng.below(256)),
         },
         Ft::I16 => match rng.below(3) {
@@ -155,11 +219,31 @@ fn enum_pat(rng: &mut Rng, e: &En, bind: bool, idx: &mut usize, binds: &mut Bind
     let pats: Vec<(String, Ft)> = v.fields.iter().map(|f| (f.0.clone(), f.1)).collect();
     match v.kind {
         0 => format!("{}::{}", e.name, v.name),
-        1 => format!("{}::{}({})", e.name, v.name, pats.iter().map(|(_, t)| field_pat(rng, *t, bind, idx, binds)).collect::<Vec<_>>().join(", ")),
+        1 => format!(
+            "{}::{}({})",
+            e.name,
+            v.name,
+            pats.iter()
+                .map(|(_, t)| field_pat(rng, *t, bind, idx, binds))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
         _ => {
             let rest = if rng.chance(30) { ", .." } else { "" };
-            let sel: Vec<&(String, Ft)> = if rest.is_empty() { pats.iter().collect() } else { pats.iter().take(1).collect() };
-            format!("{}::{} {{ {}{rest} }}", e.name, v.name, sel.iter().map(|(n, t)| format!("{n}: {}", field_pat(rng, *t, bind, idx, binds))).collect::<Vec<_>>().join(", "))
+            let sel: Vec<&(String, Ft)> = if rest.is_empty() {
+                pats.iter().collect()
+            } else {
+                pats.iter().take(1).collect()
+            };
+            format!(
+                "{}::{} {{ {}{rest} }}",
+                e.name,
+                v.name,
+                sel.iter()
+                    .map(|(n, t)| format!("{n}: {}", field_pat(rng, *t, bind, idx, binds)))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
         }
     }
 }
@@ -184,9 +268,26 @@ fn body_expr(rng: &mut Rng, binds: &Binds) -> String {
 fn matcher(rng: &mut Rng, enums: &[En], id: usize) -> (String, Vec<usize>) {
     let arity = rng.range(1, 3).min(enums.len().max(1) + 1);
     let picks: Vec<usize> = (0..arity).map(|_| rng.below(enums.len())).collect();
-    let params: Vec<String> = picks.iter().enumerate().map(|(i, &k)| format!("a{i}: {}", enums[k].name)).collect();
-    let scrut = if arity == 1 { "a0".to_string() } else { format!("({})", (0..arity).map(|i| format!("a{i}")).collect::<Vec<_>>().join(", ")) };
-    let mut s = format!("    #[inline(never)]\n    fn m{id}({}) -> u32 {{\n        match {scrut} {{\n", params.join(", "));
+    let params: Vec<String> = picks
+        .iter()
+        .enumerate()
+        .map(|(i, &k)| format!("a{i}: {}", enums[k].name))
+        .collect();
+    let scrut = if arity == 1 {
+        "a0".to_string()
+    } else {
+        format!(
+            "({})",
+            (0..arity)
+                .map(|i| format!("a{i}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    let mut s = format!(
+        "    #[inline(never)]\n    fn m{id}({}) -> u32 {{\n        match {scrut} {{\n",
+        params.join(", ")
+    );
     for _ in 0..rng.range(3, 8) {
         let mut binds = Vec::new();
         let mut idx = 0;
@@ -194,8 +295,15 @@ fn matcher(rng: &mut Rng, enums: &[En], id: usize) -> (String, Vec<usize>) {
         let bind = alts == 1;
         let pats: Vec<String> = (0..alts)
             .map(|_| {
-                let ps: Vec<String> = picks.iter().map(|&k| enum_pat(rng, &enums[k], bind, &mut idx, &mut binds)).collect();
-                if arity == 1 { ps[0].clone() } else { format!("({})", ps.join(", ")) }
+                let ps: Vec<String> = picks
+                    .iter()
+                    .map(|&k| enum_pat(rng, &enums[k], bind, &mut idx, &mut binds))
+                    .collect();
+                if arity == 1 {
+                    ps[0].clone()
+                } else {
+                    format!("({})", ps.join(", "))
+                }
             })
             .collect();
         let guard = if !binds.is_empty() && rng.chance(35) {
@@ -208,20 +316,29 @@ fn matcher(rng: &mut Rng, enums: &[En], id: usize) -> (String, Vec<usize>) {
         } else {
             String::new()
         };
-        s += &format!("            {}{guard} => {{ {} }}\n", pats.join(" | "), body_expr(rng, &binds));
+        s += &format!(
+            "            {}{guard} => {{ {} }}\n",
+            pats.join(" | "),
+            body_expr(rng, &binds)
+        );
     }
     s += &format!("            _ => {},\n        }}\n    }}\n", rng.below(100));
     (s, picks)
 }
 
 fn slice_matcher(rng: &mut Rng, id: usize) -> String {
-    let mut s = format!("    #[inline(never)]\n    fn sm{id}(s: &[u8], k: u8) -> u32 {{\n        match s {{\n");
+    let mut s = format!(
+        "    #[inline(never)]\n    fn sm{id}(s: &[u8], k: u8) -> u32 {{\n        match s {{\n"
+    );
     let pool = [
         "[] => 1".to_string(),
         format!("[x] if *x > k => *x as u32 + {}", rng.below(50)),
         "[x] => *x as u32".to_string(),
         "[x, y] => (*x as u32) << 8 | *y as u32".to_string(),
-        format!("[first, .., last] if first > last => (*first - *last) as u32 + {}", rng.below(9)),
+        format!(
+            "[first, .., last] if first > last => (*first - *last) as u32 + {}",
+            rng.below(9)
+        ),
         "[first, rest @ ..] if rest.len() > 2 => *first as u32 + rest.len() as u32".to_string(),
         "[.., a, b] if a == b => 4000 + *a as u32".to_string(),
         "[first, .., last] => first.wrapping_add(*last) as u32".to_string(),
@@ -241,11 +358,29 @@ fn slice_matcher(rng: &mut Rng, id: usize) -> String {
 /// (rust-lang/rust#164069 GVN unifying aggregates, #164112/#164135 MatchBranchSimplification and
 /// EarlyOtherwiseBranch widening the read of the scrutinee).
 fn rebuild(rng: &mut Rng, items: &mut String, body: &mut String, id: usize) {
-    let payload = *rng.pick(&["u8", "u16", "u32", "i64", "[u8; 24]", "[u8; 64]", "(u8, u16)"]);
+    let payload = *rng.pick(&[
+        "u8",
+        "u16",
+        "u32",
+        "i64",
+        "[u8; 24]",
+        "[u8; 64]",
+        "(u8, u16)",
+    ]);
     let nv = rng.range(2, 4);
-    let repr = *rng.pick(&["", "#[repr(u8)] ", "#[repr(C)] ", "#[repr(u32)] ", "#[repr(C, u8)] "]);
+    let repr = *rng.pick(&[
+        "",
+        "#[repr(u8)] ",
+        "#[repr(C)] ",
+        "#[repr(u32)] ",
+        "#[repr(C, u8)] ",
+    ]);
     let vs: Vec<String> = (0..nv).map(|i| format!("V{i}({payload})")).collect();
-    w!(items, "    {repr}#[derive(Clone, Copy, PartialEq, Debug)] enum R{id} {{ {}, Unit }}", vs.join(", "));
+    w!(
+        items,
+        "    {repr}#[derive(Clone, Copy, PartialEq, Debug)] enum R{id} {{ {}, Unit }}",
+        vs.join(", ")
+    );
     let val = |rng: &mut Rng| -> String {
         match payload {
             "u8" => format!("{}", rng.below(256)),
@@ -260,19 +395,59 @@ fn rebuild(rng: &mut Rng, items: &mut String, body: &mut String, id: usize) {
     let k = rng.below(nv);
     // remap every payload-carrying variant to variant `k`, keeping the payload
     let arms: Vec<String> = (0..nv).map(|i| format!("R{id}::V{i}(x)")).collect();
-    w!(items, "    #[inline(never)]\n    fn to_k{id}(e: R{id}) -> R{id} {{ match e {{ {} => R{id}::V{k}(x), R{id}::Unit => R{id}::Unit }} }}", arms.join(" | "));
+    w!(
+        items,
+        "    #[inline(never)]\n    fn to_k{id}(e: R{id}) -> R{id} {{ match e {{ {} => R{id}::V{k}(x), R{id}::Unit => R{id}::Unit }} }}",
+        arms.join(" | ")
+    );
     // rebuild identity
-    let rb: Vec<String> = (0..nv).map(|i| format!("R{id}::V{i}(x) => R{id}::V{i}(x)")).collect();
-    w!(items, "    #[inline(never)]\n    fn same{id}(e: R{id}) -> R{id} {{ match e {{ {}, R{id}::Unit => R{id}::Unit }} }}", rb.join(", "));
+    let rb: Vec<String> = (0..nv)
+        .map(|i| format!("R{id}::V{i}(x) => R{id}::V{i}(x)"))
+        .collect();
+    w!(
+        items,
+        "    #[inline(never)]\n    fn same{id}(e: R{id}) -> R{id} {{ match e {{ {}, R{id}::Unit => R{id}::Unit }} }}",
+        rb.join(", ")
+    );
     // rotate variants
-    let rot: Vec<String> = (0..nv).map(|i| format!("R{id}::V{i}(x) => R{id}::V{}(x)", (i + 1) % nv)).collect();
-    w!(items, "    fn rot{id}(e: R{id}) -> R{id} {{ match e {{ {}, R{id}::Unit => R{id}::V0({}) }} }}", rot.join(", "), val(rng));
+    let rot: Vec<String> = (0..nv)
+        .map(|i| format!("R{id}::V{i}(x) => R{id}::V{}(x)", (i + 1) % nv))
+        .collect();
+    w!(
+        items,
+        "    fn rot{id}(e: R{id}) -> R{id} {{ match e {{ {}, R{id}::Unit => R{id}::V0({}) }} }}",
+        rot.join(", "),
+        val(rng)
+    );
     // through a reference: copy out only when the variant has a payload
-    w!(items, "    #[inline(never)]\n    fn via_ref{id}(p: &R{id}) -> R{id} {{ match *p {{ R{id}::Unit => R{id}::Unit, _ => *p }} }}");
-    w!(items, "    fn tag{id}(e: &R{id}) -> u8 {{ match e {{ {}, R{id}::Unit => {nv} }} }}", (0..nv).map(|i| format!("R{id}::V{i}(_) => {i}")).collect::<Vec<_>>().join(", "));
-    w!(body, "        {{ let es = [{}, R{id}::Unit];", (0..nv).map(|i| format!("R{id}::V{i}({})", val(rng))).collect::<Vec<_>>().join(", "));
-    w!(body, "        for e in es {{ let e = bb(e); let r1 = to_k{id}(e); let r2 = same{id}(e); let r3 = rot{id}(e); let r4 = via_ref{id}(&e);");
-    w!(body, "            h.put(&tag{id}(&r1)); h.put(&(r2 == e)); h.put(&tag{id}(&r3)); h.put(&(r4 == e)); h.put(&(std::mem::discriminant(&r1) == std::mem::discriminant(&r2))); h.put(&(to_k{id}(r3) == to_k{id}(e))); }}");
+    w!(
+        items,
+        "    #[inline(never)]\n    fn via_ref{id}(p: &R{id}) -> R{id} {{ match *p {{ R{id}::Unit => R{id}::Unit, _ => *p }} }}"
+    );
+    w!(
+        items,
+        "    fn tag{id}(e: &R{id}) -> u8 {{ match e {{ {}, R{id}::Unit => {nv} }} }}",
+        (0..nv)
+            .map(|i| format!("R{id}::V{i}(_) => {i}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    w!(
+        body,
+        "        {{ let es = [{}, R{id}::Unit];",
+        (0..nv)
+            .map(|i| format!("R{id}::V{i}({})", val(rng)))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    w!(
+        body,
+        "        for e in es {{ let e = bb(e); let r1 = to_k{id}(e); let r2 = same{id}(e); let r3 = rot{id}(e); let r4 = via_ref{id}(&e);"
+    );
+    w!(
+        body,
+        "            h.put(&tag{id}(&r1)); h.put(&(r2 == e)); h.put(&tag{id}(&r3)); h.put(&(r4 == e)); h.put(&(std::mem::discriminant(&r1) == std::mem::discriminant(&r2))); h.put(&(to_k{id}(r3) == to_k{id}(e))); }}"
+    );
     w!(body, "        }}");
 }
 
@@ -290,13 +465,28 @@ pub fn generate(rng: &mut Rng) -> String {
     for id in 0..nm {
         let (code, tys) = matcher(rng, &enums, id);
         items += &code;
-        let args: Vec<String> = tys.iter().enumerate().map(|(i, k)| format!("mk_En{k}(bb(sa{}), bb(sv{}))", i, i)).collect();
+        let args: Vec<String> = tys
+            .iter()
+            .enumerate()
+            .map(|(i, k)| format!("mk_En{k}(bb(sa{}), bb(sv{}))", i, i))
+            .collect();
         let loops: String = (0..tys.len()).map(|i| format!("for (sa{i}, sv{i}) in sels.iter().map(|&s| (s, s.wrapping_mul({}).wrapping_add({}))) {{ ", rng.below(200) | 1, rng.below(255))).collect();
-        w!(body, "        {loops}h.put(&m{id}({})); {}", args.join(", "), "}".repeat(tys.len()));
+        w!(
+            body,
+            "        {loops}h.put(&m{id}({})); {}",
+            args.join(", "),
+            "}".repeat(tys.len())
+        );
     }
     for id in 0..rng.range(1, 2) {
         items += &slice_matcher(rng, id);
-        w!(body, "        for n in 0..8usize {{ let v: Vec<u8> = (0..n).map(|i| (i as u8).wrapping_mul({}).wrapping_add({})).collect(); h.put(&sm{id}(&v, bb({}))); }}", rng.below(9) | 1, rng.below(5), rng.below(255));
+        w!(
+            body,
+            "        for n in 0..8usize {{ let v: Vec<u8> = (0..n).map(|i| (i as u8).wrapping_mul({}).wrapping_add({})).collect(); h.put(&sm{id}(&v, bb({}))); }}",
+            rng.below(9) | 1,
+            rng.below(5),
+            rng.below(255)
+        );
     }
     for rid in 0..rng.range(1, 3) {
         rebuild(rng, &mut items, &mut body, rid);

@@ -24,5 +24,9 @@ pub fn par_map<T: Sync, R: Send>(items: &[T], jobs: usize, f: impl Fn(&T) -> R +
             });
         }
     });
-    out.into_inner().unwrap().into_iter().map(|r| r.unwrap()).collect()
+    out.into_inner()
+        .unwrap()
+        .into_iter()
+        .map(|r| r.unwrap())
+        .collect()
 }

@@ -7,4 +7,4 @@ description = "Test-case reducer for Rust programs that flattens, unrolls and si
 [dependencies]
 log = "0.4"
 ctrlc = "3"
-handsome_logger = "0.9"
+handsome_logger = "0.10"

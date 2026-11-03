@@ -23,7 +23,6 @@ pub trait Oracle: Sync {
     fn work_dir(&self) -> PathBuf {
         std::env::temp_dir().join("rs-minimizer")
     }
-
 }
 
 pub(crate) fn hash_text(s: &str) -> u64 {
@@ -45,7 +44,11 @@ pub struct Cached<F: Fn(&str) -> bool + Sync> {
 
 impl<F: Fn(&str) -> bool + Sync> Cached<F> {
     pub fn new(predicate: F) -> Self {
-        Cached { predicate, work: std::env::temp_dir().join("rs-minimizer"), cache: Mutex::new(HashMap::new()) }
+        Cached {
+            predicate,
+            work: std::env::temp_dir().join("rs-minimizer"),
+            cache: Mutex::new(HashMap::new()),
+        }
     }
 }
 
@@ -68,7 +71,6 @@ impl<F: Fn(&str) -> bool + Sync> Oracle for Cached<F> {
     fn work_dir(&self) -> PathBuf {
         self.work.clone()
     }
-
 }
 
 static SCRIPT_RUNS: AtomicUsize = AtomicUsize::new(0);
@@ -82,7 +84,15 @@ pub fn script_predicate(command: Vec<String>, work: PathBuf) -> impl Fn(&str) ->
         let _ = std::fs::create_dir_all(&dir);
         let file = dir.join("main.rs");
         let ok = std::fs::write(&file, src).is_ok()
-            && Command::new(&command[0]).args(&command[1..]).arg(&file).current_dir(&dir).stdout(Stdio::null()).stderr(Stdio::null()).status().map(|s| s.success()).unwrap_or(false);
+            && Command::new(&command[0])
+                .args(&command[1..])
+                .arg(&file)
+                .current_dir(&dir)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
         let _ = std::fs::remove_dir_all(&dir);
         ok
     }

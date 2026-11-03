@@ -58,10 +58,15 @@ fn a_newtype_with_a_method_stays_because_the_impl_needs_it() {
 #[test]
 fn bodies_nobody_runs_are_stubbed() {
     let src = "use std::hint::black_box;\nfn heavy(x: u32) -> u32 {\n    let mut s = 0;\n    for i in 0..x { s += i * 3; }\n    s\n}\nfn main() {\n    if black_box(false) { println!(\"{}\", heavy(10)); }\n    println!(\"ok\");\n}\n";
-    let o = rs_minimizer::Cached::new(|s: &str| s.contains("fn heavy") && run_program(s).as_deref() == Some("ok\n"));
+    let o = rs_minimizer::Cached::new(|s: &str| {
+        s.contains("fn heavy") && run_program(s).as_deref() == Some("ok\n")
+    });
     check_oracle(&o, src);
     let out = stub_bodies(&o, src, far());
-    assert!(out.contains("unimplemented!()") && !out.contains("s += i * 3"), "{out}");
+    assert!(
+        out.contains("unimplemented!()") && !out.contains("s += i * 3"),
+        "{out}"
+    );
 }
 
 #[test]
@@ -114,8 +119,12 @@ fn the_trait_and_wrapper_example_becomes_a_few_lines_of_plain_code() {
     assert_prints(&out, "42");
 }
 
-fn prints_ending_in(end: &'static str) -> rs_minimizer::oracle::Cached<impl Fn(&str) -> bool + Sync> {
-    let mut o = rs_minimizer::oracle::Cached::new(move |src: &str| run_program(src).is_some_and(|out| out.ends_with(end)));
+fn prints_ending_in(
+    end: &'static str,
+) -> rs_minimizer::oracle::Cached<impl Fn(&str) -> bool + Sync> {
+    let mut o = rs_minimizer::oracle::Cached::new(move |src: &str| {
+        run_program(src).is_some_and(|out| out.ends_with(end))
+    });
     o.work = scratch();
     o
 }
@@ -127,7 +136,10 @@ fn peephole_drops_format_arguments_and_replaces_call_arguments_by_literals() {
     check_oracle(&o, src);
     rs_minimizer::control::set_parallel(8);
     let out = peep(&o, src, far());
-    assert!(out.contains("println!(\"{}\", h)") || out.contains("println!(\"{}\", 7"), "{out}");
+    assert!(
+        out.contains("println!(\"{}\", h)") || out.contains("println!(\"{}\", 7"),
+        "{out}"
+    );
     assert!(!out.contains("3 +"), "{out}");
 }
 
@@ -148,7 +160,10 @@ fn a_reference_let_is_substituted_even_when_the_name_is_bound_again_later() {
     check_oracle(&o, src);
     rs_minimizer::control::set_parallel(8);
     let out = rs_minimizer::inline::substitute_lets(&o, src, far());
-    assert!(!out.contains("let v = &b") && !out.contains("let c = "), "{out}");
+    assert!(
+        !out.contains("let v = &b") && !out.contains("let c = "),
+        "{out}"
+    );
 }
 
 #[test]

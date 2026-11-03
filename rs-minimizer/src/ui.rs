@@ -26,7 +26,10 @@ pub struct Line {
 }
 
 fn line(text: impl Into<String>, style: Style) -> Line {
-    Line { text: text.into(), style }
+    Line {
+        text: text.into(),
+        style,
+    }
 }
 
 #[derive(Clone)]
@@ -79,7 +82,11 @@ pub fn wanted(mode: &str) -> bool {
 }
 
 fn kb(bytes: usize) -> String {
-    if bytes >= 10_000 { format!("{:.1} KB", bytes as f64 / 1000.0) } else { format!("{bytes} B") }
+    if bytes >= 10_000 {
+        format!("{:.1} KB", bytes as f64 / 1000.0)
+    } else {
+        format!("{bytes} B")
+    }
 }
 
 fn clock(secs: f32) -> String {
@@ -128,7 +135,10 @@ pub fn diff_lines(before: &str, after: &str) -> (Vec<String>, Vec<String>) {
 }
 
 fn fit(text: &str, width: usize) -> String {
-    let t: String = text.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+    let t: String = text
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
     if t.chars().count() <= width {
         t
     } else {
@@ -147,7 +157,13 @@ fn boxed(title: &str, width: usize) -> Line {
 fn row(text: &str, width: usize, style: Style) -> Line {
     let inner = width.saturating_sub(4);
     let t = fit(text, inner);
-    line(format!("| {t}{} |", " ".repeat(inner.saturating_sub(t.chars().count()))), style)
+    line(
+        format!(
+            "| {t}{} |",
+            " ".repeat(inner.saturating_sub(t.chars().count()))
+        ),
+        style,
+    )
 }
 
 /// The size-over-time graph: one column per slice of the run, the height of the bar is the size on a log scale.
@@ -170,7 +186,9 @@ pub fn graph(samples: &[(f32, usize)], span_secs: f32, cols: usize, rows: usize)
         if t > samples.last().map(|s| s.0).unwrap_or(0.0) + span_secs / cols as f32 {
             break;
         }
-        let h = (((last.max(1) as f64).ln() - lo) / (hi - lo) * (rows as f64 - 1.0)).round() as usize + 1;
+        let h = (((last.max(1) as f64).ln() - lo) / (hi - lo) * (rows as f64 - 1.0)).round()
+            as usize
+            + 1;
         for r in 0..h.min(rows) {
             let row = &mut out[rows - 1 - r];
             row.replace_range(c..c + 1, "#");
@@ -185,14 +203,64 @@ pub fn render(d: &Dash, s: &Snapshot, width: usize, height: usize) -> Vec<Line> 
     let height = height.max(20);
     let mut out: Vec<Line> = Vec::new();
     let remaining = (d.budget_secs as f32 - s.elapsed).max(0.0);
-    out.push(line(fit(&format!("rs-minimizer  {}   elapsed {}  of {}  ({} left)", d.title, clock(s.elapsed), clock(d.budget_secs as f32), clock(remaining)), width), Style::Bold));
+    out.push(line(
+        fit(
+            &format!(
+                "rs-minimizer  {}   elapsed {}  of {}  ({} left)",
+                d.title,
+                clock(s.elapsed),
+                clock(d.budget_secs as f32),
+                clock(remaining)
+            ),
+            width,
+        ),
+        Style::Bold,
+    ));
     // size
-    let pct = |a: usize, b: usize| if a == 0 { 0.0 } else { 100.0 * (a as f64 - b as f64) / a as f64 };
+    let pct = |a: usize, b: usize| {
+        if a == 0 {
+            0.0
+        } else {
+            100.0 * (a as f64 - b as f64) / a as f64
+        }
+    };
     out.push(boxed("size", width));
-    out.push(row(&format!("now    {} lines, {}    ({:.1}% fewer lines, {:.1}% fewer bytes than the start)", s.lines, kb(s.bytes), pct(d.initial.0, s.lines), pct(d.initial.1, s.bytes)), width, Style::Plain));
-    out.push(row(&format!("start  {} lines, {}", d.initial.0, kb(d.initial.1)), width, Style::Dim));
+    out.push(row(
+        &format!(
+            "now    {} lines, {}    ({:.1}% fewer lines, {:.1}% fewer bytes than the start)",
+            s.lines,
+            kb(s.bytes),
+            pct(d.initial.0, s.lines),
+            pct(d.initial.1, s.bytes)
+        ),
+        width,
+        Style::Plain,
+    ));
+    out.push(row(
+        &format!("start  {} lines, {}", d.initial.0, kb(d.initial.1)),
+        width,
+        Style::Dim,
+    ));
     let rate = s.oracle_runs as f32 / s.elapsed.max(0.1);
-    out.push(row(&format!("oracle calls {} ({:.1}/s)    now running: {}{}", s.oracle_runs, rate, if s.pass.is_empty() { "-" } else { s.pass.trim_start_matches("rs-minimizer: ") }, if s.stopping { "    STOPPING: finishing the running calls" } else { "" }), width, if s.stopping { Style::Red } else { Style::Plain }));
+    out.push(row(
+        &format!(
+            "oracle calls {} ({:.1}/s)    now running: {}{}",
+            s.oracle_runs,
+            rate,
+            if s.pass.is_empty() {
+                "-"
+            } else {
+                s.pass.trim_start_matches("rs-minimizer: ")
+            },
+            if s.stopping {
+                "    STOPPING: finishing the running calls"
+            } else {
+                ""
+            }
+        ),
+        width,
+        if s.stopping { Style::Red } else { Style::Plain },
+    ));
     let pct_of_runs = 100.0 * s.invalid as f32 / s.oracle_runs.max(1) as f32;
     out.push(row(&format!("candidates that did not compile (the passes broke the program): {} ({:.0}% of the calls)", s.invalid, pct_of_runs), width, Style::Dim));
     for (reason, count) in s.reasons.iter().take(2) {
@@ -206,17 +274,48 @@ pub fn render(d: &Dash, s: &Snapshot, width: usize, height: usize) -> Vec<Line> 
     let top = d.samples.iter().map(|x| x.1).max().unwrap_or(0);
     let bottom = d.samples.iter().map(|x| x.1).min().unwrap_or(0);
     for (i, g) in graph(&d.samples, span, cols, gh).into_iter().enumerate() {
-        let label = if i == 0 { kb(top) } else if i == gh - 1 { kb(bottom) } else { String::new() };
+        let label = if i == 0 {
+            kb(top)
+        } else if i == gh - 1 {
+            kb(bottom)
+        } else {
+            String::new()
+        };
         out.push(line(format!("| {label:>8} |{g}|"), Style::Green));
     }
-    out.push(line(format!("|          0s{:>w$}|", clock(span), w = cols + 1), Style::Dim));
+    out.push(line(
+        format!("|          0s{:>w$}|", clock(span), w = cols + 1),
+        Style::Dim,
+    ));
     // passes
     let passes: Vec<&PassLine> = d.passes.iter().rev().take(7).collect();
     out.push(boxed("last passes", width));
     for p in &passes {
         let delta = p.before as i64 - p.after as i64;
-        let text = format!("{:<28} {:>10}  {:>6} calls  {:>6.1}s", p.name.trim_start_matches("rs-minimizer: "), if delta > 0 { format!("-{}", kb(delta as usize)) } else if delta < 0 { format!("+{}", kb((-delta) as usize)) } else { "no change".to_string() }, p.calls, p.secs);
-        out.push(row(&text, width, if delta > 0 { Style::Green } else if delta < 0 { Style::Red } else { Style::Dim }));
+        let text = format!(
+            "{:<28} {:>10}  {:>6} calls  {:>6.1}s",
+            p.name.trim_start_matches("rs-minimizer: "),
+            if delta > 0 {
+                format!("-{}", kb(delta as usize))
+            } else if delta < 0 {
+                format!("+{}", kb((-delta) as usize))
+            } else {
+                "no change".to_string()
+            },
+            p.calls,
+            p.secs
+        );
+        out.push(row(
+            &text,
+            width,
+            if delta > 0 {
+                Style::Green
+            } else if delta < 0 {
+                Style::Red
+            } else {
+                Style::Dim
+            },
+        ));
     }
     for _ in passes.len()..3 {
         out.push(row("", width, Style::Plain));
@@ -224,20 +323,39 @@ pub fn render(d: &Dash, s: &Snapshot, width: usize, height: usize) -> Vec<Line> 
     // diff of the last change
     let used = out.len() + 2;
     let free = height.saturating_sub(used).max(4);
-    out.push(boxed("last reduction (diff of the last accepted change)", width));
+    out.push(boxed(
+        "last reduction (diff of the last accepted change)",
+        width,
+    ));
     match &s.change {
         None => out.push(row("(nothing yet)", width, Style::Dim)),
         Some((before, after)) => {
             let (removed, added) = diff_lines(before, after);
-            out.push(row(&format!("{} lines removed, {} lines added", removed.len(), added.len()), width, Style::Dim));
+            out.push(row(
+                &format!(
+                    "{} lines removed, {} lines added",
+                    removed.len(),
+                    added.len()
+                ),
+                width,
+                Style::Dim,
+            ));
             let room = free.saturating_sub(2);
-            let show_added = if added.is_empty() { 0 } else { (room / 3).max(1).min(added.len()) };
+            let show_added = if added.is_empty() {
+                0
+            } else {
+                (room / 3).max(1).min(added.len())
+            };
             let show_removed = room.saturating_sub(show_added).min(removed.len());
             for l in removed.iter().take(show_removed) {
                 out.push(row(&format!("- {}", l.trim()), width, Style::Red));
             }
             if removed.len() > show_removed {
-                out.push(row(&format!("  ... {} more removed lines", removed.len() - show_removed), width, Style::Dim));
+                out.push(row(
+                    &format!("  ... {} more removed lines", removed.len() - show_removed),
+                    width,
+                    Style::Dim,
+                ));
             }
             for l in added.iter().take(show_added) {
                 out.push(row(&format!("+ {}", l.trim()), width, Style::Green));
@@ -245,14 +363,29 @@ pub fn render(d: &Dash, s: &Snapshot, width: usize, height: usize) -> Vec<Line> 
         }
     }
     out.push(line(format!("+{}+", "-".repeat(width - 2)), Style::Cyan));
-    out.push(line(fit(&format!("Ctrl+C: stop and keep the best program ({}); twice: leave at once.   log: {}", d.out_file, d.log_file), width), Style::Dim));
+    out.push(line(
+        fit(
+            &format!(
+                "Ctrl+C: stop and keep the best program ({}); twice: leave at once.   log: {}",
+                d.out_file, d.log_file
+            ),
+            width,
+        ),
+        Style::Dim,
+    ));
     out.truncate(height);
     out
 }
 
 fn terminal_size() -> (usize, usize) {
     let tty = std::fs::File::open("/dev/tty");
-    let out = std::process::Command::new("stty").arg("size").stdin(tty.map(std::process::Stdio::from).unwrap_or(std::process::Stdio::null())).output();
+    let out = std::process::Command::new("stty")
+        .arg("size")
+        .stdin(
+            tty.map(std::process::Stdio::from)
+                .unwrap_or(std::process::Stdio::null()),
+        )
+        .output();
     if let Ok(o) = out {
         let t = String::from_utf8_lossy(&o.stdout).to_string();
         let mut it = t.split_whitespace().filter_map(|v| v.parse::<usize>().ok());
@@ -282,10 +415,24 @@ fn paint(frame: &[Line], width: usize) -> String {
 }
 
 /// Shows the dashboard until `stop`. The caller has set up the checkpoint file (the diff comes from the accepted changes).
-pub fn start(title: &str, budget: Duration, initial: (usize, usize), out_file: &str, log_file: &str) {
+pub fn start(
+    title: &str,
+    budget: Duration,
+    initial: (usize, usize),
+    out_file: &str,
+    log_file: &str,
+) {
     control::set_ui(true);
     control::set_current_size(initial.0, initial.1);
-    *DASH.lock().unwrap() = Some(Dash { title: title.to_string(), budget_secs: budget.as_secs(), initial, log_file: log_file.to_string(), out_file: out_file.to_string(), samples: vec![(0.0, initial.1)], passes: VecDeque::new() });
+    *DASH.lock().unwrap() = Some(Dash {
+        title: title.to_string(),
+        budget_secs: budget.as_secs(),
+        initial,
+        log_file: log_file.to_string(),
+        out_file: out_file.to_string(),
+        samples: vec![(0.0, initial.1)],
+        passes: VecDeque::new(),
+    });
     ACTIVE.store(true, Ordering::SeqCst);
     ON_SCREEN.store(true, Ordering::SeqCst);
     let started = Instant::now();
@@ -300,11 +447,25 @@ pub fn start(title: &str, budget: Duration, initial: (usize, usize), out_file: &
                 last_size = Instant::now();
             }
             let (lines, bytes) = control::current_size();
-            let snap = Snapshot { elapsed: started.elapsed().as_secs_f32(), lines, bytes, oracle_runs: control::oracle_runs(), invalid: control::invalid_candidates(), reasons: control::rejection_reasons(2), pass: control::current_pass(), stopping: control::interrupted(), change: control::last_change() };
+            let snap = Snapshot {
+                elapsed: started.elapsed().as_secs_f32(),
+                lines,
+                bytes,
+                oracle_runs: control::oracle_runs(),
+                invalid: control::invalid_candidates(),
+                reasons: control::rejection_reasons(2),
+                pass: control::current_pass(),
+                stopping: control::interrupted(),
+                change: control::last_change(),
+            };
             let frame = {
                 let mut g = DASH.lock().unwrap();
                 let Some(d) = g.as_mut() else { break };
-                if bytes > 0 && d.samples.last().is_none_or(|l| l.1 != bytes || snap.elapsed - l.0 > 5.0) {
+                if bytes > 0
+                    && d.samples
+                        .last()
+                        .is_none_or(|l| l.1 != bytes || snap.elapsed - l.0 > 5.0)
+                {
                     d.samples.push((snap.elapsed, bytes));
                 }
                 render(d, &snap, size.0, size.1)
@@ -322,7 +483,13 @@ pub fn start(title: &str, budget: Duration, initial: (usize, usize), out_file: &
 /// A finished pass, for the list of the last passes.
 pub fn pass_result(name: &str, before: usize, after: usize, calls: usize, secs: f32) {
     if let Some(d) = DASH.lock().unwrap().as_mut() {
-        d.passes.push_back(PassLine { name: name.to_string(), before, after, calls, secs });
+        d.passes.push_back(PassLine {
+            name: name.to_string(),
+            before,
+            after,
+            calls,
+            secs,
+        });
         while d.passes.len() > 30 {
             d.passes.pop_front();
         }

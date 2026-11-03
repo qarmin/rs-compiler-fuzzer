@@ -49,7 +49,10 @@ fn a_comparison_becomes_true_or_false() {
     let o = prints("7\n");
     check_oracle(&o, src);
     let out = peep(&o, src, far());
-    assert!(out.contains("f(true)") || out.contains("f( true )"), "{out}");
+    assert!(
+        out.contains("f(true)") || out.contains("f( true )"),
+        "{out}"
+    );
 }
 
 #[test]
@@ -119,7 +122,10 @@ fn a_deferred_initialiser_moves_into_the_let() {
     let o = prints("6\n");
     check_oracle(&o, src);
     let out = peep(&o, src, far());
-    assert!(!out.contains("let h;") && !out.contains("let h: u64;"), "{out}");
+    assert!(
+        !out.contains("let h;") && !out.contains("let h: u64;"),
+        "{out}"
+    );
     assert_prints(&out, "6\n");
 }
 
@@ -135,7 +141,8 @@ fn a_cast_of_a_literal_is_a_literal() {
 
 #[test]
 fn literals_after_a_string_are_still_shrunk() {
-    let src = "fn main() {\n    println!(\"{}\", 1000u32 / 10);\n    println!(\"{}\", 100u32 + 0);\n}\n";
+    let src =
+        "fn main() {\n    println!(\"{}\", 1000u32 / 10);\n    println!(\"{}\", 100u32 + 0);\n}\n";
     let o = rs_minimizer::Cached::new(|s: &str| s.contains("println!") && run_program(s).is_some());
     check_oracle(&o, src);
     let out = peep(&o, src, far());
@@ -144,7 +151,8 @@ fn literals_after_a_string_are_still_shrunk() {
 
 #[test]
 fn a_dereferenced_borrow_of_a_name_is_the_name() {
-    let src = "fn main() {\n    let mut h = 1u32;\n    *&mut h = 5;\n    println!(\"{}\", *&h);\n}\n";
+    let src =
+        "fn main() {\n    let mut h = 1u32;\n    *&mut h = 5;\n    println!(\"{}\", *&h);\n}\n";
     let o = prints("5\n");
     check_oracle(&o, src);
     let out = peep(&o, src, far());

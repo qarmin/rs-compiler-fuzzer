@@ -2,18 +2,21 @@
 //! the steps that depend on how batches are generated (a single `mod case_N` left becomes a plain `fn main`). Dropping cases is left
 //! to the generic passes: items together with the code that mentions them did better than a case-aware ddmin. The generic passes live in `rs-minimizer`.
 
-use crate::runner::{build_and_run, Config, Limits, Outcome};
+use crate::runner::{Config, Limits, Outcome, build_and_run};
 use log::info;
-use rs_minimizer::{Oracle, Options, Stage};
 use rs_minimizer::scan::matching;
+use rs_minimizer::{Options, Oracle, Stage};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-pub use rs_minimizer::control::{best_so_far, install_ctrlc as install_sigint, last_run_complete, set_checkpoint, set_parallel, start_heartbeat, INTERRUPTED};
 pub use rs_minimizer::ReduceLog;
+pub use rs_minimizer::control::{
+    INTERRUPTED, best_so_far, install_ctrlc as install_sigint, last_run_complete, set_checkpoint,
+    set_parallel, start_heartbeat,
+};
 
 static N: AtomicUsize = AtomicUsize::new(0);
 
@@ -49,20 +52,48 @@ impl Oracle for Interest {
     }
 
     fn explain(&self, src: &str) -> String {
-        let dir = self.work.join(format!("x{}_{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
+        let dir = self.work.join(format!(
+            "x{}_{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("main.rs");
         let _ = std::fs::write(&path, src);
         let describe = |c: &Config| {
-            let out = build_and_run(&self.rustc, &path, &dir.join(format!("bin_{}", c.name)), c, &self.limits);
+            let out = build_and_run(
+                &self.rustc,
+                &path,
+                &dir.join(format!("bin_{}", c.name)),
+                c,
+                &self.limits,
+            );
             let extra = match &out {
-                Outcome::CompileFail(e) => format!(" ({})", e.lines().find(|l| l.contains("error")).unwrap_or("").chars().take(160).collect::<String>()),
+                Outcome::CompileFail(e) => format!(
+                    " ({})",
+                    e.lines()
+                        .find(|l| l.contains("error"))
+                        .unwrap_or("")
+                        .chars()
+                        .take(160)
+                        .collect::<String>()
+                ),
                 Outcome::Ran { stdout, .. } => format!(" (stdout hash {:x})", hash_text(stdout)),
                 _ => String::new(),
             };
-            format!("{} [{}]: {}{extra}", c.name, c.flags.join(" "), out.describe())
+            format!(
+                "{} [{}]: {}{extra}",
+                c.name,
+                c.flags.join(" "),
+                out.describe()
+            )
         };
-        let text = format!("{} | {} | compiler `{}`", describe(&self.a), describe(&self.b), self.rustc.join(" "));
+        let text = format!(
+            "{} | {} | compiler `{}`",
+            describe(&self.a),
+            describe(&self.b),
+            self.rustc.join(" ")
+        );
         let _ = std::fs::remove_dir_all(&dir);
         text
     }
@@ -94,7 +125,15 @@ impl Interest {
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("main.rs");
         std::fs::write(&path, src).unwrap();
-        let run = |c: &Config| build_and_run(&self.rustc, &path, &dir.join(format!("bin_{}", c.name)), c, &self.limits);
+        let run = |c: &Config| {
+            build_and_run(
+                &self.rustc,
+                &path,
+                &dir.join(format!("bin_{}", c.name)),
+                c,
+                &self.limits,
+            )
+        };
         // the reference build first: a candidate that does not even compile and run there is not interesting, and the (usually much
         // slower) second build is skipped. Most candidates of a reduction are such.
         let first = run(&self.a);
@@ -106,8 +145,13 @@ impl Interest {
         } else {
             let second = run(&self.b);
             match &self.crash_sig {
-                Some(sig) => crate::runner::crash_signature(&second).as_deref() == Some(sig.as_str()),
-                None => matches!(second, Outcome::Ran { .. }) && crate::runner::differs_src(&first, &second, &self.a, &self.b, src),
+                Some(sig) => {
+                    crate::runner::crash_signature(&second).as_deref() == Some(sig.as_str())
+                }
+                None => {
+                    matches!(second, Outcome::Ran { .. })
+                        && crate::runner::differs_src(&first, &second, &self.a, &self.b, src)
+                }
             }
         };
         let _ = std::fs::remove_dir_all(&dir);
@@ -131,7 +175,8 @@ impl Interest {
     }
 
     pub fn from_cfg(text: &str) -> Interest {
-        let m: std::collections::HashMap<&str, &str> = text.lines().filter_map(|l| l.split_once('=')).collect();
+        let m: std::collections::HashMap<&str, &str> =
+            text.lines().filter_map(|l| l.split_once('=')).collect();
         let g = |k: &str| m.get(k).copied().unwrap_or("").to_string();
         let sig = g("sig");
         Interest {
@@ -139,15 +184,15 @@ impl Interest {
             a: Config::new(&g("a_name"), &g("a_flags")),
             b: Config::new(&g("b_name"), &g("b_flags")),
             crash_sig: if sig.is_empty() { None } else { Some(sig) },
-            limits: Limits { compile: Duration::from_secs(g("compile").parse().unwrap_or(120)), run: Duration::from_secs(g("run").parse().unwrap_or(10)) },
+            limits: Limits {
+                compile: Duration::from_secs(g("compile").parse().unwrap_or(120)),
+                run: Duration::from_secs(g("run").parse().unwrap_or(10)),
+            },
             work: PathBuf::from(g("work")),
             cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
-
-
-
 
 /// Turn the generator's harness into a plain program: the single remaining `mod case_N` becomes the
 /// crate root, `fn run(h: &mut H)` becomes `fn main()`, `h.put(&x)` becomes `println!("{:?}", x)`,
@@ -158,14 +203,27 @@ pub fn flatten(src: &str) -> Option<String> {
     let open = m + src[m..].find('{')?;
     let close = matching(b, open)?;
     let mut body = src[open + 1..close].to_string();
-    body = body.replace("use super::rt::*;", "").replace("use super::*;", "");
+    body = body
+        .replace("use super::rt::*;", "")
+        .replace("use super::*;", "");
     let run = body.find("pub fn run(h: &mut H)")?;
-    body = format!("{}fn main(){}", &body[..run], &body[run + "pub fn run(h: &mut H)".len()..]);
+    body = format!(
+        "{}fn main(){}",
+        &body[..run],
+        &body[run + "pub fn run(h: &mut H)".len()..]
+    );
     body = body.replace("h.put(&", "println!(\"{:?}\", ");
     body = body.replace("pub fn ", "fn ");
     // dedent by one level
-    let text: Vec<String> = body.lines().map(|l| l.strip_prefix("    ").unwrap_or(l).to_string()).filter(|l| !l.trim().is_empty()).collect();
-    Some(format!("use std::hint::black_box as bb;\n{}\n", text.join("\n")))
+    let text: Vec<String> = body
+        .lines()
+        .map(|l| l.strip_prefix("    ").unwrap_or(l).to_string())
+        .filter(|l| !l.trim().is_empty())
+        .collect();
+    Some(format!(
+        "use std::hint::black_box as bb;\n{}\n",
+        text.join("\n")
+    ))
 }
 
 /// Remove redundant parentheses around plain identifiers / literals (all at once; kept only if the
@@ -177,7 +235,11 @@ pub fn prefer_println(it: &dyn Oracle, src: &str) -> String {
         return src.to_string();
     }
     let cand = src.replace("print!(", "println!(");
-    if it.check(&cand) { cand } else { src.to_string() }
+    if it.check(&cand) {
+        cand
+    } else {
+        src.to_string()
+    }
 }
 
 /// The batch harness hashes a value with `H`: `let mut h = H(0); h.feed(X); println!("{:016x}", h.0)`. A report reads better as
@@ -187,12 +249,23 @@ pub fn drop_hash_harness(it: &dyn Oracle, src: &str) -> String {
         let at = src.find(pat)?;
         src[at + pat.len()..].find(pat).is_none().then_some(at)
     };
-    let (Some(feed), Some(decl), Some(print)) = (single("h.feed("), single("let mut h = H(0);"), single("println!(\"{:016x}\", h.0)")) else { return src.to_string() };
+    let (Some(feed), Some(decl), Some(print)) = (
+        single("h.feed("),
+        single("let mut h = H(0);"),
+        single("println!(\"{:016x}\", h.0)"),
+    ) else {
+        return src.to_string();
+    };
     let b = src.as_bytes();
     let open = feed + "h.feed".len();
-    let Some(close) = matching(b, open) else { return src.to_string() };
+    let Some(close) = matching(b, open) else {
+        return src.to_string();
+    };
     let arg = src[open + 1..close].trim().to_string();
-    let after_feed = src[close + 1..].trim_start().strip_prefix(';').map_or(close + 1, |r| src.len() - r.len());
+    let after_feed = src[close + 1..]
+        .trim_start()
+        .strip_prefix(';')
+        .map_or(close + 1, |r| src.len() - r.len());
     if !(decl < feed && after_feed <= print) {
         return src.to_string();
     }
@@ -210,7 +283,13 @@ pub fn drop_hash_harness(it: &dyn Oracle, src: &str) -> String {
     let items = rs_minimizer::items::item_ranges(&out);
     let mut cut: Vec<(usize, usize)> = items
         .iter()
-        .filter(|i| (i.kw == "struct" && i.name_in(&out) == Some("H")) || (i.kw == "impl" && out[i.start..i.header_end].split_whitespace().eq(["impl", "H"])))
+        .filter(|i| {
+            (i.kw == "struct" && i.name_in(&out) == Some("H"))
+                || (i.kw == "impl"
+                    && out[i.start..i.header_end]
+                        .split_whitespace()
+                        .eq(["impl", "H"]))
+        })
         .map(|i| (i.start, i.end))
         .collect();
     cut.sort();
@@ -218,15 +297,24 @@ pub fn drop_hash_harness(it: &dyn Oracle, src: &str) -> String {
     for (s, e) in cut.iter().rev() {
         slim.replace_range(*s..*e, "");
     }
-    if slim != out && it.check(&slim) { slim } else { out }
+    if slim != out && it.check(&slim) {
+        slim
+    } else {
+        out
+    }
 }
 
 /// `use std::hint::black_box as a;` + `let a = a(1);` reads badly (the reducers shorten names): call it `black_box`
 /// again when the program stays interesting.
 pub fn unalias_black_box(it: &dyn Oracle, src: &str) -> String {
-    let Some(p) = src.find("use std::hint::black_box as ") else { return src.to_string() };
+    let Some(p) = src.find("use std::hint::black_box as ") else {
+        return src.to_string();
+    };
     let rest = &src[p + "use std::hint::black_box as ".len()..];
-    let alias: String = rest.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+    let alias: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .collect();
     if alias.is_empty() || alias == "black_box" || !rest[alias.len()..].starts_with(';') {
         return src.to_string();
     }
@@ -236,7 +324,14 @@ pub fn unalias_black_box(it: &dyn Oracle, src: &str) -> String {
     out.push_str("use std::hint::black_box;");
     let mut i = p + "use std::hint::black_box as ".len() + alias.len() + 1;
     while i < src.len() {
-        if src[i..].starts_with(&alias) && (i == 0 || !(b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_' || b[i - 1] == b'.' || b[i - 1] == b':')) && src.as_bytes().get(i + alias.len()) == Some(&b'(') {
+        if src[i..].starts_with(&alias)
+            && (i == 0
+                || !(b[i - 1].is_ascii_alphanumeric()
+                    || b[i - 1] == b'_'
+                    || b[i - 1] == b'.'
+                    || b[i - 1] == b':'))
+            && src.as_bytes().get(i + alias.len()) == Some(&b'(')
+        {
             out.push_str("black_box");
             i += alias.len();
         } else {
@@ -257,16 +352,25 @@ pub fn reduce_all(it: &Interest, src: &str, budget: Duration, log: &mut ReduceLo
             // a single case left: drop the harness, a plain `fn main` is what a human would post
             Stage::Flatten => match flatten(cur) {
                 Some(flat) if flat != cur && it.check(&flat) => {
-                    info!("flattened the harness into a plain `fn main` ({} -> {} lines)", cur.lines().count(), flat.lines().count());
+                    info!(
+                        "flattened the harness into a plain `fn main` ({} -> {} lines)",
+                        cur.lines().count(),
+                        flat.lines().count()
+                    );
                     Some(flat)
                 }
                 Some(_) if cur.contains("mod case_") => {
-                    info!("flattening the harness changes the behaviour (or several cases are left) - kept the harness");
+                    info!(
+                        "flattening the harness changes the behaviour (or several cases are left) - kept the harness"
+                    );
                     None
                 }
                 _ => None,
             },
-            Stage::Polish => Some(prefer_println(it, &unalias_black_box(it, &drop_hash_harness(it, cur)))),
+            Stage::Polish => Some(prefer_println(
+                it,
+                &unalias_black_box(it, &drop_hash_harness(it, cur)),
+            )),
         }
     };
     rs_minimizer::minimize(it, src, &opts, log, &mut hook)
@@ -281,9 +385,14 @@ mod tests {
 
     #[test]
     fn the_hash_harness_is_replaced_by_a_println() {
-        let o = Cached::new(|s: &str| s.contains("black_box") && s.contains("d + 1") && s.contains("fn main"));
+        let o = Cached::new(|s: &str| {
+            s.contains("black_box") && s.contains("d + 1") && s.contains("fn main")
+        });
         let out = drop_hash_harness(&o, HARNESS);
-        assert!(!out.contains("struct H") && !out.contains("impl H") && !out.contains("feed"), "{out}");
+        assert!(
+            !out.contains("struct H") && !out.contains("impl H") && !out.contains("feed"),
+            "{out}"
+        );
         assert!(out.contains("println!(\"{}\", {"), "{out}");
     }
 

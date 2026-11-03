@@ -5,10 +5,10 @@ fn demangle_symbol(sym: &str) -> Option<String> {
     if let Ok(d) = rustc_demangle::try_demangle(sym) {
         return Some(format!("{d:#}"));
     }
-    if let Ok(s) = cpp_demangle::Symbol::new(sym) {
-        if let Ok(d) = s.demangle(&cpp_demangle::DemangleOptions::default()) {
-            return Some(d);
-        }
+    if let Ok(s) = cpp_demangle::Symbol::new(sym)
+        && let Ok(d) = s.demangle()
+    {
+        return Some(d);
     }
     None
 }
@@ -20,7 +20,10 @@ pub fn demangle_text(text: &str) -> String {
     let mut i = 0;
     let is_sym = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c == b'$' || c == b'.';
     while i < b.len() {
-        let starts = (b[i] == b'_') && i + 2 < b.len() && (b[i + 1] == b'Z' || b[i + 1] == b'R') && (i == 0 || !is_sym(b[i - 1]));
+        let starts = (b[i] == b'_')
+            && i + 2 < b.len()
+            && (b[i + 1] == b'Z' || b[i + 1] == b'R')
+            && (i == 0 || !is_sym(b[i - 1]));
         if starts {
             let mut j = i;
             while j < b.len() && is_sym(b[j]) {
@@ -50,10 +53,16 @@ mod tests {
     fn demangles_llvm_and_rust_symbols() {
         let s = "libLLVM.so(_ZN4llvm16SelectionDAGISel17CodeGenAndEmitDAGEv+0x189) [0x7d]";
         let d = demangle_text(s);
-        assert!(d.contains("llvm::SelectionDAGISel::CodeGenAndEmitDAG()"), "{d}");
+        assert!(
+            d.contains("llvm::SelectionDAGISel::CodeGenAndEmitDAG()"),
+            "{d}"
+        );
         assert!(d.contains("+0x189"));
         let r = demangle_text("x(_RNvCs1_5krate3foo+0x1)");
         assert!(r.contains("krate::foo"), "{r}");
-        assert_eq!(demangle_text("plain text ü _ZNotASymbol"), "plain text ü _ZNotASymbol");
+        assert_eq!(
+            demangle_text("plain text ü _ZNotASymbol"),
+            "plain text ü _ZNotASymbol"
+        );
     }
 }

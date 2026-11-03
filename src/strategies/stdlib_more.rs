@@ -41,7 +41,9 @@ const FMT_BODIES: &[&str] = &[
     "std::fmt::write(f, format_args!(\"{}{}\", self.0, 1))",
 ];
 
-const FMT_TRAITS: &[&str] = &["Display", "Debug", "LowerHex", "UpperHex", "Binary", "Octal", "LowerExp", "UpperExp"];
+const FMT_TRAITS: &[&str] = &[
+    "Display", "Debug", "LowerHex", "UpperHex", "Binary", "Octal", "LowerExp", "UpperExp",
+];
 
 const FMT_USES: &[&str] = &[
     "h.put(&format!(\"{}\", W(a))); h.put(&format!(\"{:>9}\", W(b))); h.put(&format!(\"{:<9}|\", W(c))); h.put(&format!(\"{:^9}|\", W(a))); h.put(&format!(\"{:*^9}\", W(b)));",
@@ -58,15 +60,23 @@ const FMT_USES: &[&str] = &[
 ];
 
 fn fmt_family(rng: &mut Rng) -> String {
-    let ty = *rng.pick(&["u8", "i8", "u16", "i16", "u32", "i32", "u64", "i64", "usize", "u128", "i128", "isize"]);
+    let ty = *rng.pick(&[
+        "u8", "i8", "u16", "i16", "u32", "i32", "u64", "i64", "usize", "u128", "i128", "isize",
+    ]);
     let mut items = String::new();
     items += &format!("    type T = {ty};\n    #[derive(Clone, Copy)] struct W(T);\n");
     for tr in FMT_TRAITS {
         let body = *rng.pick(FMT_BODIES);
         // the numeric-delegating bodies exist for the matching trait only; everything else is fine anywhere
         let delegating = body.starts_with("std::fmt::") && body.contains("::fmt(&self.0");
-        let body = if delegating { format!("std::fmt::{tr}::fmt(&self.0, f)") } else { body.to_string() };
-        items += &format!("    impl std::fmt::{tr} for W {{ fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{ use std::fmt::Write; {body} }} }}\n");
+        let body = if delegating {
+            format!("std::fmt::{tr}::fmt(&self.0, f)")
+        } else {
+            body.to_string()
+        };
+        items += &format!(
+            "    impl std::fmt::{tr} for W {{ fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{ use std::fmt::Write; {body} }} }}\n"
+        );
     }
     let mut p = String::new();
     for v in ["a", "b", "c"] {
@@ -185,8 +195,20 @@ const FFI: &[&str] = &[
 ];
 
 fn atomic_family(rng: &mut Rng) -> String {
-    let (name, ty) = *rng.pick(&[("AtomicU8", "u8"), ("AtomicI8", "i8"), ("AtomicU16", "u16"), ("AtomicI16", "i16"), ("AtomicU32", "u32"), ("AtomicI32", "i32"), ("AtomicU64", "u64"), ("AtomicI64", "i64"), ("AtomicUsize", "usize"), ("AtomicIsize", "isize")]);
-    let mut items = format!("    type T = {ty};\n    use std::sync::atomic::{{{name} as A, Ordering::*}};\n");
+    let (name, ty) = *rng.pick(&[
+        ("AtomicU8", "u8"),
+        ("AtomicI8", "i8"),
+        ("AtomicU16", "u16"),
+        ("AtomicI16", "i16"),
+        ("AtomicU32", "u32"),
+        ("AtomicI32", "i32"),
+        ("AtomicU64", "u64"),
+        ("AtomicI64", "i64"),
+        ("AtomicUsize", "usize"),
+        ("AtomicIsize", "isize"),
+    ]);
+    let mut items =
+        format!("    type T = {ty};\n    use std::sync::atomic::{{{name} as A, Ordering::*}};\n");
     items.push_str("    ");
     items.pop();
     let mut p = String::new();
@@ -195,29 +217,55 @@ fn atomic_family(rng: &mut Rng) -> String {
         p += &format!("        let {v}: T = {};\n", bbv(rng, l));
     }
     let (k, f) = (rng.below(9), rng.chance(50));
-    p += &format!("        let k: usize = {}; let f: bool = {};\n", bbv(rng, format!("{k}usize")), bbv(rng, format!("{f}")));
+    p += &format!(
+        "        let k: usize = {}; let f: bool = {};\n",
+        bbv(rng, format!("{k}usize")),
+        bbv(rng, format!("{f}"))
+    );
     let n = rng.range(4, 8);
     let body = emit(rng, &p, &[ATOMIC], n);
     wrap(&items, &body)
 }
 
 fn simple(rng: &mut Rng, table: &[&str], with_text: bool) -> String {
-    let ty = *rng.pick(&["u8", "i8", "u16", "i16", "u32", "i32", "u64", "i64", "usize", "u128", "i128", "isize"]);
+    let ty = *rng.pick(&[
+        "u8", "i8", "u16", "i16", "u32", "i32", "u64", "i64", "usize", "u128", "i128", "isize",
+    ]);
     let mut items = format!("    type T = {ty};\n");
     if std::ptr::eq(table, CUSTOM) {
         items += CUSTOM_ITEMS;
     }
     let mut p = String::new();
     for v in ["a", "b", "c"] {
-        let l = if rng.chance(50) { lit(rng, ty) } else { small_ints(rng, ty) };
+        let l = if rng.chance(50) {
+            lit(rng, ty)
+        } else {
+            small_ints(rng, ty)
+        };
         p += &format!("        let {v}: T = {};\n", bbv(rng, l));
     }
     let (k, f) = (rng.below(9), rng.chance(50));
-    p += &format!("        let k: usize = {}; let f: bool = {};\n", bbv(rng, format!("{k}usize")), bbv(rng, format!("{f}")));
+    p += &format!(
+        "        let k: usize = {}; let f: bool = {};\n",
+        bbv(rng, format!("{k}usize")),
+        bbv(rng, format!("{f}"))
+    );
     if with_text {
-        let data = *rng.pick(&["hello world\\nsecond line\\n", "a b c", "", "x\\ny\\nz", "hello world, foo\\n\\nbar", "0123456789"]);
+        let data = *rng.pick(&[
+            "hello world\\nsecond line\\n",
+            "a b c",
+            "",
+            "x\\ny\\nz",
+            "hello world, foo\\n\\nbar",
+            "0123456789",
+        ]);
         let nv = format!("{}usize", rng.below(8));
-        p += &format!("        let mut data: &[u8] = {}; let text: &str = {}; let n: usize = {};\n", bbv(rng, format!("b\"{data}\"")), bbv(rng, format!("\"{data}\"")), bbv(rng, nv));
+        p += &format!(
+            "        let mut data: &[u8] = {}; let text: &str = {}; let n: usize = {};\n",
+            bbv(rng, format!("b\"{data}\"")),
+            bbv(rng, format!("\"{data}\"")),
+            bbv(rng, nv)
+        );
     }
     let n = rng.range(4, 8);
     let body = emit(rng, &p, &[table], n);
@@ -225,7 +273,17 @@ fn simple(rng: &mut Rng, table: &[&str], with_text: bool) -> String {
 }
 
 pub fn generate(rng: &mut Rng) -> String {
-    let which = pick_table(rng, &[("fmt", &[][..]), ("io", IO), ("atomic", ATOMIC), ("sync", SYNC), ("custom", CUSTOM), ("ffi", FFI)]);
+    let which = pick_table(
+        rng,
+        &[
+            ("fmt", &[][..]),
+            ("io", IO),
+            ("atomic", ATOMIC),
+            ("sync", SYNC),
+            ("custom", CUSTOM),
+            ("ffi", FFI),
+        ],
+    );
     if std::ptr::eq(which, IO) {
         simple(rng, IO, true)
     } else if std::ptr::eq(which, ATOMIC) {

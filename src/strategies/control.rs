@@ -35,7 +35,11 @@ impl Gen<'_> {
     fn ivar(&mut self) -> String {
         let total = self.ni + self.extra_ints.len();
         let i = self.rng.below(total);
-        if i < self.ni { format!("n{i}") } else { self.extra_ints[i - self.ni].clone() }
+        if i < self.ni {
+            format!("n{i}")
+        } else {
+            self.extra_ints[i - self.ni].clone()
+        }
     }
 
     fn bexpr(&mut self, depth: u32) -> String {
@@ -56,7 +60,11 @@ impl Gen<'_> {
             7 => format!("!({})", self.bexpr(depth - 1)),
             _ => {
                 let v = self.ivar();
-                format!("{v}.wrapping_mul({}) % 3 == {}", self.rng.below(10) | 1, self.rng.below(3))
+                format!(
+                    "{v}.wrapping_mul({}) % 3 == {}",
+                    self.rng.below(10) | 1,
+                    self.rng.below(3)
+                )
             }
         }
     }
@@ -71,7 +79,11 @@ impl Gen<'_> {
                 format!("out.wrapping_mul(31) ^ ({v} as u64 + {k})")
             }
         };
-        if self.use_static { format!("OUT = {}; ", upd.replace("out", "OUT")) } else { format!("out = {upd}; ") }
+        if self.use_static {
+            format!("OUT = {}; ", upd.replace("out", "OUT"))
+        } else {
+            format!("out = {upd}; ")
+        }
     }
 
     fn jump(&mut self) -> Option<String> {
@@ -79,7 +91,11 @@ impl Gen<'_> {
             return None;
         }
         let l = self.rng.pick(&self.labels.clone()).clone();
-        let kind = if l.is_loop && self.rng.chance(40) { "continue" } else { "break" };
+        let kind = if l.is_loop && self.rng.chance(40) {
+            "continue"
+        } else {
+            "break"
+        };
         Some(format!("{kind} '{};", l.name))
     }
 
@@ -93,7 +109,11 @@ impl Gen<'_> {
     fn stmt(&mut self, depth: u32, ind: usize, out: &mut String) {
         self.budget -= 1;
         let pad = "    ".repeat(ind);
-        let kind = if self.budget <= 0 || depth >= 5 { self.rng.below(5) } else { self.rng.below(15) };
+        let kind = if self.budget <= 0 || depth >= 5 {
+            self.rng.below(5)
+        } else {
+            self.rng.below(15)
+        };
         match kind {
             0 => {
                 let v = self.bvar();
@@ -112,7 +132,12 @@ impl Gen<'_> {
             3 => {
                 let v = self.ivar();
                 let e = self.ivar();
-                w!(out, "{pad}{v} = {e}.wrapping_mul({}) ^ {};", self.rng.below(9) | 1, self.rng.below(4));
+                w!(
+                    out,
+                    "{pad}{v} = {e}.wrapping_mul({}) ^ {};",
+                    self.rng.below(9) | 1,
+                    self.rng.below(4)
+                );
             }
             4 => {
                 if let Some(j) = self.jump() {
@@ -142,7 +167,10 @@ impl Gen<'_> {
                 w!(out, "{pad}'l{id}: loop {{");
                 w!(out, "{pad}    fuel{id} += 1;");
                 w!(out, "{pad}    if fuel{id} > {fuel} {{ break 'l{id}; }}");
-                self.labels.push(Lbl { name: format!("l{id}"), is_loop: true });
+                self.labels.push(Lbl {
+                    name: format!("l{id}"),
+                    is_loop: true,
+                });
                 self.block(depth + 1, ind + 1, out);
                 self.labels.pop();
                 if self.rng.chance(40) {
@@ -156,7 +184,10 @@ impl Gen<'_> {
                 let id = self.fresh;
                 let hi = self.rng.range(1, 3);
                 w!(out, "{pad}'f{id}: for mut x{id} in 0u32..{hi} {{");
-                self.labels.push(Lbl { name: format!("f{id}"), is_loop: true });
+                self.labels.push(Lbl {
+                    name: format!("f{id}"),
+                    is_loop: true,
+                });
                 self.extra_ints.push(format!("x{id}"));
                 self.block(depth + 1, ind + 1, out);
                 self.extra_ints.pop();
@@ -168,7 +199,10 @@ impl Gen<'_> {
                 self.fresh += 1;
                 let id = self.fresh;
                 w!(out, "{pad}'k{id}: {{");
-                self.labels.push(Lbl { name: format!("k{id}"), is_loop: false });
+                self.labels.push(Lbl {
+                    name: format!("k{id}"),
+                    is_loop: false,
+                });
                 self.block(depth + 1, ind + 1, out);
                 self.labels.pop();
                 w!(out, "{pad}}}");
@@ -196,7 +230,7 @@ impl Gen<'_> {
 
     fn digest(&self) -> String {
         let o = if self.use_static { "OUT" } else { "out" };
-        let mut s = format!("{o}");
+        let mut s = o.to_string();
         for i in 0..self.nb.min(4) {
             s += &format!(" ^ ((b{i} as u64) << {})", i + 40);
         }
@@ -216,20 +250,41 @@ pub fn generate(rng: &mut Rng) -> String {
         let nb = rng.range(3, 8);
         let ni = rng.range(2, 4);
         let budget = rng.range(15, 60) as i32;
-        let mut g = Gen { rng, nb, ni, extra_ints: vec![], labels: vec![], fresh: 0, budget, use_static };
+        let mut g = Gen {
+            rng,
+            nb,
+            ni,
+            extra_ints: vec![],
+            labels: vec![],
+            fresh: 0,
+            budget,
+            use_static,
+        };
         let mut code = String::new();
         g.block(0, 2, &mut code);
         g.block(0, 2, &mut code);
         let digest = g.digest();
-        let attr = if g.rng.chance(50) { "#[inline(never)]" } else { "" };
-        w!(items, "    {attr}\n    unsafe fn ctl{f}(seed: u32) -> u64 {{");
+        let attr = if g.rng.chance(50) {
+            "#[inline(never)]"
+        } else {
+            ""
+        };
+        w!(
+            items,
+            "    {attr}\n    unsafe fn ctl{f}(seed: u32) -> u64 {{"
+        );
         if use_static {
             w!(items, "        OUT = 0;");
         } else {
             w!(items, "        let mut out = 0u64;");
         }
         for i in 0..nb {
-            w!(items, "        let mut b{i} = (seed >> {}) & 1 == {};", i, i % 2);
+            w!(
+                items,
+                "        let mut b{i} = (seed >> {}) & 1 == {};",
+                i,
+                i % 2
+            );
         }
         for i in 0..ni {
             w!(items, "        let mut n{i} = (seed >> {}) & 3;", i * 2);
@@ -240,7 +295,10 @@ pub fn generate(rng: &mut Rng) -> String {
             // the static itself, shared by every static-using function of this case
             items.push_str("    static mut OUT: u64 = 0;\n");
         }
-        w!(body, "        for s in [0u32, 1, 2, 5, 9, 17, 255, 1023] {{ h.put(&unsafe {{ ctl{f}(bb(s)) }}); }}");
+        w!(
+            body,
+            "        for s in [0u32, 1, 2, 5, 9, 17, 255, 1023] {{ h.put(&unsafe {{ ctl{f}(bb(s)) }}); }}"
+        );
     }
     // a static is needed iff some function used it; declare it once regardless.
     if !items.contains("static mut OUT") {

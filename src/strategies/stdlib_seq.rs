@@ -115,19 +115,42 @@ fn pick_vec(rng: &mut Rng, ty: &str) -> String {
     let pool: Vec<String> = (0..rng.range(2, 5)).map(|_| lit(rng, ty)).collect();
     let small: Vec<String> = (0..4).map(|_| small_ints(rng, ty)).collect();
     let n = rng.range(0, 9);
-    let items: Vec<String> = (0..n).map(|_| if rng.chance(60) { rng.pick(&pool).clone() } else { rng.pick(&small).clone() }).collect();
+    let items: Vec<String> = (0..n)
+        .map(|_| {
+            if rng.chance(60) {
+                rng.pick(&pool).clone()
+            } else {
+                rng.pick(&small).clone()
+            }
+        })
+        .collect();
     format!("vec![{}]", items.join(", "))
 }
 
 pub fn generate(rng: &mut Rng) -> String {
-    let ty = *rng.pick(&["u8", "i8", "u16", "i16", "u32", "i32", "u64", "i64", "usize", "u128", "i128", "isize"]);
+    let ty = *rng.pick(&[
+        "u8", "i8", "u16", "i16", "u32", "i32", "u64", "i64", "usize", "u128", "i128", "isize",
+    ]);
     let mut p = format!("        type T = {ty};\n");
     let (v, w) = (pick_vec(rng, ty), pick_vec(rng, ty));
-    p += &format!("        let v: Vec<T> = {}; let w: Vec<T> = {}; let mut sv = v.clone(); sv.sort();\n", bbv(rng, v), bbv(rng, w));
+    p += &format!(
+        "        let v: Vec<T> = {}; let w: Vec<T> = {}; let mut sv = v.clone(); sv.sort();\n",
+        bbv(rng, v),
+        bbv(rng, w)
+    );
     let (a, b, c) = (lit(rng, ty), lit(rng, ty), lit(rng, ty));
-    p += &format!("        let a: T = {}; let b: T = {}; let c: T = {};\n", bbv(rng, a), bbv(rng, b), bbv(rng, c));
+    p += &format!(
+        "        let a: T = {}; let b: T = {}; let c: T = {};\n",
+        bbv(rng, a),
+        bbv(rng, b),
+        bbv(rng, c)
+    );
     let (k, j) = (rng.below(7), rng.below(7));
-    p += &format!("        let k: usize = {}; let j: usize = {};\n", bbv(rng, format!("{k}usize")), bbv(rng, format!("{j}usize")));
+    p += &format!(
+        "        let k: usize = {}; let j: usize = {};\n",
+        bbv(rng, format!("{k}usize")),
+        bbv(rng, format!("{j}usize"))
+    );
     let n = rng.range(5, 12);
     let table = pick_table(rng, &[("slice", SLICE), ("vec", VEC), ("iter", ITER)]);
     let body = emit(rng, &p, &[table], n);

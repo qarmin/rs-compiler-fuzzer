@@ -8,7 +8,10 @@ use crate::scan::is_ident;
 use log::info;
 use std::time::Instant;
 
-const MULTI: [&str; 22] = ["..=", "<<=", ">>=", "::", "->", "=>", "..", "==", "!=", "<=", ">=", "&&", "||", "<<", ">>", "+=", "-=", "*=", "/=", "%=", "^=", "&="];
+const MULTI: [&str; 22] = [
+    "..=", "<<=", ">>=", "::", "->", "=>", "..", "==", "!=", "<=", ">=", "&&", "||", "<<", ">>",
+    "+=", "-=", "*=", "/=", "%=", "^=", "&=",
+];
 
 /// `(start, end)` byte ranges of the tokens of `src` (comments are not tokens; they are expected to be gone).
 pub fn tokenize(src: &str) -> Vec<(usize, usize)> {
@@ -56,7 +59,11 @@ pub fn tokenize(src: &str) -> Vec<(usize, usize)> {
             out.push((s, i));
         } else {
             let s = i;
-            let len = MULTI.iter().find(|m| src[i..].starts_with(**m)).map(|m| m.len()).unwrap_or_else(|| src[i..].chars().next().map(char::len_utf8).unwrap_or(1));
+            let len = MULTI
+                .iter()
+                .find(|m| src[i..].starts_with(**m))
+                .map(|m| m.len())
+                .unwrap_or_else(|| src[i..].chars().next().map(char::len_utf8).unwrap_or(1));
             i += len;
             out.push((s, i));
         }
@@ -98,18 +105,41 @@ pub fn shrink_tokens(it: &dyn Oracle, src: &str, deadline: Instant) -> String {
         return cur;
     }
     let check_nesting = balanced(&cur);
-    let windows: &[usize] = if crate::control::effort() > 0 { &[64, 32, 16, 8, 4, 2, 1] } else { &[8, 4, 2, 1] };
+    let windows: &[usize] = if crate::control::effort() > 0 {
+        &[64, 32, 16, 8, 4, 2, 1]
+    } else {
+        &[8, 4, 2, 1]
+    };
     for &n in windows {
         // every window position on small programs, every other one on bigger ones
-        let step = if toks.len() <= 1500 { 1 } else { (n / 2).max(1) } as isize;
+        let step = if toks.len() <= 1500 {
+            1
+        } else {
+            (n / 2).max(1)
+        } as isize;
         let mut i = toks.len().saturating_sub(n) as isize;
         while i >= 0 {
             if expired(deadline) {
                 return cur;
             }
-            let starts: Vec<isize> = (0..width as isize).map(|k| i - k * step).take_while(|&s| s >= 0).collect();
-            let cands: Vec<String> = starts.iter().map(|&s| without_tokens(&cur, &toks, s as usize, (s as usize + n - 1).min(toks.len() - 1))).collect();
-            let res = par_map(&cands, width, |c| !c.trim().is_empty() && (!check_nesting || balanced(c)) && it.check(c));
+            let starts: Vec<isize> = (0..width as isize)
+                .map(|k| i - k * step)
+                .take_while(|&s| s >= 0)
+                .collect();
+            let cands: Vec<String> = starts
+                .iter()
+                .map(|&s| {
+                    without_tokens(
+                        &cur,
+                        &toks,
+                        s as usize,
+                        (s as usize + n - 1).min(toks.len() - 1),
+                    )
+                })
+                .collect();
+            let res = par_map(&cands, width, |c| {
+                !c.trim().is_empty() && (!check_nesting || balanced(c)) && it.check(c)
+            });
             match res.iter().position(|&ok| ok) {
                 Some(p) => {
                     cur = cands[p].clone();

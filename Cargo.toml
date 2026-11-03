@@ -10,8 +10,8 @@ edition = "2024"
 rs-minimizer = { path = "rs-minimizer" }
 # readable symbol names in the compiler backtraces quoted in issue drafts
 rustc-demangle = "0.1"
-cpp_demangle = "0.4"
+cpp_demangle = "0.5"
 # progress logs, and a Ctrl+C handler that does not need `unsafe`
 log = "0.4"
-handsome_logger = "0.9"
+handsome_logger = "0.10"
 ctrlc = "3"

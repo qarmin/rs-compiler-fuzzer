@@ -50,29 +50,124 @@ pub struct Strategy {
 }
 
 pub const ALL: &[Strategy] = &[
-    Strategy { name: "arith", lines: 24000, about: "typed integer expression trees, inlining variants, loops folding them", generate: arith::generate },
-    Strategy { name: "loops", lines: 6000, about: "iterator chains, slicing loops, nested counters (cf. zxt5's rustc reports)", generate: loops::generate },
-    Strategy { name: "control", lines: 90000, about: "random structured control flow: labeled blocks, break/continue, bool state machines", generate: control::generate },
-    Strategy { name: "enums", lines: 18000, about: "pattern matching: enum tuples, guards, ranges, bindings, slice patterns (match-tree MIR opts)", generate: enums::generate },
-    Strategy { name: "asyncs", lines: 18000, about: "async fns/blocks on a mini executor: state across await, drop of suspended futures, join", generate: asyncs::generate },
-    Strategy { name: "collections", lines: 3000, about: "VecDeque/BTreeMap/BinaryHeap/String operation sequences", generate: collections::generate },
-    Strategy { name: "select", lines: 24000, about: "structs built by if/else over clamped ints and floats (InstCombine select->min/max, #163728)", generate: select::generate },
-    Strategy { name: "recursion", lines: 11000, about: "recursion combining results with max/min after the call, accumulator and mutual recursion (TailCallElim, #164469)", generate: recursion::generate },
-    Strategy { name: "floats", lines: 3500, about: "IEEE arithmetic, saturating float<->int casts, fma, rounding, formatting/parsing", generate: floats::generate },
-    Strategy { name: "unwind", lines: 8500, about: "panics, landing pads, drop guards, partially built arrays/vecs, catch_unwind", generate: unwind::generate },
-    Strategy { name: "abi", lines: 30000, about: "extern C/sysv64/win64 calls: many arg/ret kinds, fn pointers, values live across cross-ABI calls (#144371, #163911)", generate: abi::generate },
-    Strategy { name: "simd", lines: 24000, about: "x86-64 SSE2/SSE4/AVX2 intrinsic chains, BMI2 pdep/pext (runtime-detected)", generate: simd::generate },
-    Strategy { name: "generics", lines: 24000, about: "generic fns over a numeric trait monomorphised at all 12 integer types, via fn pointers/closures", generate: generics::generate },
-    Strategy { name: "borrows", lines: 18000, about: "lifetimes, reborrow chains, split borrows, closures, cursors, interior mutability", generate: borrows::generate },
-    Strategy { name: "memory", lines: 15000, about: "unions, repr(packed), MaybeUninit, raw pointers, niches, provenance round-trips", generate: memory::generate },
-    Strategy { name: "stdlib", lines: 12000, about: "calls to (nearly) every safe std function: integer/float/char/str methods, slices, iterators, Option/Result, cmp, mem, cells, collections (cmp::max was enough for a miscompilation)", generate: stdlib::generate },
-    Strategy { name: "shapes", lines: 9000, about: "shapes of recent rustc reports: shadowed 128-bit let chains through black_box (#164667), chains of static mut raw pointers (#164137)", generate: shapes::generate },
-    Strategy { name: "traits", lines: 11000, about: "dyn/generic dispatch, default-vs-override methods, const eval vs runtime, drop order", generate: traits::generate },
+    Strategy {
+        name: "arith",
+        lines: 24000,
+        about: "typed integer expression trees, inlining variants, loops folding them",
+        generate: arith::generate,
+    },
+    Strategy {
+        name: "loops",
+        lines: 6000,
+        about: "iterator chains, slicing loops, nested counters (cf. zxt5's rustc reports)",
+        generate: loops::generate,
+    },
+    Strategy {
+        name: "control",
+        lines: 90000,
+        about: "random structured control flow: labeled blocks, break/continue, bool state machines",
+        generate: control::generate,
+    },
+    Strategy {
+        name: "enums",
+        lines: 18000,
+        about: "pattern matching: enum tuples, guards, ranges, bindings, slice patterns (match-tree MIR opts)",
+        generate: enums::generate,
+    },
+    Strategy {
+        name: "asyncs",
+        lines: 18000,
+        about: "async fns/blocks on a mini executor: state across await, drop of suspended futures, join",
+        generate: asyncs::generate,
+    },
+    Strategy {
+        name: "collections",
+        lines: 3000,
+        about: "VecDeque/BTreeMap/BinaryHeap/String operation sequences",
+        generate: collections::generate,
+    },
+    Strategy {
+        name: "select",
+        lines: 24000,
+        about: "structs built by if/else over clamped ints and floats (InstCombine select->min/max, #163728)",
+        generate: select::generate,
+    },
+    Strategy {
+        name: "recursion",
+        lines: 11000,
+        about: "recursion combining results with max/min after the call, accumulator and mutual recursion (TailCallElim, #164469)",
+        generate: recursion::generate,
+    },
+    Strategy {
+        name: "floats",
+        lines: 3500,
+        about: "IEEE arithmetic, saturating float<->int casts, fma, rounding, formatting/parsing",
+        generate: floats::generate,
+    },
+    Strategy {
+        name: "unwind",
+        lines: 8500,
+        about: "panics, landing pads, drop guards, partially built arrays/vecs, catch_unwind",
+        generate: unwind::generate,
+    },
+    Strategy {
+        name: "abi",
+        lines: 30000,
+        about: "extern C/sysv64/win64 calls: many arg/ret kinds, fn pointers, values live across cross-ABI calls (#144371, #163911)",
+        generate: abi::generate,
+    },
+    Strategy {
+        name: "simd",
+        lines: 24000,
+        about: "x86-64 SSE2/SSE4/AVX2 intrinsic chains, BMI2 pdep/pext (runtime-detected)",
+        generate: simd::generate,
+    },
+    Strategy {
+        name: "generics",
+        lines: 24000,
+        about: "generic fns over a numeric trait monomorphised at all 12 integer types, via fn pointers/closures",
+        generate: generics::generate,
+    },
+    Strategy {
+        name: "borrows",
+        lines: 18000,
+        about: "lifetimes, reborrow chains, split borrows, closures, cursors, interior mutability",
+        generate: borrows::generate,
+    },
+    Strategy {
+        name: "memory",
+        lines: 15000,
+        about: "unions, repr(packed), MaybeUninit, raw pointers, niches, provenance round-trips",
+        generate: memory::generate,
+    },
+    Strategy {
+        name: "stdlib",
+        lines: 12000,
+        about: "calls to (nearly) every safe std function: integer/float/char/str methods, slices, iterators, Option/Result, cmp, mem, cells, collections (cmp::max was enough for a miscompilation)",
+        generate: stdlib::generate,
+    },
+    Strategy {
+        name: "shapes",
+        lines: 9000,
+        about: "shapes of recent rustc reports: shadowed 128-bit let chains through black_box (#164667), chains of static mut raw pointers (#164137)",
+        generate: shapes::generate,
+    },
+    Strategy {
+        name: "traits",
+        lines: 11000,
+        about: "dyn/generic dispatch, default-vs-override methods, const eval vs runtime, drop order",
+        generate: traits::generate,
+    },
 ];
 
 /// Not part of `all`: deliberately diverges between `debug-assertions` on/off, so the
 /// detector + minimiser can be exercised end to end (`--strategies selftest --configs O0,O1-checks`).
-pub const SELFTEST: Strategy = Strategy { name: "selftest", lines: 2000, about: "(hidden) injected debug-assertions divergence", generate: selftest };
+pub const SELFTEST: Strategy = Strategy {
+    name: "selftest",
+    lines: 2000,
+    about: "(hidden) injected debug-assertions divergence",
+    generate: selftest,
+};
 
 fn selftest(rng: &mut Rng) -> String {
     if rng.chance(3) {
@@ -140,7 +235,11 @@ pub fn signed(ty: &str) -> bool {
 /// that all the strategies exercise a wide range of std functions on their values (see [`std_wrap`]).
 pub fn lit(rng: &mut Rng, ty: &str) -> String {
     let l = lit_plain(rng, ty);
-    if rng.chance(14) { std_wrap(rng, &l, ty) } else { l }
+    if rng.chance(14) {
+        std_wrap(rng, &l, ty)
+    } else {
+        l
+    }
 }
 
 /// Like [`lit`] but always a plain literal (patterns, constants).
@@ -189,23 +288,35 @@ pub fn std_wrap(rng: &mut Rng, x: &str, ty: &str) -> String {
         30 => format!("({x}).div_euclid(1)"),
         31 => format!("({x}).midpoint({x})"),
         32 => format!("({x}).min({x}).max({x})"),
-        33 => format!("{{ let mut t = {x}; let u = std::mem::replace(&mut t, 0); u.wrapping_add(t) }}"),
+        33 => format!(
+            "{{ let mut t = {x}; let u = std::mem::replace(&mut t, 0); u.wrapping_add(t) }}"
+        ),
         34 => format!("{{ let mut t = [{x}, {other}]; t.swap(0, 1); t.reverse(); t[0] }}"),
         35 => format!("std::hint::black_box({x})"),
         36 => format!("(std::num::Wrapping({x}) + std::num::Wrapping(0)).0"),
         37 => format!("std::num::Saturating({x}).0"),
-        38 => format!("{{ let c = std::cell::Cell::new({x}); c.set(c.get()); c.replace(c.get()) }}"),
+        38 => {
+            format!("{{ let c = std::cell::Cell::new({x}); c.set(c.get()); c.replace(c.get()) }}")
+        }
         39 => format!("*std::rc::Rc::new({x})"),
         40 => format!("*Box::new({x})"),
         41 => format!("*std::borrow::Cow::Borrowed(&{x})"),
         42 => format!("std::convert::identity({x})"),
-        43 => format!("{{ let o: Option<{t}> = Some({x}); match o {{ Some(v) => v, None => {other} }} }}"),
+        43 => format!(
+            "{{ let o: Option<{t}> = Some({x}); match o {{ Some(v) => v, None => {other} }} }}"
+        ),
         44 => format!("{{ let mut a = [{x}, {other}]; a.sort_unstable(); a[1] }}"),
-        45 => format!("{{ let mut a = vec![{other}, {x}]; a.sort(); a.dedup(); a.pop().unwrap() }}"),
+        45 => {
+            format!("{{ let mut a = vec![{other}, {x}]; a.sort(); a.dedup(); a.pop().unwrap() }}")
+        }
         46 => format!("({x}).wrapping_add({other}).wrapping_sub({other})"),
         47 => format!("(({x}) as i128 as {t})"),
-        48 => format!("{t}::from_str_radix(&format!(\"{{:x}}\", ({x}) as u128 & {t}::MAX as u128), 16).unwrap_or({x})"),
-        49 => format!("std::array::from_fn::<{t}, 2, _>(|i| if i == 0 {{ {x} }} else {{ {other} }})[0]"),
+        48 => format!(
+            "{t}::from_str_radix(&format!(\"{{:x}}\", ({x}) as u128 & {t}::MAX as u128), 16).unwrap_or({x})"
+        ),
+        49 => format!(
+            "std::array::from_fn::<{t}, 2, _>(|i| if i == 0 {{ {x} }} else {{ {other} }})[0]"
+        ),
         50 => format!("[{x}; 3].map(|v| v.wrapping_add(0))[2]"),
         51 => format!("({x}..={x}).next().unwrap()"),
         52 => format!("({x}..={x}).last().unwrap()"),
@@ -214,12 +325,16 @@ pub fn std_wrap(rng: &mut Rng, x: &str, ty: &str) -> String {
         55 => format!("({x}).max({x})"),
         56 => format!("std::cmp::max_by({x}, {x}, |p, q| p.cmp(q))"),
         57 => format!("std::cmp::min_by_key({x}, {x}, |p| p.wrapping_neg())"),
-        58 => format!("[{x}, {other}].iter().fold({x}, |a, b| if *b == {other} {{ a }} else {{ *b }})"),
+        58 => format!(
+            "[{x}, {other}].iter().fold({x}, |a, b| if *b == {other} {{ a }} else {{ *b }})"
+        ),
         59 => format!("Some({x}).into_iter().chain(None).next().unwrap()"),
         60 => format!("std::mem::take(&mut {{ {x} }})"),
         61 => format!("{{ let v = vec![{x}, {other}]; v.first().copied().unwrap_or_default() }}"),
         62 => format!("*[{x}, {other}].first().unwrap()"),
-        _ => format!("{{ let (a, b) = ({x}, {other}); [a, b].into_iter().find(|v| *v == a).unwrap() }}"),
+        _ => format!(
+            "{{ let (a, b) = ({x}, {other}); [a, b].into_iter().find(|v| *v == a).unwrap() }}"
+        ),
     };
     // callers append method calls and casts: keep it one operand
     format!("({w})")
@@ -236,10 +351,18 @@ fn lit_base(rng: &mut Rng, ty: &str) -> String {
         5 => rng.below(16) as u128,
         _ => (rng.next_u64() as u128) << 64 | rng.next_u64() as u128,
     };
-    let masked = if b == 128 { raw } else { raw & ((1u128 << b) - 1) };
+    let masked = if b == 128 {
+        raw
+    } else {
+        raw & ((1u128 << b) - 1)
+    };
     if signed(ty) {
         // reinterpret the b-bit pattern as two's complement
-        let v = if b == 128 { masked as i128 } else { ((masked << (128 - b)) as i128) >> (128 - b) };
+        let v = if b == 128 {
+            masked as i128
+        } else {
+            ((masked << (128 - b)) as i128) >> (128 - b)
+        };
         if v == i128::MIN {
             format!("{ty}::MIN")
         } else if v < 0 {
@@ -257,7 +380,11 @@ fn lit_base(rng: &mut Rng, ty: &str) -> String {
 fn bounds(ty: &str) -> (i128, i128) {
     let b = bits(ty);
     if signed(ty) {
-        if b >= 128 { (-i128::MAX, i128::MAX) } else { (-(1i128 << (b - 1)), (1i128 << (b - 1)) - 1) }
+        if b >= 128 {
+            (-i128::MAX, i128::MAX)
+        } else {
+            (-(1i128 << (b - 1)), (1i128 << (b - 1)) - 1)
+        }
     } else if b >= 128 {
         (0, i128::MAX)
     } else {
@@ -266,7 +393,11 @@ fn bounds(ty: &str) -> (i128, i128) {
 }
 
 fn pat_num(ty: &str, v: i128) -> String {
-    if v < 0 { format!("-{}{ty}", -v) } else { format!("{v}{ty}") }
+    if v < 0 {
+        format!("-{}{ty}", -v)
+    } else {
+        format!("{v}{ty}")
+    }
 }
 
 /// A valid pattern literal (no parentheses around negatives, unlike `lit`).

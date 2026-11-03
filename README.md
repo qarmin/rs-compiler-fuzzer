@@ -178,12 +178,12 @@ by hand. The `*-checks` configs and `PANIC` lines can also point at a generator 
   search), storing each result as soon as it is ready. `retriage.yml` (when a fuzz/miri run ends, and daily at 01:30 UTC, 4
   shards) continues with everything that has no result yet, an older `fuzzer_id`, or an unsettled minimisation; the first shard also
   verifies the stored reproducers. Schedule: fuzz ~00:00 Warsaw time (22:00 UTC), retriage 01:30 UTC, Miri 03:00 UTC.
-- **Checklist instead of a verdict** (`src/steps.rs`): every stored finding says which steps are done and which are open. The 20 steps
+- **Checklist instead of a verdict** (`src/steps.rs`): every stored finding says which steps are done and which are open. The 21 steps
   are atomic - one result each, nothing is recorded half way: reproduced on stable / beta / nightly (three steps), batch reduced to
   the cases that matter, **fully minimised**, shortest command line (shared flags / reference build / failing build: three steps),
   `-C opt-level` values, `-Zmir-opt-level` values, Miri (UB) check, MIR-vs-LLVM, culprit pass, regression or long-standing, first
   stable, first nightly, offending commit (cargo-bisect-rustc), upstream search in rust-lang/rust and in llvm/llvm-project (two steps),
-  issue draft, and (manual) reported. A step is `done`, `n/a`, `failed` (a negative verdict that needs a human, e.g. Miri finds UB) or
+  issue draft, `LLVM_ISSUE.md` (see below) and (manual) reported. A step is `done`, `n/a`, `failed` (a negative verdict that needs a human, e.g. Miri finds UB) or
   open with the reason; there is no "started". A step is never marked done from data an older version of the tool produced, and a
   search in which one query failed is not a finished search. `STATUS.md` shows `- [x]` / `- [ ]` / `- [!]`, `INDEX.md` has "steps
   done" and the next open step, `finding.json` (schema 2) has the same as `steps`.
@@ -209,6 +209,16 @@ by hand. The `*-checks` configs and `PANIC` lines can also point at a generator 
   comes back only when the nightly (or an import) shows it again; stable/beta fuzz jobs that find it again, or a triage that was running
   meanwhile, cannot bring it back. A difference that is just what overflow checks / debug assertions cause is deleted (it was never a bug).
   There is no separate verify workflow: the retriage run does the verification.
+
+## LLVM_ISSUE.md
+
+When the culprit pass of a wrong-code finding is an LLVM pass, the step `llvm_issue` (`tools/llvm_issue.py`, called by `triage`) verifies it and writes `LLVM_ISSUE.md` next to `ISSUE.md`, in the style of the rust-lang template. No own reducer or LLVM tooling: only `rustc` and the binaries from <https://apt.llvm.org> (small `.deb` packages unpacked with `dpkg -x`, no root, cached in `~/.cache/llvm-issue`).
+
+1. `rustc +nightly <flags> -C llvm-args=-opt-bisect-limit=N-1 --emit=llvm-bc` gives the module right before the culprit pass N.
+2. For LLVM M-1 (release branch), M (the version rustc uses, release branch) and M+1 (**trunk**): `opt -passes=<pass>`, then `llc` of the module with and without the pass, both linked into the program by rustc (a linker wrapper swaps the object file) and run. A different output = that LLVM is wrong.
+3. The file has the IR of the function, the table of the three versions and a banner comment on the first line: `FIXED ON TRUNK` (do not file, maybe ask for a backport), `STILL WRONG ON TRUNK` (worth filing) or `trunk was not checked`.
+
+Run by hand: `python3 tools/llvm_issue.py findings/<finding> --src findings/<finding>/reduced.rs --flags "-C opt-level=2"` (needs `culprit.txt` from the triage). The IR is not reduced: before filing run `llvm-reduce` on it and check the transformation on <https://alive2.llvm.org/ce/>.
 
 ## Reports
 

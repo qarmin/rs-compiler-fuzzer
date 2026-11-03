@@ -87,7 +87,9 @@ const STRING: &[&str] = &[
 
 fn pick_text(rng: &mut Rng) -> String {
     let parts: &[&str] = &[
-        "hello", " ", "wörld", ",", "ß", "", "42", "-7", "\\n", "中文", "😀", "A,b;C", "  x  ", "ǅ", "ab", "AB", "é", "a b c", "\\t", "0x1F", "true", "1.5e3", "ΑΣ", "\\u{0}", "İ", "a\\r\\nb",
+        "hello", " ", "wörld", ",", "ß", "", "42", "-7", "\\n", "中文", "😀", "A,b;C", "  x  ",
+        "ǅ", "ab", "AB", "é", "a b c", "\\t", "0x1F", "true", "1.5e3", "ΑΣ", "\\u{0}", "İ",
+        "a\\r\\nb",
     ];
     let mut t = String::new();
     for _ in 0..rng.range(1, 5) {
@@ -97,22 +99,86 @@ fn pick_text(rng: &mut Rng) -> String {
 }
 
 fn pick_pat(rng: &mut Rng) -> String {
-    format!("\"{}\"", rng.pick(&["", ",", "ab", " ", "ö", "l", "é", "AB", "x", "42", "😀", "\\n", "ß", "o w"]))
+    format!(
+        "\"{}\"",
+        rng.pick(&[
+            "", ",", "ab", " ", "ö", "l", "é", "AB", "x", "42", "😀", "\\n", "ß", "o w"
+        ])
+    )
 }
 
 fn pick_char(rng: &mut Rng) -> String {
-    format!("'{}'", rng.pick(&["a", "Z", "0", "é", "ß", "ǅ", "中", "😀", "\\u{0}", " ", "\\n", "\\u{10FFFF}", "z", "9", "_", "İ", "Σ", "\\u{301}", "\\'", "7"]))
+    format!(
+        "'{}'",
+        rng.pick(&[
+            "a",
+            "Z",
+            "0",
+            "é",
+            "ß",
+            "ǅ",
+            "中",
+            "😀",
+            "\\u{0}",
+            " ",
+            "\\n",
+            "\\u{10FFFF}",
+            "z",
+            "9",
+            "_",
+            "İ",
+            "Σ",
+            "\\u{301}",
+            "\\'",
+            "7"
+        ])
+    )
 }
 
 pub fn generate(rng: &mut Rng) -> String {
-    let (s, t, pat, ch, ch2) = (pick_text(rng), pick_text(rng), pick_pat(rng), pick_char(rng), pick_char(rng));
+    let (s, t, pat, ch, ch2) = (
+        pick_text(rng),
+        pick_text(rng),
+        pick_pat(rng),
+        pick_char(rng),
+        pick_char(rng),
+    );
     let mut p = String::new();
-    p += &format!("        let s: &str = {}; let t: &str = {}; let pat: &str = {};\n", bbv(rng, s), bbv(rng, t), bbv(rng, pat));
-    p += &format!("        let ch: char = {}; let ch2: char = {}; let ss: String = s.to_string();\n", bbv(rng, ch), bbv(rng, ch2));
-    let (k, r, cp) = (rng.below(9), rng.range(2, 36), if rng.chance(50) { rng.below(0x11_0000) } else { rng.below(0x300) });
-    p += &format!("        let k: usize = {}; let r: u32 = {r}; let cp: u32 = {};\n", bbv(rng, format!("{k}usize")), bbv(rng, format!("{cp}u32")));
+    p += &format!(
+        "        let s: &str = {}; let t: &str = {}; let pat: &str = {};\n",
+        bbv(rng, s),
+        bbv(rng, t),
+        bbv(rng, pat)
+    );
+    p += &format!(
+        "        let ch: char = {}; let ch2: char = {}; let ss: String = s.to_string();\n",
+        bbv(rng, ch),
+        bbv(rng, ch2)
+    );
+    let (k, r, cp) = (
+        rng.below(9),
+        rng.range(2, 36),
+        if rng.chance(50) {
+            rng.below(0x11_0000)
+        } else {
+            rng.below(0x300)
+        },
+    );
+    p += &format!(
+        "        let k: usize = {}; let r: u32 = {r}; let cp: u32 = {};\n",
+        bbv(rng, format!("{k}usize")),
+        bbv(rng, format!("{cp}u32"))
+    );
     let n = rng.range(5, 12);
-    let table = pick_table(rng, &[("char", CHAR), ("str", STR), ("str", STR), ("string", STRING)]);
+    let table = pick_table(
+        rng,
+        &[
+            ("char", CHAR),
+            ("str", STR),
+            ("str", STR),
+            ("string", STRING),
+        ],
+    );
     let tables = [table];
     let body = emit(rng, &p, &tables, n);
     wrap("", &body)

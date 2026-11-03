@@ -14,8 +14,10 @@
 //! `HashMap` iteration order, and libm results (`sin`, `exp`, `powf` ... may legitimately differ
 //! between constant folding and the runtime library). NaN payloads/signs are normalised by `Feed`.
 
-use super::{lit_plain as lit, signed, UINTS};
+use super::{UINTS, lit_plain as lit, signed};
 use crate::rng::Rng;
+
+type Family = (&'static [&'static str], fn(&mut Rng) -> String);
 
 static MIRI_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -26,7 +28,11 @@ pub fn set_miri_mode(on: bool) {
 }
 
 pub fn bbv(rng: &mut Rng, expr: String) -> String {
-    if rng.chance(60) { format!("bb({expr})") } else { expr }
+    if rng.chance(60) {
+        format!("bb({expr})")
+    } else {
+        expr
+    }
 }
 
 /// `n` randomly chosen snippets (weighted by table size), each in its own block.
@@ -71,7 +77,11 @@ pub fn wrap(items: &str, body: &str) -> String {
 
 /// The unsigned/signed integer type of the same width.
 pub fn counterpart(ty: &str) -> String {
-    if signed(ty) { ty.replacen('i', "u", 1) } else { ty.replacen('u', "i", 1) }
+    if signed(ty) {
+        ty.replacen('i', "u", 1)
+    } else {
+        ty.replacen('u', "i", 1)
+    }
 }
 
 /// Small value `0..=max` as a literal of type `ty`.
@@ -85,15 +95,20 @@ pub fn is_unsigned(ty: &str) -> bool {
 
 /// Dev aid / CI self-check: `RSFUZZ_STDLIB_TABLE=<name>` makes every case use that snippet table (see `tools/stdlib_selfcheck.sh`).
 fn forced() -> Option<String> {
-    std::env::var("RSFUZZ_STDLIB_TABLE").ok().filter(|s| !s.is_empty())
+    std::env::var("RSFUZZ_STDLIB_TABLE")
+        .ok()
+        .filter(|s| !s.is_empty())
 }
 
 /// The snippet table to use: the forced one if it belongs to this family, else a random one.
-pub fn pick_table<'a>(rng: &mut Rng, tables: &[(&'static str, &'a [&'static str])]) -> &'a [&'static str] {
-    if let Some(want) = forced() {
-        if let Some(t) = tables.iter().find(|t| t.0 == want) {
-            return t.1;
-        }
+pub fn pick_table<'a>(
+    rng: &mut Rng,
+    tables: &[(&'static str, &'a [&'static str])],
+) -> &'a [&'static str] {
+    if let Some(want) = forced()
+        && let Some(t) = tables.iter().find(|t| t.0 == want)
+    {
+        return t.1;
     }
     tables[rng.below(tables.len())].1
 }
@@ -101,7 +116,14 @@ pub fn pick_table<'a>(rng: &mut Rng, tables: &[(&'static str, &'a [&'static str]
 /// Every snippet table by name (for the self-check).
 pub fn table_names() -> Vec<&'static str> {
     let mut v = vec!["int"];
-    for fam in [super::stdlib_float::NAMES, super::stdlib_text::NAMES, super::stdlib_seq::NAMES, super::stdlib_misc::NAMES, super::stdlib_coll::NAMES, super::stdlib_more::NAMES] {
+    for fam in [
+        super::stdlib_float::NAMES,
+        super::stdlib_text::NAMES,
+        super::stdlib_seq::NAMES,
+        super::stdlib_misc::NAMES,
+        super::stdlib_coll::NAMES,
+        super::stdlib_more::NAMES,
+    ] {
         v.extend_from_slice(fam);
     }
     v
@@ -110,7 +132,7 @@ pub fn table_names() -> Vec<&'static str> {
 /// Pick one of the families, weighted roughly by the size of the API they cover.
 pub fn generate(rng: &mut Rng) -> String {
     if let Some(want) = forced() {
-        let fams: [(&[&str], fn(&mut Rng) -> String); 7] = [
+        let fams: [Family; 7] = [
             (&["int"], super::stdlib_int::generate),
             (super::stdlib_float::NAMES, super::stdlib_float::generate),
             (super::stdlib_text::NAMES, super::stdlib_text::generate),
@@ -119,7 +141,10 @@ pub fn generate(rng: &mut Rng) -> String {
             (super::stdlib_coll::NAMES, super::stdlib_coll::generate),
             (super::stdlib_more::NAMES, super::stdlib_more::generate),
         ];
-        if let Some((_, g)) = fams.iter().find(|(names, _)| names.contains(&want.as_str())) {
+        if let Some((_, g)) = fams
+            .iter()
+            .find(|(names, _)| names.contains(&want.as_str()))
+        {
             return g(rng);
         }
     }

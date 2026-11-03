@@ -4,16 +4,16 @@
 //! rustc configurations, runs the binaries and compares their output.
 
 mod batch;
-mod fuzz;
-mod import;
-mod rng;
-mod reduce;
 mod bisect;
 mod demangle;
+mod fuzz;
+mod import;
 mod miri;
 mod pack;
-mod steps;
+mod reduce;
+mod rng;
 mod runner;
+mod steps;
 mod triage;
 
 mod strategies;
@@ -75,16 +75,37 @@ gen only:
 
 /// Terminal logger; the long-running local commands also write to `tmp/<command>.log` (appended, no colours).
 fn init_logging(cmd: &str, ui: bool) {
-    use handsome_logger::{ColorChoice, CombinedLogger, Config, ConfigBuilder, LevelFilter, TermLogger, TerminalMode, WriteLogger};
+    use handsome_logger::{
+        ColorChoice, CombinedLogger, Config, ConfigBuilder, LevelFilter, TermLogger, TerminalMode,
+        WriteLogger,
+    };
     // with the dashboard on the screen the log goes to the file only
-    let mut loggers: Vec<Box<dyn handsome_logger::SharedLogger>> = if ui { Vec::new() } else { vec![TermLogger::new(Config::default(), TerminalMode::Mixed, ColorChoice::Auto)] };
+    let mut loggers: Vec<Box<dyn handsome_logger::SharedLogger>> = if ui {
+        Vec::new()
+    } else {
+        vec![TermLogger::new(
+            Config::default(),
+            TerminalMode::Mixed,
+            ColorChoice::Auto,
+        )]
+    };
     // the long-running commands also write a much more detailed log to a file (debug level: every improvement, every pass start), which
     // the CI jobs keep as an artifact
     if matches!(cmd, "minimize" | "triage" | "retriage") {
         let path = PathBuf::from("tmp").join(format!("{cmd}.log"));
-        let file = std::fs::create_dir_all("tmp").and_then(|_| std::fs::OpenOptions::new().create(true).append(true).open(&path));
+        let file = std::fs::create_dir_all("tmp").and_then(|_| {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+        });
         match file {
-            Ok(f) => loggers.push(WriteLogger::new(ConfigBuilder::default().set_level(LevelFilter::Debug).build(), f)),
+            Ok(f) => loggers.push(WriteLogger::new(
+                ConfigBuilder::default()
+                    .set_level(LevelFilter::Debug)
+                    .build(),
+                f,
+            )),
             Err(e) => eprintln!("cannot write the log file {}: {e}", path.display()),
         }
     }
@@ -108,7 +129,11 @@ fn main() {
         // the standalone reducer of any Rust file (its own logger, its own options)
         std::process::exit(rs_minimizer::cli::run(args[1..].to_vec()));
     }
-    let ui_arg = args.windows(2).find(|w| w[0] == "--ui").map(|w| w[1].clone()).unwrap_or_else(|| "auto".to_string());
+    let ui_arg = args
+        .windows(2)
+        .find(|w| w[0] == "--ui")
+        .map(|w| w[1].clone())
+        .unwrap_or_else(|| "auto".to_string());
     let ui = cmd == "minimize" && rs_minimizer::ui::wanted(&ui_arg);
     init_logging(&cmd, ui);
     let mut seed: Option<u64> = None;
@@ -119,7 +144,9 @@ fn main() {
     let mut scale = 100usize;
     let mut strategies = "all".to_string();
     let mut out = PathBuf::from("fuzz-out");
-    let mut jobs = std::thread::available_parallelism().map(|n| (n.get() / 2).max(1)).unwrap_or(1);
+    let mut jobs = std::thread::available_parallelism()
+        .map(|n| (n.get() / 2).max(1))
+        .unwrap_or(1);
     let mut rustc = "rustc".to_string();
     let mut only: Option<Vec<String>> = None;
     let mut i686 = false;
@@ -157,8 +184,15 @@ fn main() {
 
     let mut it = args.iter().skip(1);
     while let Some(a) = it.next() {
-        let mut val = || it.next().cloned().unwrap_or_else(|| die(&format!("{a} needs a value")));
-        let num = |s: String| -> u64 { s.parse().unwrap_or_else(|_| die(&format!("bad number `{s}`"))) };
+        let mut val = || {
+            it.next()
+                .cloned()
+                .unwrap_or_else(|| die(&format!("{a} needs a value")))
+        };
+        let num = |s: String| -> u64 {
+            s.parse()
+                .unwrap_or_else(|_| die(&format!("bad number `{s}`")))
+        };
         match a.as_str() {
             "--seed" => seed = Some(num(val())),
             "--duration" => duration = Some(Duration::from_secs(num(val()))),
@@ -178,7 +212,9 @@ fn main() {
             "--configs" => only = Some(val().split(',').map(|s| s.trim().to_string()).collect()),
             "--config" => {
                 let v = val();
-                let (n, f) = v.split_once('=').unwrap_or_else(|| die("--config wants NAME=FLAGS"));
+                let (n, f) = v
+                    .split_once('=')
+                    .unwrap_or_else(|| die("--config wants NAME=FLAGS"));
                 extra.push(Config::new(n, f));
             }
             "--compile-timeout" => compile_timeout = num(val()),
@@ -219,7 +255,9 @@ fn main() {
                 print!("{HELP}");
                 return;
             }
-            other if cmd == "minimize" && !other.starts_with('-') && dir_arg.is_none() => dir_arg = Some(PathBuf::from(other)),
+            other if cmd == "minimize" && !other.starts_with('-') && dir_arg.is_none() => {
+                dir_arg = Some(PathBuf::from(other))
+            }
             other => die(&format!("unknown option `{other}`")),
         }
     }
@@ -228,7 +266,12 @@ fn main() {
     if rustc_argv.is_empty() {
         die("--rustc is empty");
     }
-    let seed = seed.unwrap_or_else(|| std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(1));
+    let seed = seed.unwrap_or_else(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(1)
+    });
 
     // reducers run the oracle from other working directories
     let out = std::path::absolute(&out).unwrap_or(out);
@@ -238,21 +281,37 @@ fn main() {
             for s in strategies::ALL {
                 println!("  {:<10} {}", s.name, s.about);
             }
-            println!("stdlib tables: {}", strategies::stdlib_table_names().join(" "));
+            println!(
+                "stdlib tables: {}",
+                strategies::stdlib_table_names().join(" ")
+            );
             println!("--i686 configurations:");
             for c in fuzz::i686_configs(true) {
                 println!("  {:<16} {}", c.name, c.flags.join(" "));
             }
             println!("default configurations (nightly adds -Z ones):");
             for c in fuzz::default_configs(true) {
-                println!("  {:<16} {}{}", c.name, c.flags.join(" "), if c.slow { "   [slow: not in --profile fast]" } else { "" });
+                println!(
+                    "  {:<16} {}{}",
+                    c.name,
+                    c.flags.join(" "),
+                    if c.slow {
+                        "   [slow: not in --profile fast]"
+                    } else {
+                        ""
+                    }
+                );
             }
         }
         "interesting" => {
             let cfg = cfg_file.unwrap_or_else(|| die("interesting needs --cfg"));
             let file = file_arg.unwrap_or_else(|| die("interesting needs --file"));
-            let it = reduce::Interest::from_cfg(&std::fs::read_to_string(&cfg).unwrap_or_else(|e| die(&format!("{}: {e}", cfg.display()))));
-            let src = std::fs::read_to_string(&file).unwrap_or_else(|e| die(&format!("{}: {e}", file.display())));
+            let it = reduce::Interest::from_cfg(
+                &std::fs::read_to_string(&cfg)
+                    .unwrap_or_else(|e| die(&format!("{}: {e}", cfg.display()))),
+            );
+            let src = std::fs::read_to_string(&file)
+                .unwrap_or_else(|e| die(&format!("{}: {e}", file.display())));
             std::process::exit(if it.check(&src) { 0 } else { 1 });
         }
         "triage" => {
@@ -261,17 +320,38 @@ fn main() {
                 targets.push(d.clone());
             }
             if let Some(root) = &dirs_root {
-                let mut v: Vec<PathBuf> = std::fs::read_dir(root).map(|rd| rd.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.join("case.rs").exists() && p.join("repro.cfg").exists()).collect()).unwrap_or_default();
+                let mut v: Vec<PathBuf> = std::fs::read_dir(root)
+                    .map(|rd| {
+                        rd.filter_map(|e| e.ok())
+                            .map(|e| e.path())
+                            .filter(|p| p.join("case.rs").exists() && p.join("repro.cfg").exists())
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 v.sort();
                 targets.extend(v);
             }
             if targets.is_empty() {
                 die("triage needs --dir DIR or --dirs ROOT");
             }
-            let o = triage::TriageOpts { budget: Duration::from_secs(budget), search: !no_search, work: out.join("work"), no_reduce, bisect: Duration::from_secs(bisect_secs), checkpoint: false, force_reduce: false, deadline: None };
+            let o = triage::TriageOpts {
+                budget: Duration::from_secs(budget),
+                search: !no_search,
+                work: out.join("work"),
+                no_reduce,
+                bisect: Duration::from_secs(bisect_secs),
+                checkpoint: false,
+                force_reduce: false,
+                deadline: None,
+            };
             let mut worst = 0;
             for (i, d) in targets.iter().take(limit).enumerate() {
-                info!("[{}/{}] triage {}", i + 1, targets.len().min(limit), d.display());
+                info!(
+                    "[{}/{}] triage {}",
+                    i + 1,
+                    targets.len().min(limit),
+                    d.display()
+                );
                 match triage::triage(&o, d) {
                     Ok(s) => info!("{s}"),
                     Err(e) => {
@@ -287,25 +367,68 @@ fn main() {
             // local, interactive minimisation of one stored finding: all cores, hours of time, Ctrl+C keeps what was reached
             let dir = dir_arg.unwrap_or_else(|| die("minimize needs the finding directory, e.g. `minimize findings/arith__Oz__4a1a1f9e41`"));
             if !dir.join("case.rs").exists() || !dir.join("repro.cfg").exists() {
-                die(&format!("{} is not a finding directory (case.rs / repro.cfg missing)", dir.display()));
+                die(&format!(
+                    "{} is not a finding directory (case.rs / repro.cfg missing)",
+                    dir.display()
+                ));
             }
             let flag_given = |f: &str| args.iter().any(|a| a == f);
-            let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+            let cores = std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4);
             let par = if flag_given("--jobs") { jobs } else { cores };
             reduce::set_parallel(par);
             reduce::install_sigint();
-            let per_run = if flag_given("--budget") { budget } else { 4 * 3600 };
-            let total = if deadline_secs > 0 { deadline_secs } else { 12 * 3600 };
-            let o = triage::TriageOpts { budget: Duration::from_secs(per_run), search: !no_search && flag_given("--search"), work: out.join("work"), no_reduce, bisect: Duration::from_secs(bisect_secs), checkpoint: true, force_reduce: !flag_given("--no-force"), deadline: None };
+            let per_run = if flag_given("--budget") {
+                budget
+            } else {
+                4 * 3600
+            };
+            let total = if deadline_secs > 0 {
+                deadline_secs
+            } else {
+                12 * 3600
+            };
+            let o = triage::TriageOpts {
+                budget: Duration::from_secs(per_run),
+                search: !no_search && flag_given("--search"),
+                work: out.join("work"),
+                no_reduce,
+                bisect: Duration::from_secs(bisect_secs),
+                checkpoint: true,
+                force_reduce: !flag_given("--no-force"),
+                deadline: None,
+            };
             let start = std::time::Instant::now();
-            let status_of = |d: &PathBuf| std::fs::read_to_string(d.join("status.cfg")).unwrap_or_default().lines().find_map(|l| l.strip_prefix("min_status=").map(String::from)).unwrap_or_default();
-            let lines_now = |d: &PathBuf| std::fs::read_to_string(d.join("reduced.rs")).map(|t| t.lines().count()).unwrap_or(0);
-            info!("minimize {}: {par} parallel jobs on {cores} cores, up to {per_run}s per pass over everything, {total}s overall", dir.display());
-            info!("Ctrl+C once = stop and write everything up, twice = leave at once (reduced.rs is saved on every improvement)");
+            let status_of = |d: &PathBuf| {
+                std::fs::read_to_string(d.join("status.cfg"))
+                    .unwrap_or_default()
+                    .lines()
+                    .find_map(|l| l.strip_prefix("min_status=").map(String::from))
+                    .unwrap_or_default()
+            };
+            let lines_now = |d: &PathBuf| {
+                std::fs::read_to_string(d.join("reduced.rs"))
+                    .map(|t| t.lines().count())
+                    .unwrap_or(0)
+            };
+            info!(
+                "minimize {}: {par} parallel jobs on {cores} cores, up to {per_run}s per pass over everything, {total}s overall",
+                dir.display()
+            );
+            info!(
+                "Ctrl+C once = stop and write everything up, twice = leave at once (reduced.rs is saved on every improvement)"
+            );
             reduce::start_heartbeat(Duration::from_secs(30));
             if ui {
                 let case = std::fs::read_to_string(dir.join("case.rs")).unwrap_or_default();
-                rs_minimizer::ui::start(&dir.display().to_string(), Duration::from_secs(total), (case.lines().count(), case.len()), &format!("{}/reduced.rs", dir.display()), "tmp/minimize.log");
+                rs_minimizer::ui::start(
+                    &dir.display().to_string(),
+                    Duration::from_secs(total),
+                    (case.lines().count(), case.len()),
+                    &format!("{}/reduced.rs", dir.display()),
+                    "tmp/minimize.log",
+                );
             }
             let mut runs = 0;
             loop {
@@ -313,7 +436,10 @@ fn main() {
                 let left = total.saturating_sub(start.elapsed().as_secs());
                 let mut o2 = o.clone_opts();
                 o2.budget = Duration::from_secs(per_run.min(left));
-                info!("--- minimisation run {runs} (reduced.rs now {} lines) ---", lines_now(&dir));
+                info!(
+                    "--- minimisation run {runs} (reduced.rs now {} lines) ---",
+                    lines_now(&dir)
+                );
                 match triage::triage(&o2, &dir) {
                     Ok(s) => info!("{s}"),
                     Err(e) => {
@@ -322,46 +448,98 @@ fn main() {
                     }
                 }
                 let st = status_of(&dir);
-                info!("minimisation status: {st}; reduced.rs {} lines", lines_now(&dir));
+                info!(
+                    "minimisation status: {st}; reduced.rs {} lines",
+                    lines_now(&dir)
+                );
                 if reduce::INTERRUPTED.load(std::sync::atomic::Ordering::Relaxed) {
-                    warn!("interrupted - STATUS.md, ISSUE.md, status.cfg and finding.json are written for what was reached");
+                    warn!(
+                        "interrupted - STATUS.md, ISSUE.md, status.cfg and finding.json are written for what was reached"
+                    );
                     break;
                 }
                 if st.starts_with("converged") || start.elapsed().as_secs() >= total || runs >= 8 {
                     break;
                 }
             }
-            if let Some(root) = dir.canonicalize().ok().and_then(|d| d.parent().map(|p| p.to_path_buf())).filter(|p| p.file_name().map(|n| n == "findings").unwrap_or(false)) {
-                if let Some(pkg) = root.parent() {
-                    pack::write_index(pkg);
-                }
+            if let Some(root) = dir
+                .canonicalize()
+                .ok()
+                .and_then(|d| d.parent().map(|p| p.to_path_buf()))
+                .filter(|p| p.file_name().map(|n| n == "findings").unwrap_or(false))
+                && let Some(pkg) = root.parent()
+            {
+                pack::write_index(pkg);
             }
             let _ = std::fs::remove_dir_all(out.join("work"));
             info!("done: {}/reduced.rs, ISSUE.md, STATUS.md", dir.display());
-            rs_minimizer::control::write_rejected_log(std::path::Path::new("tmp/minimize.rejected.log"));
+            rs_minimizer::control::write_rejected_log(std::path::Path::new(
+                "tmp/minimize.rejected.log",
+            ));
             if ui {
                 let case = std::fs::read_to_string(dir.join("case.rs")).unwrap_or_default();
                 let red = std::fs::read_to_string(dir.join("reduced.rs")).unwrap_or_default();
                 let size = if red.is_empty() || red.len() >= case.len() {
-                    format!("{}: no reduced program was written ({} lines / {} bytes at the start)", dir.display(), case.lines().count(), case.len())
+                    format!(
+                        "{}: no reduced program was written ({} lines / {} bytes at the start)",
+                        dir.display(),
+                        case.lines().count(),
+                        case.len()
+                    )
                 } else {
-                    format!("{}: {} lines / {} bytes -> {} lines / {} bytes ({:.1}% fewer bytes), status: {}", dir.display(), case.lines().count(), case.len(), red.lines().count(), red.len(), 100.0 * (case.len() as f64 - red.len() as f64) / case.len().max(1) as f64, status_of(&dir))
+                    format!(
+                        "{}: {} lines / {} bytes -> {} lines / {} bytes ({:.1}% fewer bytes), status: {}",
+                        dir.display(),
+                        case.lines().count(),
+                        case.len(),
+                        red.lines().count(),
+                        red.len(),
+                        100.0 * (case.len() as f64 - red.len() as f64) / case.len().max(1) as f64,
+                        status_of(&dir)
+                    )
                 };
-                rs_minimizer::ui::stop(&[size, format!("written: {0}/reduced.rs, {0}/ISSUE.md, {0}/STATUS.md; log: tmp/minimize.log, rejected candidates: tmp/minimize.rejected.log", dir.display())]);
+                rs_minimizer::ui::stop(&[
+                    size,
+                    format!(
+                        "written: {0}/reduced.rs, {0}/ISSUE.md, {0}/STATUS.md; log: tmp/minimize.log, rejected candidates: tmp/minimize.rejected.log",
+                        dir.display()
+                    ),
+                ]);
             }
             std::process::exit(0);
         }
         "import" => {
-            let root = todo_dir.unwrap_or_else(|| die("import needs --todo DIR (the unpacked todo.zip)"));
-            let skip: std::collections::HashSet<String> = skip_file.as_ref().and_then(|f| std::fs::read_to_string(f).ok()).map(|t| t.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect()).unwrap_or_default();
-            let stems: Vec<String> = import::list_pairs(&root).into_iter().filter(|s| !skip.contains(s)).collect();
-            eprintln!("import: {} pair(s) of .rs + .txt waiting in {}", stems.len(), root.display());
+            let root =
+                todo_dir.unwrap_or_else(|| die("import needs --todo DIR (the unpacked todo.zip)"));
+            let skip: std::collections::HashSet<String> = skip_file
+                .as_ref()
+                .and_then(|f| std::fs::read_to_string(f).ok())
+                .map(|t| {
+                    t.lines()
+                        .map(|l| l.trim().to_string())
+                        .filter(|l| !l.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default();
+            let stems: Vec<String> = import::list_pairs(&root)
+                .into_iter()
+                .filter(|s| !skip.contains(s))
+                .collect();
+            eprintln!(
+                "import: {} pair(s) of .rs + .txt waiting in {}",
+                stems.len(),
+                root.display()
+            );
             let found_dir = out.join("imported");
             let work = out.join("work");
             let start = std::time::Instant::now();
             let mut n = 0;
             for stem in stems.iter().take(limit) {
-                let left = if deadline_secs > 0 { deadline_secs.saturating_sub(start.elapsed().as_secs()) } else { u64::MAX };
+                let left = if deadline_secs > 0 {
+                    deadline_secs.saturating_sub(start.elapsed().as_secs())
+                } else {
+                    u64::MAX
+                };
                 if left < 900 {
                     eprintln!("import: not enough time left for {stem}");
                     println!("DEFERRED {stem}");
@@ -378,7 +556,11 @@ fn main() {
                         println!("NOREPRO {stem} :: {why}");
                     }
                     Ok(import::Outcome2::Ready(key, dir)) => {
-                        if pkg.as_ref().map(|p| p.join("findings").join(&key).join("case.rs").exists()).unwrap_or(false) {
+                        if pkg
+                            .as_ref()
+                            .map(|p| p.join("findings").join(&key).join("case.rs").exists())
+                            .unwrap_or(false)
+                        {
                             eprintln!("    {key} is stored already");
                             println!("EXISTS {key} {stem}");
                             let _ = std::fs::remove_dir_all(&dir);
@@ -386,8 +568,22 @@ fn main() {
                         }
                         // minimisation gets what is left of the time, but never less than --budget
                         let reserve = bisect_secs + 900;
-                        let b = if left == u64::MAX { budget.max(budget_max) } else { left.saturating_sub(reserve).clamp(60, budget_max.max(budget)) };
-                        let o = triage::TriageOpts { budget: Duration::from_secs(b), search: !no_search, work: work.clone(), no_reduce, bisect: Duration::from_secs(bisect_secs), checkpoint: false, force_reduce: false, deadline: None };
+                        let b = if left == u64::MAX {
+                            budget.max(budget_max)
+                        } else {
+                            left.saturating_sub(reserve)
+                                .clamp(60, budget_max.max(budget))
+                        };
+                        let o = triage::TriageOpts {
+                            budget: Duration::from_secs(b),
+                            search: !no_search,
+                            work: work.clone(),
+                            no_reduce,
+                            bisect: Duration::from_secs(bisect_secs),
+                            checkpoint: false,
+                            force_reduce: false,
+                            deadline: None,
+                        };
                         match triage::triage(&o, &dir) {
                             Ok(s) => {
                                 eprintln!("    {s}");
@@ -408,45 +604,112 @@ fn main() {
         }
         "retriage" => {
             // triage again every stored finding that was last triaged by an older `fuzzer_id`, in place
-            let pkg = pkg.unwrap_or_else(|| die("retriage needs --pkg DIR (an unpacked findings.zip)"));
-            let (si, sn) = shard.split_once('/').map(|(a, b)| (a.parse::<usize>().unwrap_or(0), b.parse::<usize>().unwrap_or(1).max(1))).unwrap_or((0, 1));
-            let skip: std::collections::HashSet<String> = skip_file.as_ref().and_then(|f| std::fs::read_to_string(f).ok()).map(|t| t.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect()).unwrap_or_default();
-            let mut stale: Vec<PathBuf> = triage::stale_findings(&pkg, &skip).into_iter().filter(|p| pack::name_hash(&p.file_name().unwrap().to_string_lossy()) % sn as u64 == si as u64).collect();
+            let pkg =
+                pkg.unwrap_or_else(|| die("retriage needs --pkg DIR (an unpacked findings.zip)"));
+            let (si, sn) = shard
+                .split_once('/')
+                .map(|(a, b)| {
+                    (
+                        a.parse::<usize>().unwrap_or(0),
+                        b.parse::<usize>().unwrap_or(1).max(1),
+                    )
+                })
+                .unwrap_or((0, 1));
+            let skip: std::collections::HashSet<String> = skip_file
+                .as_ref()
+                .and_then(|f| std::fs::read_to_string(f).ok())
+                .map(|t| {
+                    t.lines()
+                        .map(|l| l.trim().to_string())
+                        .filter(|l| !l.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default();
+            let mut stale: Vec<PathBuf> = triage::stale_findings(&pkg, &skip)
+                .into_iter()
+                .filter(|p| {
+                    pack::name_hash(&p.file_name().unwrap().to_string_lossy()) % sn as u64
+                        == si as u64
+                })
+                .collect();
             if let Some(name) = &finding {
                 // one finding, whatever its checklist says, minimised again from where it stands
                 let dir = pkg.join("findings").join(name);
                 if !dir.join("case.rs").exists() {
-                    die(&format!("--finding {name}: {} has no case.rs", dir.display()));
+                    die(&format!(
+                        "--finding {name}: {} has no case.rs",
+                        dir.display()
+                    ));
                 }
                 stale = vec![dir];
             }
-            info!("retriage: {} stored finding(s) with open checklist steps in shard {shard}", stale.len());
-            let mut o = triage::TriageOpts { budget: Duration::from_secs(budget), search: !no_search, work: out.join("work"), no_reduce, bisect: Duration::from_secs(bisect_secs), checkpoint: false, force_reduce: finding.is_some(), deadline: if deadline_secs > 0 { Some(std::time::Instant::now() + Duration::from_secs(deadline_secs)) } else { None } };
+            info!(
+                "retriage: {} stored finding(s) with open checklist steps in shard {shard}",
+                stale.len()
+            );
+            let mut o = triage::TriageOpts {
+                budget: Duration::from_secs(budget),
+                search: !no_search,
+                work: out.join("work"),
+                no_reduce,
+                bisect: Duration::from_secs(bisect_secs),
+                checkpoint: false,
+                force_reduce: finding.is_some(),
+                deadline: if deadline_secs > 0 {
+                    Some(std::time::Instant::now() + Duration::from_secs(deadline_secs))
+                } else {
+                    None
+                },
+            };
             let start = std::time::Instant::now();
             let max_budget = budget_max.max(budget);
             let mut done = 0;
             for d in stale.iter().take(limit) {
                 // Minimisation gets the time the other waiting findings do not need: the smaller the queue, the longer a finding
                 // may be minimised (between --budget and --budget-max); what a finding does not use stays for the next one.
-                let remaining = if deadline_secs > 0 { deadline_secs.saturating_sub(start.elapsed().as_secs()) } else { 0 };
+                let remaining = if deadline_secs > 0 {
+                    deadline_secs.saturating_sub(start.elapsed().as_secs())
+                } else {
+                    0
+                };
                 // a bigger finding, or one whose minimisation is not settled yet, gets a bigger share of what is left
                 let weight = |p: &PathBuf| -> f64 {
-                    let lines = std::fs::read_to_string(p.join("reduced.rs")).or_else(|_| std::fs::read_to_string(p.join("case.rs"))).map(|t| t.lines().count()).unwrap_or(500) as f64;
-                    let settled = std::fs::read_to_string(p.join("status.cfg")).unwrap_or_default().lines().any(|l| l.starts_with("min_status=converged"));
+                    let lines = std::fs::read_to_string(p.join("reduced.rs"))
+                        .or_else(|_| std::fs::read_to_string(p.join("case.rs")))
+                        .map(|t| t.lines().count())
+                        .unwrap_or(500) as f64;
+                    let settled = std::fs::read_to_string(p.join("status.cfg"))
+                        .unwrap_or_default()
+                        .lines()
+                        .any(|l| l.starts_with("min_status=converged"));
                     1.0 + lines / 400.0 + if settled { 0.0 } else { 1.0 }
                 };
                 let (mut other, mut mins, mut weights) = (0u64, 0u64, 0.0f64);
                 for p in &stale {
                     let ids = triage::open_ids_of(p);
-                    if ids.iter().any(|i| *i == "minimized" || *i == "minimize_cases") {
+                    if ids
+                        .iter()
+                        .any(|i| *i == "minimized" || *i == "minimize_cases")
+                    {
                         mins += 1;
                         weights += weight(p);
                     }
-                    other += 300 + if ids.iter().any(|i| i.starts_with("bisect") || *i == "pass_bisect") { bisect_secs + 600 } else { 0 };
+                    other += 300
+                        + if ids
+                            .iter()
+                            .any(|i| i.starts_with("bisect") || *i == "pass_bisect")
+                        {
+                            bisect_secs + 600
+                        } else {
+                            0
+                        };
                 }
-                let this_min = triage::open_ids_of(d).iter().any(|i| *i == "minimized" || *i == "minimize_cases");
+                let this_min = triage::open_ids_of(d)
+                    .iter()
+                    .any(|i| *i == "minimized" || *i == "minimize_cases");
                 let b = if deadline_secs > 0 && this_min {
-                    let share = remaining.saturating_sub(other) as f64 * weight(d) / weights.max(1.0);
+                    let share =
+                        remaining.saturating_sub(other) as f64 * weight(d) / weights.max(1.0);
                     (share as u64).clamp(budget, max_budget)
                 } else {
                     budget
@@ -459,7 +722,11 @@ fn main() {
                     info!("retriage: {remaining}s left, not enough for another finding");
                     break;
                 }
-                let b = if deadline_secs > 0 { b.min(remaining.saturating_sub(900)).max(60) } else { b };
+                let b = if deadline_secs > 0 {
+                    b.min(remaining.saturating_sub(900)).max(60)
+                } else {
+                    b
+                };
                 o.budget = Duration::from_secs(b);
                 info!("retriage: minimisation budget for this finding: {b}s");
                 info!("retriage {}", d.display());
@@ -485,8 +752,15 @@ fn main() {
             let name = strategy.unwrap_or_else(|| die("gen needs --strategy"));
             let s = strategies::find(&name).unwrap_or_else(|| die("unknown strategy"));
             let cases = match case_seed {
-                Some(cs) => vec![batch::Case { id: 0, strategy: s.name, seed: cs, body: (s.generate)(&mut rng::Rng::new(cs)) }],
-                None => fuzz::generate_batch(s, seed, target_lines.unwrap_or(s.lines) * scale / 100),
+                Some(cs) => vec![batch::Case {
+                    id: 0,
+                    strategy: s.name,
+                    seed: cs,
+                    body: (s.generate)(&mut rng::Rng::new(cs)),
+                }],
+                None => {
+                    fuzz::generate_batch(s, seed, target_lines.unwrap_or(s.lines) * scale / 100)
+                }
             };
             let refs: Vec<&batch::Case> = cases.iter().collect();
             let src = batch::assemble(&refs).source;
@@ -498,7 +772,11 @@ fn main() {
         "fuzz" | "canary" | "verify" | "miri" => {
             let version = fuzz::rustc_version(&rustc_argv);
             let nightly = fuzz::is_nightly(&version);
-            let mut configs = if i686 { fuzz::i686_configs(nightly) } else { fuzz::default_configs(nightly) };
+            let mut configs = if i686 {
+                fuzz::i686_configs(nightly)
+            } else {
+                fuzz::default_configs(nightly)
+            };
             configs.extend(extra);
             match profile.as_str() {
                 "fast" => configs.retain(|c| !c.slow),
@@ -508,7 +786,13 @@ fn main() {
             if let Some(names) = only {
                 let mut picked = Vec::new();
                 for n in &names {
-                    picked.push(configs.iter().find(|c| &c.name == n).cloned().unwrap_or_else(|| die(&format!("unknown config `{n}`"))));
+                    picked.push(
+                        configs
+                            .iter()
+                            .find(|c| &c.name == n)
+                            .cloned()
+                            .unwrap_or_else(|| die(&format!("unknown config `{n}`"))),
+                    );
                 }
                 configs = picked;
             }
@@ -532,7 +816,10 @@ fn main() {
                 jobs,
                 rustc: rustc_argv,
                 configs,
-                limits: Limits { compile: Duration::from_secs(compile_timeout), run: Duration::from_secs(run_timeout) },
+                limits: Limits {
+                    compile: Duration::from_secs(compile_timeout),
+                    run: Duration::from_secs(run_timeout),
+                },
                 max_findings,
                 minimize_budget,
                 fail_on_known,
@@ -547,7 +834,16 @@ fn main() {
                 _ => {
                     let dir = dir_arg.unwrap_or_else(|| die("verify needs --dir"));
                     let report = opts.out.clone();
-                    fuzz::verify(&opts, &dir, &report, if toolchain_name == "unknown" { "" } else { &toolchain_name })
+                    fuzz::verify(
+                        &opts,
+                        &dir,
+                        &report,
+                        if toolchain_name == "unknown" {
+                            ""
+                        } else {
+                            &toolchain_name
+                        },
+                    )
                 }
             };
             std::process::exit(code);

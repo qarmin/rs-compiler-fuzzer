@@ -1,11 +1,13 @@
 //! The orchestrator: generate batches, compile them with many configurations, compare, and
 //! shrink any divergence down to the few cases responsible.
 
-use log::{info, warn};
-use crate::batch::{assemble, Assembled, Case};
+use crate::batch::{Assembled, Case, assemble};
 use crate::rng::Rng;
-use crate::runner::{crash_signature, build_and_run, check_only, par_map, rustc_cmd, Config, Limits, Outcome};
-use crate::strategies::{Strategy, ALL};
+use crate::runner::{
+    Config, Limits, Outcome, build_and_run, check_only, crash_signature, par_map, rustc_cmd,
+};
+use crate::strategies::{ALL, Strategy};
+use log::{info, warn};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -44,7 +46,9 @@ pub struct Opts {
 fn cpu_level() -> u8 {
     #[cfg(target_arch = "x86_64")]
     {
-        let v2 = is_x86_feature_detected!("sse4.2") && is_x86_feature_detected!("popcnt") && is_x86_feature_detected!("ssse3");
+        let v2 = is_x86_feature_detected!("sse4.2")
+            && is_x86_feature_detected!("popcnt")
+            && is_x86_feature_detected!("ssse3");
         let v3 = v2
             && is_x86_feature_detected!("avx2")
             && is_x86_feature_detected!("bmi1")
@@ -58,7 +62,15 @@ fn cpu_level() -> u8 {
             && is_x86_feature_detected!("avx512cd")
             && is_x86_feature_detected!("avx512dq")
             && is_x86_feature_detected!("avx512vl");
-        return if v4 { 4 } else if v3 { 3 } else if v2 { 2 } else { 1 };
+        return if v4 {
+            4
+        } else if v3 {
+            3
+        } else if v2 {
+            2
+        } else {
+            1
+        };
     }
     #[allow(unreachable_code)]
     1
@@ -81,8 +93,14 @@ pub fn default_configs(nightly: bool) -> Vec<Config> {
         Config::new("O3", "-C opt-level=3"),
         Config::new("Os", "-C opt-level=s"),
         Config::new("Oz", "-C opt-level=z"),
-        Config::new("O1-checks", "-C opt-level=1 -C overflow-checks=on -C debug-assertions=on"),
-        Config::new("O3-checks", "-C opt-level=3 -C overflow-checks=on -C debug-assertions=on"),
+        Config::new(
+            "O1-checks",
+            "-C opt-level=1 -C overflow-checks=on -C debug-assertions=on",
+        ),
+        Config::new(
+            "O3-checks",
+            "-C opt-level=3 -C overflow-checks=on -C debug-assertions=on",
+        ),
         Config::new("O2-native", "-C opt-level=2 -C target-cpu=native"),
         Config::new("O3-cgu256", "-C opt-level=3 -C codegen-units=256"),
         Config::new("O3-fastisel", "-C opt-level=3 -C llvm-args=-fast-isel"),
@@ -90,13 +108,22 @@ pub fn default_configs(nightly: bool) -> Vec<Config> {
     ];
     let level = cpu_level();
     if level >= 2 {
-        v.push(Config::new("O3-v2", "-C opt-level=3 -C target-cpu=x86-64-v2"));
+        v.push(Config::new(
+            "O3-v2",
+            "-C opt-level=3 -C target-cpu=x86-64-v2",
+        ));
     }
     if level >= 3 {
-        v.push(Config::new("O3-v3", "-C opt-level=3 -C target-cpu=x86-64-v3"));
+        v.push(Config::new(
+            "O3-v3",
+            "-C opt-level=3 -C target-cpu=x86-64-v3",
+        ));
     }
     if level >= 4 {
-        v.push(Config::new("O3-v4", "-C opt-level=3 -C target-cpu=x86-64-v4"));
+        v.push(Config::new(
+            "O3-v4",
+            "-C opt-level=3 -C target-cpu=x86-64-v4",
+        ));
     }
     // the slow builds (one codegen unit, LTO) only with `--lto`: they dominate the compile time of a job
     if LTO.load(std::sync::atomic::Ordering::Relaxed) {
@@ -104,22 +131,40 @@ pub fn default_configs(nightly: bool) -> Vec<Config> {
         v.push(Config::new("O3-cgu1", "-C opt-level=3 -C codegen-units=1").slow());
         v.push(Config::new("O3-lto-thin", "-C opt-level=3 -C lto=thin").slow());
         // rust-lang/rust#164536: thin LTO together with overflow checks broke a round trip
-        v.push(Config::new("O3-lto-thin-checks", "-C opt-level=3 -C lto=thin -C overflow-checks=on -C debug-assertions=on").slow());
+        v.push(
+            Config::new(
+                "O3-lto-thin-checks",
+                "-C opt-level=3 -C lto=thin -C overflow-checks=on -C debug-assertions=on",
+            )
+            .slow(),
+        );
         v.push(Config::new("O3-lto-fat", "-C opt-level=3 -C lto=fat -C codegen-units=1").slow());
     }
     if nightly {
         v.push(Config::new("O3-mir0", "-C opt-level=3 -Z mir-opt-level=0"));
         v.push(Config::new("O3-mir3", "-C opt-level=3 -Z mir-opt-level=3"));
         v.push(Config::new("O0-mir3", "-C opt-level=0 -Z mir-opt-level=3"));
-        v.push(Config::new("O2-validate-mir", "-C opt-level=2 -Z validate-mir"));
+        v.push(Config::new(
+            "O2-validate-mir",
+            "-C opt-level=2 -Z validate-mir",
+        ));
         v.push(Config::new("O2-inline-mir", "-C opt-level=2 -Z inline-mir=yes -Z inline-mir-threshold=300 -Z inline-mir-hint-threshold=300"));
-        v.push(Config::new("O1-randlayout", "-C opt-level=1 -Z randomize-layout"));
+        v.push(Config::new(
+            "O1-randlayout",
+            "-C opt-level=1 -Z randomize-layout",
+        ));
         // MIR passes that are off by default / only at high mir-opt-levels are a rich source of miscompilations
         // (DestinationPropagation, DataflowConstProp, JumpThreading, EarlyOtherwiseBranch, GVN...). With
         // opt-level=0 LLVM does not optimise, so a difference there is the MIR passes' doing.
         let passes = "+DestinationPropagation,+DataflowConstProp,+EarlyOtherwiseBranch,+JumpThreading,+GVN,+ReferencePropagation,+MatchBranchSimplification,+ScalarReplacementOfAggregates,+CopyProp,+Inline";
-        v.push(Config::new("O0-mir-all", &format!("-C opt-level=0 -Z mir-opt-level=3 -Z mir-enable-passes={passes}")));
-        v.push(Config::new("O1-mir-all", &format!("-C opt-level=1 -Z mir-opt-level=3 -Z mir-enable-passes={passes}")));
+        v.push(Config::new(
+            "O0-mir-all",
+            &format!("-C opt-level=0 -Z mir-opt-level=3 -Z mir-enable-passes={passes}"),
+        ));
+        v.push(Config::new(
+            "O1-mir-all",
+            &format!("-C opt-level=1 -Z mir-opt-level=3 -Z mir-enable-passes={passes}"),
+        ));
     }
     v
 }
@@ -138,7 +183,10 @@ pub fn i686_configs(nightly: bool) -> Vec<Config> {
         c("i686-O3-cgu16", "-C opt-level=3 -C codegen-units=16"),
         c("i686-Os", "-C opt-level=s"),
         c("i686-Oz", "-C opt-level=z"),
-        c("i686-O3-checks", "-C opt-level=3 -C overflow-checks=on -C debug-assertions=on"),
+        c(
+            "i686-O3-checks",
+            "-C opt-level=3 -C overflow-checks=on -C debug-assertions=on",
+        ),
         c("i686-O3-fastisel", "-C opt-level=3 -C llvm-args=-fast-isel"),
     ];
     if nightly {
@@ -185,7 +233,12 @@ pub fn generate_batch(s: &Strategy, batch_seed: u64, target_lines: usize) -> Vec
         let seed = Rng::mix(batch_seed, idx as u64);
         let body = (s.generate)(&mut Rng::new(seed));
         lines += body.lines().count() + 3;
-        cases.push(Case { id: idx, strategy: s.name, seed, body });
+        cases.push(Case {
+            id: idx,
+            strategy: s.name,
+            seed,
+            body,
+        });
         idx += 1;
     }
     cases
@@ -201,7 +254,10 @@ pub fn blamed_cases(stderr: &str, a: &Assembled, work: Option<&Path>) -> BTreeSe
             None => continue,
         };
         // only our own file: library/macro-expansion spans carry other paths (and unrelated line numbers)
-        if rest.contains("/rustc/") || rest.contains(".rustup") || work.is_some_and(|w| !rest.contains(&*w.to_string_lossy())) {
+        if rest.contains("/rustc/")
+            || rest.contains(".rustup")
+            || work.is_some_and(|w| !rest.contains(&*w.to_string_lossy()))
+        {
             continue;
         }
         let mut parts = rest.rsplitn(3, ':');
@@ -232,24 +288,43 @@ fn parse_lines(stdout: &str) -> BTreeMap<usize, String> {
 /// Strategies tag snippets that are known to trigger an open upstream bug with
 /// `// known-bug: <owner/repo#N ...>`; findings made only of such cases are filed under `known/`.
 fn known_bug(body: &str) -> Option<String> {
-    let mut all: Vec<&str> = body.lines().filter_map(|l| l.split("// known-bug:").nth(1)).map(str::trim).collect();
-    all.extend(KNOWN_CODE_PATTERNS.iter().filter(|(needle, _)| body.contains(needle)).map(|(_, refs)| *refs));
-    if all.is_empty() { None } else { Some(all.join(" ")) }
+    let mut all: Vec<&str> = body
+        .lines()
+        .filter_map(|l| l.split("// known-bug:").nth(1))
+        .map(str::trim)
+        .collect();
+    all.extend(
+        KNOWN_CODE_PATTERNS
+            .iter()
+            .filter(|(needle, _)| body.contains(needle))
+            .map(|(_, refs)| *refs),
+    );
+    if all.is_empty() {
+        None
+    } else {
+        Some(all.join(" "))
+    }
 }
 
 /// Code that is not tagged by the generator but triggers an open upstream miscompilation: 25 of 26 reduced stack-coloring
 /// findings contain `abs_diff` (a regression since 1.99.0), which made arith/shapes report a "new" bug every night.
-const KNOWN_CODE_PATTERNS: &[(&str, &str)] = &[(".abs_diff(", "rust-lang/rust#164825 (LLVM stack-coloring merges stack slots, regression since 1.99.0)")];
+const KNOWN_CODE_PATTERNS: &[(&str, &str)] = &[(
+    ".abs_diff(",
+    "rust-lang/rust#164825 (LLVM stack-coloring merges stack slots, regression since 1.99.0)",
+)];
 
 const KNOWN_BUGS: &str = include_str!("../known-bugs.txt");
 
 /// Comment of the known-bugs.txt entry whose pattern occurs in this crash signature.
 /// File format: `<substring of the signature>  # <comment with owner/repo#N references>`.
 fn known_signature(sig: &str) -> Option<String> {
-    KNOWN_BUGS.lines().filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#')).find_map(|l| {
-        let (pat, comment) = l.split_once(" # ").unwrap_or((l, ""));
-        (sig.contains(pat.trim())).then(|| comment.trim().to_string())
-    })
+    KNOWN_BUGS
+        .lines()
+        .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
+        .find_map(|l| {
+            let (pat, comment) = l.split_once(" # ").unwrap_or((l, ""));
+            (sig.contains(pat.trim())).then(|| comment.trim().to_string())
+        })
 }
 
 /// `owner/repo#123` references in a text, as (repo, number).
@@ -260,8 +335,13 @@ fn issue_refs(text: &str) -> Vec<(String, u64)> {
         if c != b'#' {
             continue;
         }
-        let digits: String = text[i + 1..].chars().take_while(|c| c.is_ascii_digit()).collect();
-        let start = text[..i].rfind(|c: char| !(c.is_ascii_alphanumeric() || "-_./".contains(c))).map_or(0, |p| p + 1);
+        let digits: String = text[i + 1..]
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        let start = text[..i]
+            .rfind(|c: char| !(c.is_ascii_alphanumeric() || "-_./".contains(c)))
+            .map_or(0, |p| p + 1);
         let repo = &text[start..i];
         if !digits.is_empty() && repo.contains('/') {
             out.push((repo.to_string(), digits.parse().unwrap_or(0)));
@@ -296,19 +376,26 @@ enum Class {
 
 fn append_config(dir: &Path, cfg: &str) {
     use std::io::Write;
-    if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(dir.join("report.md")) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .append(true)
+        .open(dir.join("report.md"))
+    {
         let _ = writeln!(f, "\n- also diverges from the baseline under: `{cfg}`");
     }
 }
 
 fn now_secs() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 impl Fuzzer<'_> {
     fn path(&self, suffix: &str) -> PathBuf {
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        self.work.join(format!("t{}_{}{}", std::process::id(), n, suffix))
+        self.work
+            .join(format!("t{}_{}{}", std::process::id(), n, suffix))
     }
 
     fn eval(&self, a: &Assembled, cfg: &Config) -> Outcome {
@@ -333,15 +420,34 @@ impl Fuzzer<'_> {
         }
     }
 
-    fn minimize(&self, all: &[Case], base: &Config, bad: &Config, base_out: &Outcome, bad_out: &Outcome, deadline: Instant) -> Vec<Case> {
+    fn minimize(
+        &self,
+        all: &[Case],
+        base: &Config,
+        bad: &Config,
+        base_out: &Outcome,
+        bad_out: &Outcome,
+        deadline: Instant,
+    ) -> Vec<Case> {
         // Shortcut: stdout lines identify the diverging cases directly.
         let mut cur: Vec<Case> = all.to_vec();
-        if let (Outcome::Ran { stdout: x, .. }, Outcome::Ran { stdout: y, .. }) = (base_out, bad_out) {
+        if let (Outcome::Ran { stdout: x, .. }, Outcome::Ran { stdout: y, .. }) =
+            (base_out, bad_out)
+        {
             let (lx, ly) = (parse_lines(x), parse_lines(y));
-            let ids: BTreeSet<usize> =
-                lx.keys().chain(ly.keys()).copied().filter(|k| lx.get(k) != ly.get(k)).collect();
-            let sub: Vec<Case> = all.iter().filter(|c| ids.contains(&c.id)).cloned().collect();
-            if !sub.is_empty() && sub.len() < all.len() && self.diverges(&sub, base, bad).is_some() {
+            let ids: BTreeSet<usize> = lx
+                .keys()
+                .chain(ly.keys())
+                .copied()
+                .filter(|k| lx.get(k) != ly.get(k))
+                .collect();
+            let sub: Vec<Case> = all
+                .iter()
+                .filter(|c| ids.contains(&c.id))
+                .cloned()
+                .collect();
+            if !sub.is_empty() && sub.len() < all.len() && self.diverges(&sub, base, bad).is_some()
+            {
                 cur = sub;
             }
         }
@@ -377,26 +483,56 @@ impl Fuzzer<'_> {
         cur
     }
 
-    fn write_finding(&mut self, kind: &str, strategy: &str, cases: &[Case], batch_seed: u64, base: (&Config, &Outcome), bad: (&Config, &Outcome)) -> PathBuf {
+    fn write_finding(
+        &mut self,
+        kind: &str,
+        strategy: &str,
+        cases: &[Case],
+        batch_seed: u64,
+        base: (&Config, &Outcome),
+        bad: (&Config, &Outcome),
+    ) -> PathBuf {
         // Known when every case whose output line differs carries a `known-bug` marker (cases kept
         // only because the bug needs neighbours in the file do not have to), or when the crash
         // signature is listed in known-bugs.txt.
         let differing: BTreeSet<usize> = match (base.1, bad.1) {
             (Outcome::Ran { stdout: x, .. }, Outcome::Ran { stdout: y, .. }) => {
                 let (lx, ly) = (parse_lines(x), parse_lines(y));
-                lx.keys().chain(ly.keys()).copied().filter(|k| lx.get(k) != ly.get(k)).collect()
+                lx.keys()
+                    .chain(ly.keys())
+                    .copied()
+                    .filter(|k| lx.get(k) != ly.get(k))
+                    .collect()
             }
             _ => cases.iter().map(|c| c.id).collect(),
         };
-        let marker_of = |id: usize| cases.iter().find(|c| c.id == id).and_then(|c| known_bug(&c.body));
-        let class = if let Some(comment) = crash_signature(bad.1).and_then(|s| known_signature(&s)) {
+        let marker_of = |id: usize| {
+            cases
+                .iter()
+                .find(|c| c.id == id)
+                .and_then(|c| known_bug(&c.body))
+        };
+        let class = if let Some(comment) = crash_signature(bad.1).and_then(|s| known_signature(&s))
+        {
             let refs = issue_refs(&comment);
-            if refs.is_empty() { Class::Triaged(comment) } else { Class::Known(refs) }
+            if refs.is_empty() {
+                Class::Triaged(comment)
+            } else {
+                Class::Known(refs)
+            }
         } else if !differing.is_empty() && differing.iter().all(|&id| marker_of(id).is_some()) {
-            let mut refs: Vec<(String, u64)> = differing.iter().filter_map(|&id| marker_of(id)).flat_map(|m| issue_refs(&m)).collect();
+            let mut refs: Vec<(String, u64)> = differing
+                .iter()
+                .filter_map(|&id| marker_of(id))
+                .flat_map(|m| issue_refs(&m))
+                .collect();
             refs.sort();
             refs.dedup();
-            if refs.is_empty() { Class::Triaged("marked in the generator".into()) } else { Class::Known(refs) }
+            if refs.is_empty() {
+                Class::Triaged("marked in the generator".into())
+            } else {
+                Class::Known(refs)
+            }
         } else {
             Class::New
         };
@@ -415,56 +551,128 @@ impl Fuzzer<'_> {
             }
         };
         let suffix = match &class {
-            Class::Known(refs) => format!("__{}", refs.iter().map(issue_tag).collect::<Vec<_>>().join("+")),
+            Class::Known(refs) => format!(
+                "__{}",
+                refs.iter().map(issue_tag).collect::<Vec<_>>().join("+")
+            ),
             Class::Triaged(_) => "__unreported".to_string(),
             Class::New => String::new(),
         };
-        let dir = self.o.out.join(bucket).join(format!("{}_{}_{}_{}{suffix}", now_secs(), strategy, bad.0.name, n));
+        let dir = self.o.out.join(bucket).join(format!(
+            "{}_{}_{}_{}{suffix}",
+            now_secs(),
+            strategy,
+            bad.0.name,
+            n
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         let refs: Vec<&Case> = cases.iter().collect();
         let a = assemble(&refs);
         std::fs::write(dir.join("case.rs"), &a.source).unwrap();
         let mut r = String::new();
-        let _ = writeln!(r, "# {kind}: `{}` vs `{}` ({strategy})\n", base.0.name, bad.0.name);
+        let _ = writeln!(
+            r,
+            "# {kind}: `{}` vs `{}` ({strategy})\n",
+            base.0.name, bad.0.name
+        );
         match &class {
             Class::Known(refs) => {
-                let _ = writeln!(r, "**Matches already reported issue(s)** - not counted as a new finding:\n");
+                let _ = writeln!(
+                    r,
+                    "**Matches already reported issue(s)** - not counted as a new finding:\n"
+                );
                 for rf in refs {
                     let _ = writeln!(r, "- {}", issue_url(rf));
                 }
                 let _ = writeln!(r);
-                std::fs::write(dir.join("known-issues.txt"), refs.iter().map(|rf| issue_url(rf) + "\n").collect::<String>()).unwrap();
+                std::fs::write(
+                    dir.join("known-issues.txt"),
+                    refs.iter()
+                        .map(|rf| issue_url(rf) + "\n")
+                        .collect::<String>(),
+                )
+                .unwrap();
             }
             Class::Triaged(note) => {
-                let _ = writeln!(r, "**Understood but not reported upstream yet** ({note}) - not counted as a new finding.\n");
+                let _ = writeln!(
+                    r,
+                    "**Understood but not reported upstream yet** ({note}) - not counted as a new finding.\n"
+                );
             }
             Class::New => {}
         }
-        let _ = writeln!(r, "- cases kept after minimisation: {}", cases.iter().map(|c| format!("`case_{}` ({}, seed {})", c.id, c.strategy, c.seed)).collect::<Vec<_>>().join(", "));
+        let _ = writeln!(
+            r,
+            "- cases kept after minimisation: {}",
+            cases
+                .iter()
+                .map(|c| format!("`case_{}` ({}, seed {})", c.id, c.strategy, c.seed))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
         if cases.len() > 25 {
-            let _ = writeln!(r, "- **not minimised** ({} cases kept): the time budget ran out; rerun with `--batch-seed {batch_seed} --strategies {strategy}` and a larger `--minimize-secs`", cases.len());
+            let _ = writeln!(
+                r,
+                "- **not minimised** ({} cases kept): the time budget ran out; rerun with `--batch-seed {batch_seed} --strategies {strategy}` and a larger `--minimize-secs`",
+                cases.len()
+            );
         }
-        let _ = writeln!(r, "- batch seed: {batch_seed}, fuzzer seed: {}", self.o.seed);
-        let _ = writeln!(r, "- regenerate one case: `rs-compiler-fuzzer gen --strategy {strategy} --case-seed <seed>` (seed listed above)\n");
+        let _ = writeln!(
+            r,
+            "- batch seed: {batch_seed}, fuzzer seed: {}",
+            self.o.seed
+        );
+        let _ = writeln!(
+            r,
+            "- regenerate one case: `rs-compiler-fuzzer gen --strategy {strategy} --case-seed <seed>` (seed listed above)\n"
+        );
         let _ = writeln!(r, "## Toolchain\n```\n{}\n```\n", self.version.trim());
         for (cfg, out) in [base, bad] {
             let _ = writeln!(r, "## `{}`: {}\n", cfg.name, out.describe());
-            let line = format!("{} {}", crate::runner::shown_flags(&crate::runner::COMMON_FLAGS.iter().map(|s| s.to_string()).collect::<Vec<_>>()), cfg.flags.join(" "));
-            let _ = writeln!(r, "```\n{} case.rs {line}\n```", crate::runner::compiler_for(&line));
+            let line = format!(
+                "{} {}",
+                crate::runner::shown_flags(
+                    &crate::runner::COMMON_FLAGS
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect::<Vec<_>>()
+                ),
+                cfg.flags.join(" ")
+            );
+            let _ = writeln!(
+                r,
+                "```\n{} case.rs {line}\n```",
+                crate::runner::compiler_for(&line)
+            );
             match out {
                 Outcome::CompileFail(e) => {
-                    let _ = writeln!(r, "stderr (truncated):\n```\n{}\n```", e.chars().take(6000).collect::<String>());
+                    let _ = writeln!(
+                        r,
+                        "stderr (truncated):\n```\n{}\n```",
+                        e.chars().take(6000).collect::<String>()
+                    );
                 }
                 Outcome::Ran { stdout, stderr, .. } => {
-                    let _ = writeln!(r, "stdout:\n```\n{}\n```", stdout.lines().take(60).collect::<Vec<_>>().join("\n"));
+                    let _ = writeln!(
+                        r,
+                        "stdout:\n```\n{}\n```",
+                        stdout.lines().take(60).collect::<Vec<_>>().join("\n")
+                    );
                     if !stderr.trim().is_empty() {
-                        let _ = writeln!(r, "stderr:\n```\n{}\n```", stderr.chars().take(3000).collect::<String>());
+                        let _ = writeln!(
+                            r,
+                            "stderr:\n```\n{}\n```",
+                            stderr.chars().take(3000).collect::<String>()
+                        );
                     }
                 }
                 _ => {}
             }
         }
-        let _ = writeln!(r, "\nBefore reporting upstream: check the case is free of UB (e.g. run it under Miri) and shrink it by hand; the `*-checks` configs and `PANIC` lines can also indicate a generator bug rather than a compiler bug.");
+        let _ = writeln!(
+            r,
+            "\nBefore reporting upstream: check the case is free of UB (e.g. run it under Miri) and shrink it by hand; the `*-checks` configs and `PANIC` lines can also indicate a generator bug rather than a compiler bug."
+        );
         std::fs::write(dir.join("report.md"), r).unwrap();
         let meta = format!(
             "strategy={strategy}\nbase_name={}\nbase_flags={}\nbad_name={}\nbad_flags={}\nbatch_seed={batch_seed}\ntoolchain={}\n",
@@ -472,14 +680,27 @@ impl Fuzzer<'_> {
             base.0.flags.join(" "),
             bad.0.name,
             bad.0.flags.join(" "),
-            self.version.lines().find(|l| l.starts_with("release:")).unwrap_or("release: ?").trim_start_matches("release: ")
+            self.version
+                .lines()
+                .find(|l| l.starts_with("release:"))
+                .unwrap_or("release: ?")
+                .trim_start_matches("release: ")
         );
         std::fs::write(dir.join("repro.cfg"), meta).unwrap();
         if let Some(sig) = crash_signature(bad.1) {
             std::fs::write(dir.join("signature.txt"), sig).unwrap();
         }
-        let tag = match &class { Class::New => "!!", Class::Known(_) => "~~ (known)", Class::Triaged(_) => "~~ (unreported, triaged)" };
-        info!("{tag} {kind} `{}` vs `{}` -> {}", base.0.name, bad.0.name, dir.display());
+        let tag = match &class {
+            Class::New => "!!",
+            Class::Known(_) => "~~ (known)",
+            Class::Triaged(_) => "~~ (unreported, triaged)",
+        };
+        info!(
+            "{tag} {kind} `{}` vs `{}` -> {}",
+            base.0.name,
+            bad.0.name,
+            dir.display()
+        );
         dir
     }
 
@@ -501,7 +722,10 @@ impl Fuzzer<'_> {
             };
             let blamed = blamed_cases(&err, &a, Some(&self.work));
             if blamed.is_empty() {
-                info!("generator error not attributable to a case; aborting batch:\n{}", err.chars().take(1500).collect::<String>());
+                info!(
+                    "generator error not attributable to a case; aborting batch:\n{}",
+                    err.chars().take(1500).collect::<String>()
+                );
                 return;
             }
             for c in cases.iter().filter(|c| blamed.contains(&c.id)) {
@@ -519,18 +743,19 @@ impl Fuzzer<'_> {
             let refs: Vec<&Case> = cases.iter().collect();
             let a = assemble(&refs);
             let outs = par_map(&self.o.configs, self.o.jobs, |c| self.eval(&a, c));
-            if let Outcome::CompileFail(err) = &outs[0] {
-                if outs.iter().all(|o| o.key() == outs[0].key()) && dropped < 40 {
-                    let blamed = blamed_cases(err, &a, Some(&self.work));
-                    if !blamed.is_empty() {
-                        for c in cases.iter().filter(|c| blamed.contains(&c.id)) {
-                            self.save_generator_bug(s.name, c, err);
-                        }
-                        dropped += blamed.len();
-                        cases.retain(|c| !blamed.contains(&c.id));
-                        info!("late compile error: dropped cases {blamed:?} and recompiling");
-                        continue;
+            if let Outcome::CompileFail(err) = &outs[0]
+                && outs.iter().all(|o| o.key() == outs[0].key())
+                && dropped < 40
+            {
+                let blamed = blamed_cases(err, &a, Some(&self.work));
+                if !blamed.is_empty() {
+                    for c in cases.iter().filter(|c| blamed.contains(&c.id)) {
+                        self.save_generator_bug(s.name, c, err);
                     }
+                    dropped += blamed.len();
+                    cases.retain(|c| !blamed.contains(&c.id));
+                    info!("late compile error: dropped cases {blamed:?} and recompiling");
+                    continue;
                 }
             }
             break (a, outs);
@@ -539,7 +764,10 @@ impl Fuzzer<'_> {
         let keys: Vec<String> = outs.iter().map(Outcome::key).collect();
         // Baseline = first configuration that compiled and ran. If e.g. O0 crashes the compiler, the
         // others are still compared with each other and O0 is reported as a compile failure.
-        let b = outs.iter().position(|o| matches!(o, Outcome::Ran { .. })).unwrap_or(0);
+        let b = outs
+            .iter()
+            .position(|o| matches!(o, Outcome::Ran { .. }))
+            .unwrap_or(0);
         let diverging: Vec<usize> = (0..outs.len())
             .filter(|&i| i != b && keys[i] != keys[b])
             .filter(|&i| {
@@ -557,16 +785,36 @@ impl Fuzzer<'_> {
             dropped,
             t_check.as_secs_f32(),
             t0.elapsed().as_secs_f32(),
-            diverging.iter().map(|&i| self.o.configs[i].name.as_str()).collect::<Vec<_>>().join(",")
+            diverging
+                .iter()
+                .map(|&i| self.o.configs[i].name.as_str())
+                .collect::<Vec<_>>()
+                .join(",")
         );
         let _ = total_cases;
         let e = self.stats.entry(s.name.to_string()).or_default();
-        *e = (e.0 + 1, e.1 + cases.len(), e.2 + dropped, e.3 + lines, e.4 + t0.elapsed().as_secs_f32());
+        *e = (
+            e.0 + 1,
+            e.1 + cases.len(),
+            e.2 + dropped,
+            e.3 + lines,
+            e.4 + t0.elapsed().as_secs_f32(),
+        );
 
         if diverging.is_empty() {
             let all_same = keys.iter().all(|k| *k == keys[0]);
-            if all_same && (matches!(outs[0], Outcome::CompileFail(_) | Outcome::RunTimeout) || (self.o.timeouts_are_findings && matches!(outs[0], Outcome::CompileTimeout))) {
-                let _ = self.write_finding("uniform failure", s.name, &cases, batch_seed, (&self.o.configs[0], &outs[0]), (&self.o.configs[1], &outs[1]));
+            if all_same
+                && (matches!(outs[0], Outcome::CompileFail(_) | Outcome::RunTimeout)
+                    || (self.o.timeouts_are_findings && matches!(outs[0], Outcome::CompileTimeout)))
+            {
+                let _ = self.write_finding(
+                    "uniform failure",
+                    s.name,
+                    &cases,
+                    batch_seed,
+                    (&self.o.configs[0], &outs[0]),
+                    (&self.o.configs[1], &outs[1]),
+                );
             }
             return;
         }
@@ -578,22 +826,35 @@ impl Fuzzer<'_> {
                 return;
             }
             let (base, bad) = (&self.o.configs[b], &self.o.configs[i]);
-            if let Some(sig) = crash_signature(&outs[i]) {
-                if !self.seen_crashes.insert((bad.name.clone(), sig.clone())) {
-                    info!("(same crash as before under `{}`: {sig})", bad.name);
-                    continue;
-                }
+            if let Some(sig) = crash_signature(&outs[i])
+                && !self.seen_crashes.insert((bad.name.clone(), sig.clone()))
+            {
+                info!("(same crash as before under `{}`: {sig})", bad.name);
+                continue;
             }
-            if let (Outcome::Ran { stdout: x, .. }, Outcome::Ran { stdout: y, .. }) = (&outs[b], &outs[i]) {
+            if let (Outcome::Ran { stdout: x, .. }, Outcome::Ran { stdout: y, .. }) =
+                (&outs[b], &outs[i])
+            {
                 let (lx, ly) = (parse_lines(x), parse_lines(y));
-                let ids: BTreeSet<usize> = lx.keys().chain(ly.keys()).copied().filter(|k| lx.get(k) != ly.get(k)).collect();
-                if let Some((_, dir)) = handled.iter().find(|(h, _)| !ids.is_empty() && ids.is_subset(h)) {
+                let ids: BTreeSet<usize> = lx
+                    .keys()
+                    .chain(ly.keys())
+                    .copied()
+                    .filter(|k| lx.get(k) != ly.get(k))
+                    .collect();
+                if let Some((_, dir)) = handled
+                    .iter()
+                    .find(|(h, _)| !ids.is_empty() && ids.is_subset(h))
+                {
                     append_config(dir, &bad.name);
                     continue;
                 }
             }
             if self.diverges(&cases, base, bad).is_none() {
-                warn!("{} vs {} ({}): the divergence did not reproduce on a second run, skipped as flaky", base.name, bad.name, s.name);
+                warn!(
+                    "{} vs {} ({}): the divergence did not reproduce on a second run, skipped as flaky",
+                    base.name, bad.name, s.name
+                );
                 continue;
             }
             let far = Instant::now() + Duration::from_secs(self.o.minimize_secs);
@@ -605,10 +866,14 @@ impl Fuzzer<'_> {
                 continue;
             }
             // re-evaluate the minimised set to record what each side really did
-            let (bo, xo) = self.diverges(&min, base, bad).unwrap_or_else(|| (outs[b].clone(), outs[i].clone()));
+            let (bo, xo) = self
+                .diverges(&min, base, bad)
+                .unwrap_or_else(|| (outs[b].clone(), outs[i].clone()));
             let kind = match (&bo, &xo) {
                 (Outcome::Ran { .. }, Outcome::Ran { .. }) => "MISCOMPILE candidate",
-                (_, Outcome::CompileFail(_)) | (_, Outcome::CompileTimeout) => "compile failure/hang",
+                (_, Outcome::CompileFail(_)) | (_, Outcome::CompileTimeout) => {
+                    "compile failure/hang"
+                }
                 _ => "behaviour divergence",
             };
             let dir = self.write_finding(kind, s.name, &min, batch_seed, (base, &bo), (bad, &xo));
@@ -620,24 +885,59 @@ impl Fuzzer<'_> {
         let dir = self.o.out.join("generator-bugs");
         std::fs::create_dir_all(&dir).unwrap();
         let name = format!("{strategy}_{}", c.seed);
-        let text = format!("// strategy {strategy}, case seed {}\n// rustc said:\n{}\n{}", c.seed, err.lines().take(25).map(|l| format!("// {l}")).collect::<Vec<_>>().join("\n"), c.body);
+        let text = format!(
+            "// strategy {strategy}, case seed {}\n// rustc said:\n{}\n{}",
+            c.seed,
+            err.lines()
+                .take(25)
+                .map(|l| format!("// {l}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            c.body
+        );
         let _ = std::fs::write(dir.join(format!("{name}.rs")), text);
     }
 }
 
 pub fn run(o: &Opts) -> i32 {
     let version = rustc_version(&o.rustc);
-    info!("toolchain: {}", version.lines().find(|l| l.starts_with("release") || l.starts_with("rustc")).unwrap_or("?"));
-    info!("configs: {}", o.configs.iter().map(|c| c.name.as_str()).collect::<Vec<_>>().join(", "));
+    info!(
+        "toolchain: {}",
+        version
+            .lines()
+            .find(|l| l.starts_with("release") || l.starts_with("rustc"))
+            .unwrap_or("?")
+    );
+    info!(
+        "configs: {}",
+        o.configs
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
     let work = o.out.join("work");
     std::fs::create_dir_all(&work).unwrap();
-    let mut f = Fuzzer { o, version, work, findings: 0, known: 0, triaged: 0, hard_deadline: o.duration.map(|d| Instant::now() + d + Duration::from_secs(30 * 60)), seen_crashes: BTreeSet::new(), stats: Default::default() };
+    let mut f = Fuzzer {
+        o,
+        version,
+        work,
+        findings: 0,
+        known: 0,
+        triaged: 0,
+        hard_deadline: o
+            .duration
+            .map(|d| Instant::now() + d + Duration::from_secs(30 * 60)),
+        seen_crashes: BTreeSet::new(),
+        stats: Default::default(),
+    };
     let start = Instant::now();
     let mut round = 0u64;
     let mut max_batch = Duration::ZERO;
     let mut stop = false;
     loop {
-        if o.rounds.is_some_and(|r| round >= r) || o.duration.is_some_and(|d| start.elapsed() >= d) {
+        if o.rounds.is_some_and(|r| round >= r) || o.duration.is_some_and(|d| start.elapsed() >= d)
+        {
             break;
         }
         for (si, s) in o.strategies.iter().enumerate() {
@@ -645,17 +945,27 @@ pub fn run(o: &Opts) -> i32 {
                 break;
             }
             // Do not start a batch that would probably overrun the time budget.
-            if o.duration.is_some_and(|d| start.elapsed() + max_batch >= d) && max_batch > Duration::ZERO {
-                info!("time budget reached (longest batch so far {:.0}s)", max_batch.as_secs_f32());
+            if o.duration.is_some_and(|d| start.elapsed() + max_batch >= d)
+                && max_batch > Duration::ZERO
+            {
+                info!(
+                    "time budget reached (longest batch so far {:.0}s)",
+                    max_batch.as_secs_f32()
+                );
                 stop = true;
                 break;
             }
-            let batch_seed = o.batch_seed.unwrap_or_else(|| Rng::mix(o.seed, round * 1000 + si as u64));
+            let batch_seed = o
+                .batch_seed
+                .unwrap_or_else(|| Rng::mix(o.seed, round * 1000 + si as u64));
             let lines = o.target_lines.unwrap_or(s.lines) * o.scale / 100;
             let t0 = Instant::now();
             let cases = generate_batch(s, batch_seed, lines.max(200));
             f.process_batch(s, batch_seed, cases);
-            max_batch = max_batch.max(t0.elapsed().min(Duration::from_secs(o.limits.compile.as_secs() * 2)));
+            max_batch = max_batch.max(
+                t0.elapsed()
+                    .min(Duration::from_secs(o.limits.compile.as_secs() * 2)),
+            );
         }
         round += 1;
         if stop {
@@ -666,35 +976,79 @@ pub fn run(o: &Opts) -> i32 {
             break;
         }
     }
-    info!("done: {round} rounds in {:.0}s, {} new findings, {} matching known issues, {} triaged-unreported", start.elapsed().as_secs_f32(), f.findings, f.known, f.triaged);
+    info!(
+        "done: {round} rounds in {:.0}s, {} new findings, {} matching known issues, {} triaged-unreported",
+        start.elapsed().as_secs_f32(),
+        f.findings,
+        f.known,
+        f.triaged
+    );
     if !f.stats.is_empty() {
         // a strategy that loses many cases to compile errors wastes its batches: the generator needs fixing
         let mut table = String::from("strategy      batches   cases  dropped(invalid)  lines/s\n");
         for (name, (b, c, d, l, t)) in &f.stats {
-            let pct = if c + d > 0 { *d as f32 * 100.0 / (c + d) as f32 } else { 0.0 };
-            table += &format!("{name:<12} {b:>8} {c:>7} {d:>8} ({pct:>4.1}%) {:>8.0}{}\n", *l as f32 / t.max(0.1), if pct > 5.0 { "   <- generator produces too many invalid programs" } else { "" });
+            let pct = if c + d > 0 {
+                *d as f32 * 100.0 / (c + d) as f32
+            } else {
+                0.0
+            };
+            table += &format!(
+                "{name:<12} {b:>8} {c:>7} {d:>8} ({pct:>4.1}%) {:>8.0}{}\n",
+                *l as f32 / t.max(0.1),
+                if pct > 5.0 {
+                    "   <- generator produces too many invalid programs"
+                } else {
+                    ""
+                }
+            );
         }
         info!("generator statistics:\n{table}");
         if let Ok(path) = std::env::var("GITHUB_STEP_SUMMARY") {
             use std::io::Write as _;
-            if let Ok(mut fh) = std::fs::OpenOptions::new().append(true).create(true).open(path) {
+            if let Ok(mut fh) = std::fs::OpenOptions::new()
+                .append(true)
+                .create(true)
+                .open(path)
+            {
                 let _ = writeln!(fh, "\n```\n{table}```");
             }
         }
     }
     let _ = std::fs::remove_dir_all(&f.work);
-    if f.findings > 0 || (o.fail_on_known && f.known > 0) { 2 } else { 0 }
+    if f.findings > 0 || (o.fail_on_known && f.known > 0) {
+        2
+    } else {
+        0
+    }
 }
 
 /// Known miscompilations - prove the detector can fire at all. The bugs get fixed over time,
 /// so the check passes when at least one canary diverges between configurations.
 const CANARIES: &[(&str, &str)] = &[
-    ("rust-lang/rust#164297 (lto=fat)", include_str!("../canaries/case_164297.rs")),
-    ("rust-lang/rust#164295 (-O, LLVM 23)", include_str!("../canaries/case_164295.rs")),
-    ("rust-lang/rust#163311 (-O2/-O3)", include_str!("../canaries/case_163311.rs")),
-    ("rust-lang/rust#164667 (-O1, stack colouring)", include_str!("../canaries/case_164667.rs")),
-    ("rust-lang/rust#164137 (-O1, early-cse)", include_str!("../canaries/case_164137.rs")),
-    ("rust-lang/rust#164069 (-O1, GVN enum downcast, nightly only)", include_str!("../canaries/case_164069.rs")),
+    (
+        "rust-lang/rust#164297 (lto=fat)",
+        include_str!("../canaries/case_164297.rs"),
+    ),
+    (
+        "rust-lang/rust#164295 (-O, LLVM 23)",
+        include_str!("../canaries/case_164295.rs"),
+    ),
+    (
+        "rust-lang/rust#163311 (-O2/-O3)",
+        include_str!("../canaries/case_163311.rs"),
+    ),
+    (
+        "rust-lang/rust#164667 (-O1, stack colouring)",
+        include_str!("../canaries/case_164667.rs"),
+    ),
+    (
+        "rust-lang/rust#164137 (-O1, early-cse)",
+        include_str!("../canaries/case_164137.rs"),
+    ),
+    (
+        "rust-lang/rust#164069 (-O1, GVN enum downcast, nightly only)",
+        include_str!("../canaries/case_164069.rs"),
+    ),
 ];
 
 pub fn canary(o: &Opts) -> i32 {
@@ -710,8 +1064,21 @@ pub fn canary(o: &Opts) -> i32 {
             let bin = work.join(format!("canary_{}", c.name));
             let r = build_and_run(&o.rustc, &path, &bin, c, &o.limits);
             shown.push(match &r {
-                Outcome::Ran { stdout, signal, code, .. } => {
-                    format!("{}={}", c.name, if stdout.trim().is_empty() { format!("exit {code:?}/{signal:?}") } else { stdout.trim().to_string() })
+                Outcome::Ran {
+                    stdout,
+                    signal,
+                    code,
+                    ..
+                } => {
+                    format!(
+                        "{}={}",
+                        c.name,
+                        if stdout.trim().is_empty() {
+                            format!("exit {code:?}/{signal:?}")
+                        } else {
+                            stdout.trim().to_string()
+                        }
+                    )
                 }
                 other => format!("{}={}", c.name, other.describe()),
             });
@@ -719,14 +1086,23 @@ pub fn canary(o: &Opts) -> i32 {
         }
         let diverges = keys.iter().any(|k| *k != keys[0]);
         detected += diverges as usize;
-        info!("{} {name}: {}", if diverges { "DIVERGES" } else { "same    " }, shown.join(" "));
+        info!(
+            "{} {name}: {}",
+            if diverges { "DIVERGES" } else { "same    " },
+            shown.join(" ")
+        );
     }
     let _ = std::fs::remove_dir_all(&work);
     if detected > 0 {
-        info!("canary: detector works ({detected}/{} known bugs reproduce on this toolchain)", CANARIES.len());
+        info!(
+            "canary: detector works ({detected}/{} known bugs reproduce on this toolchain)",
+            CANARIES.len()
+        );
         0
     } else {
-        info!("canary: NO known bug reproduced - all fixed on this toolchain, or the detector is broken");
+        info!(
+            "canary: NO known bug reproduced - all fixed on this toolchain, or the detector is broken"
+        );
         1
     }
 }
@@ -735,9 +1111,22 @@ pub fn canary(o: &Opts) -> i32 {
 /// Prints `STILL <dir>` / `FIXED <dir>` / `SKIP <dir>` and writes `fixed.txt` into `report_dir`.
 pub fn verify(o: &Opts, root: &Path, report_dir: &Path, label: &str) -> i32 {
     let mut dirs: Vec<PathBuf> = match std::fs::read_dir(root) {
-        Ok(rd) => rd.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.join("case.rs").exists() && p.join("repro.cfg").exists() && !std::fs::read_to_string(p.join("repro.cfg")).unwrap_or_default().contains("mode=miri")).collect(),
+        Ok(rd) => rd
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| {
+                p.join("case.rs").exists()
+                    && p.join("repro.cfg").exists()
+                    && !std::fs::read_to_string(p.join("repro.cfg"))
+                        .unwrap_or_default()
+                        .contains("mode=miri")
+            })
+            .collect(),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            info!("verify: nothing stored yet ({} does not exist)", root.display());
+            info!(
+                "verify: nothing stored yet ({} does not exist)",
+                root.display()
+            );
             return 0;
         }
         Err(e) => {
@@ -753,22 +1142,50 @@ pub fn verify(o: &Opts, root: &Path, report_dir: &Path, label: &str) -> i32 {
     let mut removed = 0usize;
     let jobs = o.jobs;
     let results = par_map(&dirs, jobs, |d| {
-        let meta: std::collections::HashMap<String, String> = std::fs::read_to_string(d.join("repro.cfg"))
-            .unwrap_or_default()
-            .lines()
-            .filter_map(|l| l.split_once('=').map(|(k, v)| (k.to_string(), v.to_string())))
-            .collect();
+        let meta: std::collections::HashMap<String, String> =
+            std::fs::read_to_string(d.join("repro.cfg"))
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|l| {
+                    l.split_once('=')
+                        .map(|(k, v)| (k.to_string(), v.to_string()))
+                })
+                .collect();
         let get = |k: &str| meta.get(k).cloned().unwrap_or_default();
         let base = Config::new(&get("base_name"), &get("base_flags"));
         let bad = Config::new(&get("bad_name"), &get("bad_flags"));
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let src = if d.join("reduced.rs").exists() { d.join("reduced.rs") } else { d.join("case.rs") };
+        let src = if d.join("reduced.rs").exists() {
+            d.join("reduced.rs")
+        } else {
+            d.join("case.rs")
+        };
         let r: Vec<Outcome> = [&base, &bad]
             .iter()
             .enumerate()
-            .map(|(i, c)| build_and_run(&o.rustc, &src, &work.join(format!("v{}_{n}_{i}", std::process::id())), c, &o.limits))
+            .map(|(i, c)| {
+                build_and_run(
+                    &o.rustc,
+                    &src,
+                    &work.join(format!("v{}_{n}_{i}", std::process::id())),
+                    c,
+                    &o.limits,
+                )
+            })
             .collect();
-        (crate::runner::differs_src(&r[0], &r[1], &base, &bad, &std::fs::read_to_string(&src).unwrap_or_default()), r[0].key() != r[1].key(), r[0].describe(), r[1].describe(), get("bad_name"))
+        (
+            crate::runner::differs_src(
+                &r[0],
+                &r[1],
+                &base,
+                &bad,
+                &std::fs::read_to_string(&src).unwrap_or_default(),
+            ),
+            r[0].key() != r[1].key(),
+            r[0].describe(),
+            r[1].describe(),
+            get("bad_name"),
+        )
     });
     for (d, (diverges, raw_differs, b, x, badname)) in dirs.iter().zip(results) {
         // the outputs differ, but only the way overflow checks / debug assertions make them differ: not a bug, nothing to wait for
@@ -785,8 +1202,15 @@ pub fn verify(o: &Opts, root: &Path, report_dir: &Path, label: &str) -> i32 {
         if !label.is_empty() {
             let path = d.join("status.cfg");
             let mut st = crate::triage::read_cfg(&path);
-            st.insert(format!("repro.{label}"), if diverges { "yes".into() } else { "no".into() });
-            let date = std::process::Command::new("date").args(["-u", "+%F"]).output().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
+            st.insert(
+                format!("repro.{label}"),
+                if diverges { "yes".into() } else { "no".into() },
+            );
+            let date = std::process::Command::new("date")
+                .args(["-u", "+%F"])
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .unwrap_or_default();
             st.insert("last_verified".into(), date.clone());
             if label == "nightly" {
                 // the newest nightly is the reference: a bug that is gone there is gone (two checks in a row, so one odd run
@@ -798,17 +1222,43 @@ pub fn verify(o: &Opts, root: &Path, report_dir: &Path, label: &str) -> i32 {
                         st.insert("state_changed".into(), date.clone());
                     }
                 } else {
-                    let n: u32 = st.get("nightly_misses").and_then(|v| v.parse().ok()).unwrap_or(0) + 1;
+                    let n: u32 = st
+                        .get("nightly_misses")
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(0)
+                        + 1;
                     st.insert("nightly_misses".into(), n.to_string());
                     // the newest nightly is the reference: one miss moves the finding out of `findings/` (it goes to `old_findings/`)
                     if n >= 1 {
-                        let ver = std::process::Command::new(&o.rustc[0]).args(&o.rustc[1..]).arg("-V").output().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
+                        let ver = std::process::Command::new(&o.rustc[0])
+                            .args(&o.rustc[1..])
+                            .arg("-V")
+                            .output()
+                            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                            .unwrap_or_default();
                         if let Some(pkg) = root.parent() {
                             // kept apart from the findings that still reproduce (`old_findings/`, with the reason in `state`)
                             crate::triage::write_cfg(&path, &st);
-                            crate::pack::archive(pkg, &name, if explained { "not-a-bug (not a compiler difference: overflow checks, debug assertions or the unspecified sign of a zero from float min/max)" } else { "fixed" }, &date, &ver);
+                            crate::pack::archive(
+                                pkg,
+                                &name,
+                                if explained {
+                                    "not-a-bug (not a compiler difference: overflow checks, debug assertions or the unspecified sign of a zero from float min/max)"
+                                } else {
+                                    "fixed"
+                                },
+                                &date,
+                                &ver,
+                            );
                         }
-                        info!("REMOVED {name}: {}", if explained { "the difference is explained by overflow checks / debug assertions / the sign of a zero from float min/max (not a compiler bug)" } else { "no longer reproduces on the newest nightly: moved to old_findings/" });
+                        info!(
+                            "REMOVED {name}: {}",
+                            if explained {
+                                "the difference is explained by overflow checks / debug assertions / the sign of a zero from float min/max (not a compiler bug)"
+                            } else {
+                                "no longer reproduces on the newest nightly: moved to old_findings/"
+                            }
+                        );
                         removed += 1;
                         continue;
                     }
@@ -823,7 +1273,11 @@ pub fn verify(o: &Opts, root: &Path, report_dir: &Path, label: &str) -> i32 {
     }
     let _ = std::fs::write(report_dir.join("fixed.txt"), fixed.join("\n"));
     let _ = std::fs::write(report_dir.join("still.txt"), still.join("\n"));
-    info!("verify: {} still reproduce, {} fixed/not reproducing, {removed} removed from the package", still.len(), fixed.len());
+    info!(
+        "verify: {} still reproduce, {} fixed/not reproducing, {removed} removed from the package",
+        still.len(),
+        fixed.len()
+    );
     let _ = std::fs::remove_dir_all(&work);
     0
 }
@@ -832,7 +1286,10 @@ pub fn strategies_by_name(names: &str) -> Result<Vec<&'static Strategy>, String>
     if names == "all" {
         return Ok(ALL.iter().collect());
     }
-    names.split(',').map(|n| crate::strategies::find(n.trim()).ok_or_else(|| format!("unknown strategy `{n}`"))).collect()
+    names
+        .split(',')
+        .map(|n| crate::strategies::find(n.trim()).ok_or_else(|| format!("unknown strategy `{n}`")))
+        .collect()
 }
 
 pub fn ensure_dir(p: &Path) {
@@ -846,7 +1303,10 @@ mod tests {
 
     #[test]
     fn abs_diff_cases_count_as_known() {
-        assert!(known_bug("let a = x.abs_diff(y);").is_some_and(|m| m.contains("rust-lang/rust#164825")));
+        assert!(
+            known_bug("let a = x.abs_diff(y);")
+                .is_some_and(|m| m.contains("rust-lang/rust#164825"))
+        );
         assert!(known_bug("let a = x.wrapping_add(y);").is_none());
     }
 
@@ -856,7 +1316,11 @@ mod tests {
             let a = generate_batch(s, 99, 800);
             let b = generate_batch(s, 99, 800);
             assert_eq!(a.len(), b.len());
-            assert!(a.iter().zip(&b).all(|(x, y)| x.body == y.body), "{} is not deterministic", s.name);
+            assert!(
+                a.iter().zip(&b).all(|(x, y)| x.body == y.body),
+                "{} is not deterministic",
+                s.name
+            );
         }
     }
 
@@ -874,9 +1338,17 @@ mod tests {
                 let a = assemble(&refs);
                 let src = dir.join(format!("{}_{seed}.rs", s.name));
                 std::fs::write(&src, &a.source).unwrap();
-                if let Err(e) = check_only(&["rustc".to_string()], &src, &dir, Duration::from_secs(300)) {
+                if let Err(e) =
+                    check_only(&["rustc".to_string()], &src, &dir, Duration::from_secs(300))
+                {
                     let blamed = blamed_cases(&e, &a, None);
-                    panic!("strategy {} seed {} produced invalid code (cases {:?}):\n{}", s.name, 1000 + seed, blamed, e.chars().take(3000).collect::<String>());
+                    panic!(
+                        "strategy {} seed {} produced invalid code (cases {:?}):\n{}",
+                        s.name,
+                        1000 + seed,
+                        blamed,
+                        e.chars().take(3000).collect::<String>()
+                    );
                 }
             }
         }

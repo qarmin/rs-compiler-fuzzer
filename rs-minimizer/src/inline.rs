@@ -52,7 +52,24 @@ struct Variant {
 /// Bytes a function may add to the program by being pasted at all but one of its call sites.
 const MAX_GROWTH: usize = 50_000;
 
-const VARIANTS: [Variant; 4] = [Variant { annotate: false, reborrow: false }, Variant { annotate: false, reborrow: true }, Variant { annotate: true, reborrow: false }, Variant { annotate: true, reborrow: true }];
+const VARIANTS: [Variant; 4] = [
+    Variant {
+        annotate: false,
+        reborrow: false,
+    },
+    Variant {
+        annotate: false,
+        reborrow: true,
+    },
+    Variant {
+        annotate: true,
+        reborrow: false,
+    },
+    Variant {
+        annotate: true,
+        reborrow: true,
+    },
+];
 
 fn skip_string(b: &[u8], mut i: usize) -> usize {
     i += 1;
@@ -81,7 +98,10 @@ pub(crate) fn code_only(text: &str) -> String {
             i += 1;
             continue;
         };
-        out[i + 1..end].iter_mut().filter(|c| **c != b'\n').for_each(|c| *c = b' ');
+        out[i + 1..end]
+            .iter_mut()
+            .filter(|c| **c != b'\n')
+            .for_each(|c| *c = b' ');
         i = end + 1;
     }
     String::from_utf8(out).unwrap_or_else(|_| text.to_string())
@@ -89,7 +109,9 @@ pub(crate) fn code_only(text: &str) -> String {
 
 pub(crate) fn has_word(text: &str, word: &str) -> bool {
     let b = text.as_bytes();
-    text.match_indices(word).any(|(i, _)| (i == 0 || !is_ident(b[i - 1])) && b.get(i + word.len()).is_none_or(|&c| !is_ident(c)))
+    text.match_indices(word).any(|(i, _)| {
+        (i == 0 || !is_ident(b[i - 1])) && b.get(i + word.len()).is_none_or(|&c| !is_ident(c))
+    })
 }
 
 pub(crate) fn replace_word(text: &str, word: &str, with: &str) -> String {
@@ -101,7 +123,10 @@ pub(crate) fn replace_word(text: &str, word: &str, with: &str) -> String {
             let e = skip_string(b, i).min(b.len() - 1);
             out.push_str(&text[i..=e]);
             i = e + 1;
-        } else if text[i..].starts_with(word) && (i == 0 || !is_ident(b[i - 1])) && b.get(i + word.len()).is_none_or(|&c| !is_ident(c)) {
+        } else if text[i..].starts_with(word)
+            && (i == 0 || !is_ident(b[i - 1]))
+            && b.get(i + word.len()).is_none_or(|&c| !is_ident(c))
+        {
             out.push_str(with);
             i += word.len();
         } else {
@@ -135,14 +160,20 @@ pub(crate) fn generic_names(src: &str, open: usize) -> (Vec<String>, usize) {
     let mut names = Vec::new();
     let mut d = 0i32;
     let mut start = 0;
-    for (i, c) in inner.char_indices().chain(std::iter::once((inner.len(), ','))) {
+    for (i, c) in inner
+        .char_indices()
+        .chain(std::iter::once((inner.len(), ',')))
+    {
         match c {
             '<' | '(' | '[' => d += 1,
             '>' | ')' | ']' => d -= 1,
             ',' if d == 0 => {
                 let part = inner[start..i].trim();
                 let part = part.strip_prefix("const ").unwrap_or(part);
-                let name: String = part.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+                let name: String = part
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
                 if !name.is_empty() && !part.starts_with('\'') {
                     names.push(name);
                 }
@@ -212,21 +243,39 @@ fn parse_fn(src: &str, items: &[Item], item: &Item, strict: bool) -> Option<FnDe
             return None;
         }
         let lead = src[s..e].len() - src[s..e].trim_start().len();
-        let pos = s + lead + text.find(ty).map(|_| pat.rfind(ident).unwrap_or(0)).unwrap_or(0);
-        params.push(Param { name: ident.to_string(), pos, mutable, ty: ty.trim().to_string() });
+        let pos = s
+            + lead
+            + text
+                .find(ty)
+                .map(|_| pat.rfind(ident).unwrap_or(0))
+                .unwrap_or(0);
+        params.push(Param {
+            name: ident.to_string(),
+            pos,
+            mutable,
+            ty: ty.trim().to_string(),
+        });
     }
     let body = src[item.header_end + 1..item.end - 1].to_string();
     if strict {
         let code = code_only(&body);
-        if ["return", "async", "await", "yield"].iter().any(|w| has_word(&code, w)) {
+        if ["return", "async", "await", "yield"]
+            .iter()
+            .any(|w| has_word(&code, w))
+        {
             return None;
         }
-        let calls_itself = code.match_indices(&format!("{name}(")).any(|(i, _)| i == 0 || !is_ident(code.as_bytes()[i - 1]));
+        let calls_itself = code
+            .match_indices(&format!("{name}("))
+            .any(|(i, _)| i == 0 || !is_ident(code.as_bytes()[i - 1]));
         if code.contains('?') || calls_itself {
             return None;
         }
     }
-    let parent = items.iter().filter(|p| p.contains(item)).max_by_key(|p| p.start);
+    let parent = items
+        .iter()
+        .filter(|p| p.contains(item))
+        .max_by_key(|p| p.start);
     let (mut self_ty, mut in_trait, mut in_impl) = (None, false, false);
     if let Some(p) = parent {
         let head = src[p.start..p.header_end].trim();
@@ -234,7 +283,11 @@ fn parse_fn(src: &str, items: &[Item], item: &Item, strict: bool) -> Option<FnDe
             in_trait = true;
         } else if p.kw == "impl" {
             in_impl = true;
-            let after = head.find("impl").map(|x| &head[x + 4..]).unwrap_or("").trim_start();
+            let after = head
+                .find("impl")
+                .map(|x| &head[x + 4..])
+                .unwrap_or("")
+                .trim_start();
             let generic_impl = after.starts_with('<');
             let (ty, is_trait_impl) = match after.rsplit_once(" for ") {
                 Some((_, ty)) => (ty, true),
@@ -249,18 +302,36 @@ fn parse_fn(src: &str, items: &[Item], item: &Item, strict: bool) -> Option<FnDe
             return None;
         }
     }
-    Some(FnDef { name, name_pos: ns, item: item.clone(), recv, params, generics, body, unsafe_fn, self_ty, in_trait, in_impl })
+    Some(FnDef {
+        name,
+        name_pos: ns,
+        item: item.clone(),
+        recv,
+        params,
+        generics,
+        body,
+        unsafe_fn,
+        self_ty,
+        in_trait,
+        in_impl,
+    })
 }
 
 pub(crate) fn defs_of(src: &str) -> Vec<FnDef> {
     let items = item_ranges(src);
-    items.iter().filter_map(|i| parse_fn(src, &items, i, true)).collect()
+    items
+        .iter()
+        .filter_map(|i| parse_fn(src, &items, i, true))
+        .collect()
 }
 
 /// Like `defs_of`, for passes that edit signatures and call sites but never paste a body.
 pub(crate) fn all_defs_of(src: &str) -> Vec<FnDef> {
     let items = item_ranges(src);
-    items.iter().filter_map(|i| parse_fn(src, &items, i, false)).collect()
+    items
+        .iter()
+        .filter_map(|i| parse_fn(src, &items, i, false))
+        .collect()
 }
 
 #[derive(Clone)]
@@ -283,7 +354,10 @@ pub(crate) fn find_sites(src: &str, def: &FnDef) -> Vec<Site> {
             i = skip_string(b, i) + 1;
             continue;
         }
-        if !(src[i..].starts_with(pat) && (i == 0 || !is_ident(b[i - 1])) && b.get(i + pat.len()).is_none_or(|&c| !is_ident(c))) {
+        if !(src[i..].starts_with(pat)
+            && (i == 0 || !is_ident(b[i - 1]))
+            && b.get(i + pat.len()).is_none_or(|&c| !is_ident(c)))
+        {
             i += 1;
             continue;
         }
@@ -293,13 +367,20 @@ pub(crate) fn find_sites(src: &str, def: &FnDef) -> Vec<Site> {
         if b.get(open) != Some(&b'(') || (name_at >= def.item.start && name_at < def.item.end) {
             continue;
         }
-        let Some(close) = matching(b, open) else { continue };
+        let Some(close) = matching(b, open) else {
+            continue;
+        };
         let before = src[..name_at].trim_end();
-        if before.ends_with("fn") && !before[..before.len() - 2].ends_with(|c: char| is_ident(c as u8)) {
+        if before.ends_with("fn")
+            && !before[..before.len() - 2].ends_with(|c: char| is_ident(c as u8))
+        {
             continue;
         }
         let arg_ranges = top_args(src, open, close);
-        let args: Vec<String> = arg_ranges.iter().map(|&(s, e)| src[s..e].trim().to_string()).collect();
+        let args: Vec<String> = arg_ranges
+            .iter()
+            .map(|&(s, e)| src[s..e].trim().to_string())
+            .collect();
         if args.len() != def.params.len() {
             continue;
         }
@@ -312,28 +393,61 @@ pub(crate) fn find_sites(src: &str, def: &FnDef) -> Vec<Site> {
             if start >= dot {
                 continue;
             }
-            Site { start, end: close + 1, recv: Some(src[start..dot].trim().to_string()), args, arg_ranges }
-        } else if before.ends_with("::") {
+            Site {
+                start,
+                end: close + 1,
+                recv: Some(src[start..dot].trim().to_string()),
+                args,
+                arg_ranges,
+            }
+        } else if let Some(head) = before.strip_suffix("::") {
             let ty = def.self_ty.as_deref();
-            let head = &before[..before.len() - 2];
             // `<Type>::f(..)` and `<Type as Trait>::f(..)` call the same method as `Type::f(..)`
-            let qualified = head.ends_with('>').then(|| head.rfind('<')).flatten().map(|lt| (lt, head[lt + 1..head.len() - 1].split(" as ").next().unwrap_or("").trim()));
+            let qualified = head
+                .ends_with('>')
+                .then(|| head.rfind('<'))
+                .flatten()
+                .map(|lt| {
+                    (
+                        lt,
+                        head[lt + 1..head.len() - 1]
+                            .split(" as ")
+                            .next()
+                            .unwrap_or("")
+                            .trim(),
+                    )
+                });
             let (prefix_start, prefix) = match qualified {
                 Some((lt, ty)) => (lt, ty),
                 None => {
-                    let st = head.rfind(|c: char| !(c.is_alphanumeric() || c == '_')).map(|p| p + 1).unwrap_or(0);
+                    let st = head
+                        .rfind(|c: char| !(c.is_alphanumeric() || c == '_'))
+                        .map(|p| p + 1)
+                        .unwrap_or(0);
                     (st, &before[st..before.len() - 2])
                 }
             };
             if def.recv.is_some() || ty != Some(prefix) {
                 continue;
             }
-            Site { start: prefix_start, end: close + 1, recv: None, args, arg_ranges }
+            Site {
+                start: prefix_start,
+                end: close + 1,
+                recv: None,
+                args,
+                arg_ranges,
+            }
         } else {
             if def.recv.is_some() || def.in_impl {
                 continue;
             }
-            Site { start: name_at, end: close + 1, recv: None, args, arg_ranges }
+            Site {
+                start: name_at,
+                end: close + 1,
+                recv: None,
+                args,
+                arg_ranges,
+            }
         };
         out.push(site);
         i = close + 1;
@@ -350,7 +464,12 @@ pub(crate) fn find_sites(src: &str, def: &FnDef) -> Vec<Site> {
 }
 
 fn annotatable(def: &FnDef) -> bool {
-    def.params.iter().all(|p| !has_word(&p.ty, "impl") && !p.ty.contains("dyn ") && def.generics.iter().all(|g| !has_word(&p.ty, g)) && !has_word(&p.ty, "Self"))
+    def.params.iter().all(|p| {
+        !has_word(&p.ty, "impl")
+            && !p.ty.contains("dyn ")
+            && def.generics.iter().all(|g| !has_word(&p.ty, g))
+            && !has_word(&p.ty, "Self")
+    })
 }
 
 fn replacement(def: &FnDef, site: &Site, v: Variant) -> Option<String> {
@@ -364,7 +483,11 @@ fn replacement(def: &FnDef, site: &Site, v: Variant) -> Option<String> {
     if let Some(r) = def.recv {
         let text = site.recv.as_deref()?;
         body = replace_word(&body, "self", "__s");
-        names.push(if matches!(r, Recv::Value { mutable: true }) { "mut __s".into() } else { "__s".into() });
+        names.push(if matches!(r, Recv::Value { mutable: true }) {
+            "mut __s".into()
+        } else {
+            "__s".into()
+        });
         vals.push(match (r, v.reborrow) {
             (Recv::Ref, false) => format!("&({text})"),
             (Recv::Ref, true) => format!("&*({text})"),
@@ -381,7 +504,11 @@ fn replacement(def: &FnDef, site: &Site, v: Variant) -> Option<String> {
         });
     }
     for (p, a) in def.params.iter().zip(&site.args) {
-        names.push(if p.mutable { format!("mut {}", p.name) } else { p.name.clone() });
+        names.push(if p.mutable {
+            format!("mut {}", p.name)
+        } else {
+            p.name.clone()
+        });
         vals.push(a.clone());
         tys.push(p.ty.clone());
     }
@@ -390,10 +517,19 @@ fn replacement(def: &FnDef, site: &Site, v: Variant) -> Option<String> {
         0 => String::new(),
         1 if annotate => format!("let {}: {} = {};", names[0], tys[0], vals[0]),
         1 => format!("let {} = {};", names[0], vals[0]),
-        _ if annotate => format!("let ({}): ({}) = ({});", names.join(", "), tys.join(", "), vals.join(", ")),
+        _ if annotate => format!(
+            "let ({}): ({}) = ({});",
+            names.join(", "),
+            tys.join(", "),
+            vals.join(", ")
+        ),
         _ => format!("let ({}) = ({});", names.join(", "), vals.join(", ")),
     };
-    let inner = if def.unsafe_fn { format!("unsafe {{ {body} }}") } else { body };
+    let inner = if def.unsafe_fn {
+        format!("unsafe {{ {body} }}")
+    } else {
+        body
+    };
     Some(format!("{{ {lets} {inner} }}"))
 }
 
@@ -419,15 +555,40 @@ fn uniquify_names(it: &dyn Oracle, src: &str, rustc: &[String]) -> String {
     let mut renamed = std::collections::HashSet::new();
     for _ in 0..32 {
         let defs = defs_of(&cur);
-        let clash = defs.iter().find(|d| !d.in_trait && !renamed.contains(&d.name_pos) && defs.iter().filter(|o| o.name == d.name).count() > 1);
+        let clash = defs.iter().find(|d| {
+            !d.in_trait
+                && !renamed.contains(&d.name_pos)
+                && defs.iter().filter(|o| o.name == d.name).count() > 1
+        });
         let Some(d) = clash else { break };
-        let base = d.self_ty.as_deref().map(|t| format!("{}_{}", d.name, t.chars().filter(|c| c.is_alphanumeric() || *c == '_').collect::<String>())).unwrap_or_else(|| format!("{}_fn", d.name));
+        let base = d
+            .self_ty
+            .as_deref()
+            .map(|t| {
+                format!(
+                    "{}_{}",
+                    d.name,
+                    t.chars()
+                        .filter(|c| c.is_alphanumeric() || *c == '_')
+                        .collect::<String>()
+                )
+            })
+            .unwrap_or_else(|| format!("{}_fn", d.name));
         let new = fresh_name(&cur, &base);
         let pos = d.name_pos;
         renamed.insert(pos);
         if let Some(next) = rename_decl(rustc, &it.work_dir(), &cur, pos, &d.name.clone(), &new) {
             // positions behind the renamed name moved: the set only guards against retrying the same definition
-            renamed = renamed.into_iter().map(|p| if p > pos { p + new.len() - d.name.len() } else { p }).collect();
+            renamed = renamed
+                .into_iter()
+                .map(|p| {
+                    if p > pos {
+                        p + new.len() - d.name.len()
+                    } else {
+                        p
+                    }
+                })
+                .collect();
             cur = next;
         }
     }
@@ -439,7 +600,12 @@ fn uniquify_names(it: &dyn Oracle, src: &str, rustc: &[String]) -> String {
     }
 }
 
-const KEYWORDS: [&str; 37] = ["mut", "ref", "box", "true", "false", "_", "as", "break", "const", "continue", "crate", "dyn", "else", "enum", "extern", "fn", "for", "if", "impl", "in", "let", "loop", "match", "mod", "move", "pub", "return", "self", "Self", "static", "struct", "super", "trait", "type", "unsafe", "use", "where"];
+const KEYWORDS: [&str; 37] = [
+    "mut", "ref", "box", "true", "false", "_", "as", "break", "const", "continue", "crate", "dyn",
+    "else", "enum", "extern", "fn", "for", "if", "impl", "in", "let", "loop", "match", "mod",
+    "move", "pub", "return", "self", "Self", "static", "struct", "super", "trait", "type",
+    "unsafe", "use", "where",
+];
 
 /// Names bound by `let` patterns in `body` (absolute positions: `base` is where `body` starts in the program).
 fn let_bindings(body: &str, base: usize) -> Vec<(usize, String)> {
@@ -451,7 +617,10 @@ fn let_bindings(body: &str, base: usize) -> Vec<(usize, String)> {
             i = skip_string(b, i) + 1;
             continue;
         }
-        if body[i..].starts_with("let") && (i == 0 || !is_ident(b[i - 1])) && b.get(i + 3).is_some_and(|c| c.is_ascii_whitespace()) {
+        if body[i..].starts_with("let")
+            && (i == 0 || !is_ident(b[i - 1]))
+            && b.get(i + 3).is_some_and(|c| c.is_ascii_whitespace())
+        {
             // pattern: up to the first `=` or `:` (not `::`) or `;` outside brackets
             let mut depth = 0i32;
             let mut k = i + 3;
@@ -474,7 +643,8 @@ fn let_bindings(body: &str, base: usize) -> Vec<(usize, String)> {
                     }
                     let word = &body[st..j];
                     let next = body[j..k].trim_start().chars().next();
-                    let path_like = matches!(next, Some('(') | Some('{') | Some(':')) || word.starts_with(|c: char| c.is_uppercase());
+                    let path_like = matches!(next, Some('(') | Some('{') | Some(':'))
+                        || word.starts_with(|c: char| c.is_uppercase());
                     if !KEYWORDS.contains(&word) && !path_like && b[st - 1] != b'.' {
                         out.push((base + st, word.to_string()));
                     }
@@ -538,7 +708,13 @@ fn let_stmt_end(src: &str, pos: usize) -> Option<usize> {
 }
 
 /// `src` with every occurrence of the local `name` in `scope` renamed; format strings may mention it as `{name}`.
-pub(crate) fn rename_in_scope(src: &str, scope: (usize, usize), skip: Option<usize>, name: &str, new: &str) -> String {
+pub(crate) fn rename_in_scope(
+    src: &str,
+    scope: (usize, usize),
+    skip: Option<usize>,
+    name: &str,
+    new: &str,
+) -> String {
     let b = src.as_bytes();
     let mut out = String::with_capacity(src.len() + 16);
     out.push_str(&src[..scope.0]);
@@ -547,15 +723,23 @@ pub(crate) fn rename_in_scope(src: &str, scope: (usize, usize), skip: Option<usi
         if b[i] == b'"' {
             let e = skip_string(b, i).min(scope.1.saturating_sub(1));
             let lit = &src[i..=e];
-            out.push_str(&lit.replace(&format!("{{{name}}}"), &format!("{{{new}}}")).replace(&format!("{{{name}:"), &format!("{{{new}:")));
+            out.push_str(
+                &lit.replace(&format!("{{{name}}}"), &format!("{{{new}}}"))
+                    .replace(&format!("{{{name}:"), &format!("{{{new}:")),
+            );
             i = e + 1;
             continue;
         }
-        let is_word = src[i..].starts_with(name) && (i == 0 || !is_ident(b[i - 1])) && b.get(i + name.len()).is_none_or(|&c| !is_ident(c));
+        let is_word = src[i..].starts_with(name)
+            && (i == 0 || !is_ident(b[i - 1]))
+            && b.get(i + name.len()).is_none_or(|&c| !is_ident(c));
         let renamed = is_word && Some(i) != skip && {
             let before = src[..i].trim_end().bytes().last();
             let rest = src[i + name.len()..].trim_start();
-            before != Some(b'.') && !(before == Some(b':') && src[..i].trim_end().ends_with("::")) && !rest.starts_with("::") && !rest.starts_with('!')
+            before != Some(b'.')
+                && !(before == Some(b':') && src[..i].trim_end().ends_with("::"))
+                && !rest.starts_with("::")
+                && !rest.starts_with('!')
         };
         if renamed {
             out.push_str(new);
@@ -575,24 +759,40 @@ pub(crate) fn rename_in_scope(src: &str, scope: (usize, usize), skip: Option<usi
 /// parameter's is the whole body. (The compiler cannot find the uses: they silently resolve to the item of the same name.)
 pub fn uniquify_locals(it: &dyn Oracle, src: &str, rustc: &[String]) -> String {
     let items = item_ranges(src);
-    let item_names: std::collections::HashSet<String> = items.iter().filter(|i| matches!(i.kw.as_str(), "fn" | "const" | "static" | "struct" | "enum" | "union" | "trait" | "mod" | "type")).filter_map(|i| i.name_in(src).map(String::from)).collect();
+    let item_names: std::collections::HashSet<String> = items
+        .iter()
+        .filter(|i| {
+            matches!(
+                i.kw.as_str(),
+                "fn" | "const" | "static" | "struct" | "enum" | "union" | "trait" | "mod" | "type"
+            )
+        })
+        .filter_map(|i| i.name_in(src).map(String::from))
+        .collect();
     // (name position, scope, name)
     let mut spots: Vec<(usize, (usize, usize), String)> = Vec::new();
     for def in defs_of(src) {
         let body = (def.item.header_end + 1, def.item.end - 1);
         spots.extend(def.params.iter().map(|p| (p.pos, body, p.name.clone())));
         for (pos, name) in let_bindings(&def.body, body.0) {
-            let (Some(stmt_end), Some((_, block_end))) = (let_stmt_end(src, pos), enclosing_block(src, pos)) else { continue };
+            let (Some(stmt_end), Some((_, block_end))) =
+                (let_stmt_end(src, pos), enclosing_block(src, pos))
+            else {
+                continue;
+            };
             // the next binding of the same name in the same block ends the scope (its right-hand side still belongs to this one)
             let next = let_bindings(&src[stmt_end..block_end], stmt_end)
                 .into_iter()
                 .find(|(p, n)| *n == name && enclosing_block(src, *p) == enclosing_block(src, pos));
-            let end = next.as_ref().and_then(|(p, _)| let_stmt_end(src, *p)).unwrap_or(block_end);
+            let end = next
+                .as_ref()
+                .and_then(|(p, _)| let_stmt_end(src, *p))
+                .unwrap_or(block_end);
             spots.push((pos, (stmt_end, end), name));
         }
     }
     spots.retain(|(_, _, n)| item_names.contains(n));
-    spots.sort_by(|a, b| a.0.cmp(&b.0));
+    spots.sort_by_key(|a| a.0);
     spots.dedup_by(|a, b| a.0 == b.0);
     if spots.is_empty() || spots.len() > 80 {
         return src.to_string();
@@ -604,8 +804,15 @@ pub fn uniquify_locals(it: &dyn Oracle, src: &str, rustc: &[String]) -> String {
         let new = fresh_name(&cur, &format!("{name}_l"));
         let skip = next_binding_skip(&cur, scope, &name);
         let renamed_scope = rename_in_scope(&cur, scope, skip, &name, &new);
-        let cand = format!("{}{}{}", &renamed_scope[..pos], new, &renamed_scope[pos + name.len()..]);
-        let compiles = crate::diag::compile_diags(rustc, &it.work_dir(), &cand, &["-A", "warnings"]).is_some_and(|d| d.iter().all(|d| !d.error));
+        let cand = format!(
+            "{}{}{}",
+            &renamed_scope[..pos],
+            new,
+            &renamed_scope[pos + name.len()..]
+        );
+        let compiles =
+            crate::diag::compile_diags(rustc, &it.work_dir(), &cand, &["-A", "warnings"])
+                .is_some_and(|d| d.iter().all(|d| !d.error));
         if compiles {
             cur = cand;
             renamed += 1;
@@ -624,7 +831,9 @@ pub fn uniquify_locals(it: &dyn Oracle, src: &str, rustc: &[String]) -> String {
 fn next_binding_skip(src: &str, scope: (usize, usize), name: &str) -> Option<usize> {
     let region = &src[scope.0..scope.1];
     let last_let = region.rfind("let ")?;
-    let found = let_bindings(&region[last_let..], scope.0 + last_let).into_iter().find(|(_, n)| n == name)?;
+    let found = let_bindings(&region[last_let..], scope.0 + last_let)
+        .into_iter()
+        .find(|(_, n)| n == name)?;
     // only when that `let` is the one that closed the scope (it sits at the end of the scope)
     let end = let_stmt_end(src, found.0)?;
     (end == scope.1).then_some(found.0)
@@ -632,7 +841,11 @@ fn next_binding_skip(src: &str, scope: (usize, usize), name: &str) -> Option<usi
 
 /// Inline calls function by function (smallest bodies first), `par_checks()` functions tried at once.
 pub fn inline_calls(it: &dyn Oracle, src: &str, rustc: &[String], deadline: Instant) -> String {
-    let mut cur = if rustc.is_empty() { src.to_string() } else { uniquify_names(it, src, rustc) };
+    let mut cur = if rustc.is_empty() {
+        src.to_string()
+    } else {
+        uniquify_names(it, src, rustc)
+    };
     if !rustc.is_empty() && cur.lines().count() <= 600 {
         cur = uniquify_locals(it, &cur, rustc);
     }
@@ -664,9 +877,19 @@ pub fn inline_calls(it: &dyn Oracle, src: &str, rustc: &[String], deadline: Inst
                 if expired(deadline) {
                     return cur;
                 }
-                let batch: Vec<&String> = pending[idx..(idx + width).min(pending.len())].iter().collect();
+                let batch: Vec<&String> = pending[idx..(idx + width).min(pending.len())]
+                    .iter()
+                    .collect();
                 let defs_now = defs_of(&cur);
-                let cands: Vec<Option<String>> = batch.iter().map(|n| defs_now.iter().find(|d| &d.name == *n).and_then(|d| inline_def(&cur, d, *v, None))).collect();
+                let cands: Vec<Option<String>> = batch
+                    .iter()
+                    .map(|n| {
+                        defs_now
+                            .iter()
+                            .find(|d| &d.name == *n)
+                            .and_then(|d| inline_def(&cur, d, *v, None))
+                    })
+                    .collect();
                 let res = par_map(&cands, width, |c| c.as_ref().is_some_and(|c| it.check(c)));
                 match res.iter().position(|&ok| ok) {
                     Some(p) => {
@@ -691,13 +914,18 @@ pub fn inline_calls(it: &dyn Oracle, src: &str, rustc: &[String], deadline: Inst
         // what is left: one call site at a time
         for n in pending {
             let defs_now = defs_of(&cur);
-            let Some(d) = defs_now.iter().find(|d| d.name == n) else { continue };
+            let Some(d) = defs_now.iter().find(|d| d.name == n) else {
+                continue;
+            };
             let count = find_sites(&cur, d).len();
             for site in (0..count).rev() {
                 if expired(deadline) {
                     return cur;
                 }
-                let cands: Vec<Option<String>> = VARIANTS.iter().map(|v| inline_def(&cur, d, *v, Some(site))).collect();
+                let cands: Vec<Option<String>> = VARIANTS
+                    .iter()
+                    .map(|v| inline_def(&cur, d, *v, Some(site)))
+                    .collect();
                 let res = par_map(&cands, width, |c| c.as_ref().is_some_and(|c| it.check(c)));
                 if let Some(p) = res.iter().position(|&ok| ok) {
                     info!("inlined one call of `{n}`");
@@ -712,14 +940,28 @@ pub fn inline_calls(it: &dyn Oracle, src: &str, rustc: &[String], deadline: Inst
         // trait methods with several impls: at one call site at a time every impl is tried, the compiler rejects the wrong ones
         let defs_now = defs_of(&cur);
         let mut seen: Vec<&str> = Vec::new();
-        for d in defs_now.iter().filter(|d| d.in_impl && d.in_trait && d.recv.is_some()) {
+        for d in defs_now
+            .iter()
+            .filter(|d| d.in_impl && d.in_trait && d.recv.is_some())
+        {
             if seen.contains(&d.name.as_str()) {
                 continue;
             }
             seen.push(&d.name);
-            let group: Vec<&FnDef> = defs_now.iter().filter(|o| o.name == d.name && o.in_impl && o.in_trait && o.params.len() == d.params.len()).collect();
+            let group: Vec<&FnDef> = defs_now
+                .iter()
+                .filter(|o| {
+                    o.name == d.name && o.in_impl && o.in_trait && o.params.len() == d.params.len()
+                })
+                .collect();
             // the other definitions of the name may only be default bodies in the trait itself
-            let others_are_defaults = defs_now.iter().filter(|o| o.name == d.name && !(o.in_impl && o.in_trait && o.params.len() == d.params.len())).all(|o| o.in_trait && !o.in_impl);
+            let others_are_defaults = defs_now
+                .iter()
+                .filter(|o| {
+                    o.name == d.name
+                        && !(o.in_impl && o.in_trait && o.params.len() == d.params.len())
+                })
+                .all(|o| o.in_trait && !o.in_impl);
             let total = defs_now.iter().filter(|o| o.name == d.name).count();
             if total < 2 || !others_are_defaults {
                 continue;
@@ -730,10 +972,21 @@ pub fn inline_calls(it: &dyn Oracle, src: &str, rustc: &[String], deadline: Inst
                     return cur;
                 }
                 let text = cur.as_str();
-                let cands: Vec<Option<String>> = group.iter().flat_map(|g| VARIANTS.iter().map(move |v| inline_def(text, g, *v, Some(site)))).collect();
+                let cands: Vec<Option<String>> = group
+                    .iter()
+                    .flat_map(|g| {
+                        VARIANTS
+                            .iter()
+                            .map(move |v| inline_def(text, g, *v, Some(site)))
+                    })
+                    .collect();
                 let res = par_map(&cands, width, |c| c.as_ref().is_some_and(|c| it.check(c)));
                 if let Some(p) = res.iter().position(|&ok| ok) {
-                    info!("inlined one call of the trait method `{}` (one of {} impls)", d.name, group.len());
+                    info!(
+                        "inlined one call of the trait method `{}` (one of {} impls)",
+                        d.name,
+                        group.len()
+                    );
                     cur = cands[p].clone().unwrap();
                     crate::control::rebase_checkpoint(&cur);
                     done += 1;
@@ -741,7 +994,11 @@ pub fn inline_calls(it: &dyn Oracle, src: &str, rustc: &[String], deadline: Inst
                 }
             }
         }
-        info!("inlining, round {round}: {done} function(s) inlined ({} -> {} lines)", before.lines().count(), cur.lines().count());
+        info!(
+            "inlining, round {round}: {done} function(s) inlined ({} -> {} lines)",
+            before.lines().count(),
+            cur.lines().count()
+        );
         if cur == before {
             break;
         }
@@ -768,8 +1025,13 @@ pub fn substitute_lets(it: &dyn Oracle, src: &str, deadline: Instant) -> String 
             if expired(deadline) {
                 return cur;
             }
-            let batch: Vec<usize> = spots[idx.saturating_sub(width)..idx].iter().rev().copied().collect();
-            let cands: Vec<Option<String>> = batch.iter().map(|&p| substitute_one(&cur, p)).collect();
+            let batch: Vec<usize> = spots[idx.saturating_sub(width)..idx]
+                .iter()
+                .rev()
+                .copied()
+                .collect();
+            let cands: Vec<Option<String>> =
+                batch.iter().map(|&p| substitute_one(&cur, p)).collect();
             let res = par_map(&cands, width, |c| c.as_ref().is_some_and(|c| it.check(c)));
             match res.iter().position(|&ok| ok) {
                 Some(p) => {
@@ -782,7 +1044,11 @@ pub fn substitute_lets(it: &dyn Oracle, src: &str, deadline: Instant) -> String 
         if cur == before {
             break;
         }
-        info!("let substitution: {} -> {} lines", before.lines().count(), cur.lines().count());
+        info!(
+            "let substitution: {} -> {} lines",
+            before.lines().count(),
+            cur.lines().count()
+        );
     }
     cur
 }
@@ -804,7 +1070,11 @@ fn simple_lets(body: &str, base: usize) -> Vec<usize> {
                 e += 1;
             }
             let word = &body[n..e];
-            if e > n && word != "mut" && word != "_" && !word.starts_with(|c: char| c.is_uppercase()) {
+            if e > n
+                && word != "mut"
+                && word != "_"
+                && !word.starts_with(|c: char| c.is_uppercase())
+            {
                 out.push(base + i);
             }
         }
@@ -831,7 +1101,10 @@ fn substitute_one(src: &str, let_pos: usize) -> Option<String> {
             match c {
                 b'(' | b'[' | b'{' | b'<' => depth += 1,
                 b')' | b']' | b'}' | b'>' => depth -= 1,
-                b'=' if depth <= 0 && stmt.as_bytes().get(k + 1) != Some(&b'=') && stmt.as_bytes().get(k + 1) != Some(&b'>') => {
+                b'=' if depth <= 0
+                    && stmt.as_bytes().get(k + 1) != Some(&b'=')
+                    && stmt.as_bytes().get(k + 1) != Some(&b'>') =>
+                {
                     found = Some(k);
                     break;
                 }
@@ -845,20 +1118,35 @@ fn substitute_one(src: &str, let_pos: usize) -> Option<String> {
         return None;
     }
     let block_end = enclosing_block(src, n).map(|(_, c)| c)?;
-    let next = let_bindings(&src[end..block_end], end).into_iter().find(|(p, nm)| nm == name && enclosing_block(src, *p) == enclosing_block(src, n));
-    let scope_end = next.as_ref().and_then(|(p, _)| let_stmt_end(src, *p)).unwrap_or(block_end);
+    let next = let_bindings(&src[end..block_end], end)
+        .into_iter()
+        .find(|(p, nm)| nm == name && enclosing_block(src, *p) == enclosing_block(src, n));
+    let scope_end = next
+        .as_ref()
+        .and_then(|(p, _)| let_stmt_end(src, *p))
+        .unwrap_or(block_end);
     let scope = (end, scope_end);
     let skip = next_binding_skip(src, scope, name);
     // uses: whole words that rename_in_scope would touch
     let marker = "\u{1}USE\u{1}";
     let marked = rename_in_scope(src, scope, skip, name, marker);
     let uses = marked.matches(marker).count();
-    let reference = expr.strip_prefix("&mut ").is_some_and(|r| !r.is_empty() && r.bytes().all(is_ident));
-    let simple = reference || expr.bytes().all(|c| is_ident(c) || matches!(c, b'&' | b'*' | b'.' | b':')) || expr.parse::<f64>().is_ok();
+    let reference = expr
+        .strip_prefix("&mut ")
+        .is_some_and(|r| !r.is_empty() && r.bytes().all(is_ident));
+    let simple = reference
+        || expr
+            .bytes()
+            .all(|c| is_ident(c) || matches!(c, b'&' | b'*' | b'.' | b':'))
+        || expr.parse::<f64>().is_ok();
     if uses == 0 || (uses > 1 && !simple) || src[scope.0..scope.1].contains(&format!("{{{name}")) {
         return None;
     }
-    let text = if simple && !reference { expr.to_string() } else { format!("({expr})") };
+    let text = if simple && !reference {
+        expr.to_string()
+    } else {
+        format!("({expr})")
+    };
     let replaced = marked.replace(marker, &text);
     // drop the let statement itself
     Some(format!("{}{}", &replaced[..let_pos], &replaced[end..]))
@@ -872,36 +1160,47 @@ fn declared_names(src: &str) -> Vec<String> {
     let mut k = 0;
     while k < toks.len() {
         match word(k) {
-            "fn" | "struct" | "enum" | "trait" | "mod" | "type" | "const" | "static" | "union" | "let" if k + 1 < toks.len() => {
+            "fn" | "struct" | "enum" | "trait" | "mod" | "type" | "const" | "static" | "union"
+            | "let"
+                if k + 1 < toks.len() =>
+            {
                 let mut n = k + 1;
                 if word(n) == "mut" && n + 1 < toks.len() {
                     n += 1;
                 }
                 let w = word(n);
-                if w.bytes().next().is_some_and(|c| c.is_ascii_alphabetic() || c == b'_') && !KEYWORDS.contains(&w) {
+                if w.bytes()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_alphabetic() || c == b'_')
+                    && !KEYWORDS.contains(&w)
+                {
                     names.push(w.to_string());
                 }
                 // parameters: `name:` inside the parentheses of a fn header
-                if word(k) == "fn" {
-                    if let Some(open) = (n..toks.len().min(n + 12)).find(|&j| word(j) == "(") {
-                        let mut depth = 0;
-                        for j in open..toks.len() {
-                            match word(j) {
-                                "(" => depth += 1,
-                                ")" => {
-                                    depth -= 1;
-                                    if depth == 0 {
-                                        break;
-                                    }
+                if word(k) == "fn"
+                    && let Some(open) = (n..toks.len().min(n + 12)).find(|&j| word(j) == "(")
+                {
+                    let mut depth = 0;
+                    for j in open..toks.len() {
+                        match word(j) {
+                            "(" => depth += 1,
+                            ")" => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    break;
                                 }
-                                ":" if depth == 1 && j > 0 => {
-                                    let p = word(j - 1);
-                                    if p.bytes().next().is_some_and(|c| c.is_ascii_alphabetic() || c == b'_') && p != "self" {
-                                        names.push(p.to_string());
-                                    }
-                                }
-                                _ => {}
                             }
+                            ":" if depth == 1 && j > 0 => {
+                                let p = word(j - 1);
+                                if p.bytes()
+                                    .next()
+                                    .is_some_and(|c| c.is_ascii_alphabetic() || c == b'_')
+                                    && p != "self"
+                                {
+                                    names.push(p.to_string());
+                                }
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -925,15 +1224,31 @@ pub fn shorten_names(it: &dyn Oracle, src: &str, deadline: Instant) -> String {
         if expired(deadline) {
             break;
         }
-        let words: std::collections::HashSet<&str> = cur.split(|c: char| !(c.is_alphanumeric() || c == '_')).filter(|w| !w.is_empty()).collect();
-        let mut free = ('a'..='z').chain('A'..='Z').map(|c| c.to_string()).filter(|c| !words.contains(c.as_str()));
-        let mut names: Vec<String> = declared_names(&cur).into_iter().filter(|n| n.len() > 1 && n != "main" && !tried.contains(n)).collect();
+        let words: std::collections::HashSet<&str> = cur
+            .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .filter(|w| !w.is_empty())
+            .collect();
+        let mut free = ('a'..='z')
+            .chain('A'..='Z')
+            .map(|c| c.to_string())
+            .filter(|c| !words.contains(c.as_str()));
+        let mut names: Vec<String> = declared_names(&cur)
+            .into_iter()
+            .filter(|n| n.len() > 1 && n != "main" && !tried.contains(n))
+            .collect();
         names.sort_by_key(|n| std::cmp::Reverse(n.len()));
-        let batch: Vec<(String, String)> = names.into_iter().take(width).filter_map(|n| free.next().map(|f| (n, f))).collect();
+        let batch: Vec<(String, String)> = names
+            .into_iter()
+            .take(width)
+            .filter_map(|n| free.next().map(|f| (n, f)))
+            .collect();
         if batch.is_empty() {
             break;
         }
-        let cands: Vec<String> = batch.iter().map(|(n, f)| rename_in_scope(&cur, (0, cur.len()), None, n, f)).collect();
+        let cands: Vec<String> = batch
+            .iter()
+            .map(|(n, f)| rename_in_scope(&cur, (0, cur.len()), None, n, f))
+            .collect();
         let res = par_map(&cands, width, |c| it.check(c));
         for (n, _) in &batch {
             tried.insert(n.clone());

@@ -9,10 +9,12 @@
 //! versions of the package small (a finding that is seen again only touches `status.cfg`), which keeps
 //! concurrent updates from different jobs cheap to redo.
 
+use crate::triage::{Cfg, read_cfg, write_cfg};
 use log::{info, warn};
-use crate::triage::{read_cfg, write_cfg, Cfg};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+
+type Row = (String, Cfg);
 
 fn fnv(s: &str) -> u64 {
     let mut h = 0xcbf29ce484222325u64;
@@ -53,9 +55,32 @@ pub fn write_finding_json(dir: &Path) {
     let st = read_cfg(&dir.join("status.cfg"));
     let g = |m: &Cfg, k: &str| m.get(k).cloned().unwrap_or_default();
     let num = |m: &Cfg, k: &str| m.get(k).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
-    let list = |s: &str| format!("[{}]", s.split(',').filter(|x| !x.is_empty()).map(json_str).collect::<Vec<_>>().join(", "));
-    let flags = |s: &str| format!("[{}]", s.split_whitespace().map(json_str).collect::<Vec<_>>().join(", "));
-    let repro: Vec<String> = st.iter().filter_map(|(k, v)| k.strip_prefix("repro.").map(|ch| format!("    {}: {}", json_str(ch), json_str(v)))).collect();
+    let list = |s: &str| {
+        format!(
+            "[{}]",
+            s.split(',')
+                .filter(|x| !x.is_empty())
+                .map(json_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    let flags = |s: &str| {
+        format!(
+            "[{}]",
+            s.split_whitespace()
+                .map(json_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    let repro: Vec<String> = st
+        .iter()
+        .filter_map(|(k, v)| {
+            k.strip_prefix("repro.")
+                .map(|ch| format!("    {}: {}", json_str(ch), json_str(v)))
+        })
+        .collect();
     let mut s = String::from("{\n");
     let mut field = |k: &str, v: String| {
         s.push_str(&format!("  {}: {},\n", json_str(k), v));
@@ -68,11 +93,39 @@ pub fn write_finding_json(dir: &Path) {
     field("class", json_str(&g(&st, "class")));
     field("state", json_str(&g(&st, "state")));
     field("progress", json_str(&g(&st, "progress")));
-    field("base", format!("{{\"name\": {}, \"flags\": {}}}", json_str(&g(&meta, "base_name")), flags(&g(&st, "min_base_flags"))));
-    field("bad", format!("{{\"name\": {}, \"flags\": {}}}", json_str(&g(&meta, "bad_name")), flags(&g(&st, "min_bad_flags"))));
-    field("original_flags", format!("{{\"base\": {}, \"bad\": {}}}", flags(&g(&meta, "base_flags")), flags(&g(&meta, "bad_flags"))));
+    field(
+        "base",
+        format!(
+            "{{\"name\": {}, \"flags\": {}}}",
+            json_str(&g(&meta, "base_name")),
+            flags(&g(&st, "min_base_flags"))
+        ),
+    );
+    field(
+        "bad",
+        format!(
+            "{{\"name\": {}, \"flags\": {}}}",
+            json_str(&g(&meta, "bad_name")),
+            flags(&g(&st, "min_bad_flags"))
+        ),
+    );
+    field(
+        "original_flags",
+        format!(
+            "{{\"base\": {}, \"bad\": {}}}",
+            flags(&g(&meta, "base_flags")),
+            flags(&g(&meta, "bad_flags"))
+        ),
+    );
     field("common_flags", flags(&g(&st, "min_common_flags")));
-    field("signature", json_str(std::fs::read_to_string(dir.join("signature.txt")).unwrap_or_default().trim()));
+    field(
+        "signature",
+        json_str(
+            std::fs::read_to_string(dir.join("signature.txt"))
+                .unwrap_or_default()
+                .trim(),
+        ),
+    );
     field("original_lines", num(&st, "original_lines").to_string());
     field("reduced_lines", num(&st, "reduced_lines").to_string());
     field("reduced_hash", json_str(&g(&st, "reduced_hash")));
@@ -90,7 +143,11 @@ pub fn write_finding_json(dir: &Path) {
     let mut st2 = st.clone();
     crate::steps::backfill(&mut st2, dir);
     let today = today();
-    let h = st2.get("context_hash").or_else(|| st2.get("reduced_hash")).cloned().unwrap_or_default();
+    let h = st2
+        .get("context_hash")
+        .or_else(|| st2.get("reduced_hash"))
+        .cloned()
+        .unwrap_or_default();
     let steps_json: Vec<String> = crate::steps::STEPS
         .iter()
         .map(|d| {
@@ -105,7 +162,10 @@ pub fn write_finding_json(dir: &Path) {
             format!("    {}: {{\"title\": {}, \"state\": {}, \"version\": {}, \"date\": {}, \"note\": {}}}", json_str(d.id), json_str(d.title), json_str(&state), d.version, json_str(&date), json_str(&note))
         })
         .collect();
-    s.push_str(&format!("  \"steps\": {{\n{}\n  }},\n", steps_json.join(",\n")));
+    s.push_str(&format!(
+        "  \"steps\": {{\n{}\n  }},\n",
+        steps_json.join(",\n")
+    ));
     s.push_str("  \"files\": {\"case\": \"case.rs\", \"reduced\": \"reduced.rs\", \"issue\": \"ISSUE.md\", \"status\": \"STATUS.md\", \"report\": \"report.md\"}\n}\n");
     let _ = std::fs::write(dir.join("finding.json"), s);
 }
@@ -116,14 +176,25 @@ pub fn name_hash(s: &str) -> u64 {
 }
 
 fn sanitize(s: &str) -> String {
-    s.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).collect()
+    s.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 /// Stable identity of a finding: strategy, failing config and a hash of what makes it unique
 /// (the crash signature for crashes, the reduced/original program text for wrong code).
 pub fn key_of(dir: &Path) -> Option<String> {
     // a stored finding keeps its key for ever (re-triage changes reduced.rs, not the identity)
-    if let Some(k) = read_cfg(&dir.join("status.cfg")).get("key").filter(|k| !k.is_empty()) {
+    if let Some(k) = read_cfg(&dir.join("status.cfg"))
+        .get("key")
+        .filter(|k| !k.is_empty())
+    {
         return Some(k.clone());
     }
     let meta = read_cfg(&dir.join("repro.cfg"));
@@ -133,12 +204,21 @@ pub fn key_of(dir: &Path) -> Option<String> {
         Ok(s) if !s.trim().is_empty() => s.trim().to_string(),
         _ => std::fs::read_to_string(dir.join("case.rs")).ok()?,
     };
-    Some(format!("{}__{}__{:010x}", sanitize(strategy), sanitize(bad), fnv(&ident) & 0xff_ffff_ffff))
+    Some(format!(
+        "{}__{}__{:010x}",
+        sanitize(strategy),
+        sanitize(bad),
+        fnv(&ident) & 0xff_ffff_ffff
+    ))
 }
 
 fn class_of(dir: &Path) -> &'static str {
     let n = dir.file_name().and_then(|n| n.to_str()).unwrap_or("");
-    let parent = dir.parent().and_then(|p| p.file_name()).and_then(|n| n.to_str()).unwrap_or("");
+    let parent = dir
+        .parent()
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str())
+        .unwrap_or("");
     if parent == "triaged" {
         "triaged"
     } else if parent == "known" || n.contains("__rust-") || n.contains("__known") {
@@ -161,29 +241,50 @@ fn copy_dir(from: &Path, to: &Path) {
 }
 
 fn today() -> String {
-    std::process::Command::new("date").args(["-u", "+%F"]).output().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default()
+    std::process::Command::new("date")
+        .args(["-u", "+%F"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default()
 }
 
 fn add_word(cfg: &mut Cfg, key: &str, word: &str) {
     let cur = cfg.get(key).cloned().unwrap_or_default();
     if !cur.split(',').any(|w| w == word) {
-        let new = if cur.is_empty() { word.to_string() } else { format!("{cur},{word}") };
+        let new = if cur.is_empty() {
+            word.to_string()
+        } else {
+            format!("{cur},{word}")
+        };
         cfg.insert(key.to_string(), new);
     }
 }
 
 /// Keys of findings that stopped reproducing (the directories of `old_findings/`).
 pub fn fixed_keys(pkg: &Path) -> std::collections::HashSet<String> {
-    std::fs::read_dir(pkg.join("old_findings")).into_iter().flatten().flatten().filter(|e| e.path().is_dir()).map(|e| e.file_name().to_string_lossy().to_string()).collect()
+    std::fs::read_dir(pkg.join("old_findings"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect()
 }
 
 fn nightly_version() -> String {
-    std::process::Command::new("rustc").args(["+nightly", "-V"]).output().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default()
+    std::process::Command::new("rustc")
+        .args(["+nightly", "-V"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default()
 }
 
 /// Move `findings/<key>` to `old_findings/<key>`: it does not show up on the newest nightly any more (`state` says why).
 pub fn archive(pkg: &Path, key: &str, state: &str, date: &str, rustc: &str) {
-    let (from, to) = (pkg.join("findings").join(key), pkg.join("old_findings").join(key));
+    let (from, to) = (
+        pkg.join("findings").join(key),
+        pkg.join("old_findings").join(key),
+    );
     let mut st = read_cfg(&from.join("status.cfg"));
     st.insert("state".into(), state.into());
     st.insert("fixed_on".into(), date.into());
@@ -204,8 +305,12 @@ fn migrate(pkg: &Path) {
     if let Ok(text) = std::fs::read_to_string(pkg.join("fixed.txt")) {
         for l in text.lines() {
             let c: Vec<&str> = l.split('\t').collect();
-            let Some(key) = c.first().filter(|k| !k.is_empty()) else { continue };
-            if pkg.join("findings").join(key).join("case.rs").exists() || pkg.join("old_findings").join(key).exists() {
+            let Some(key) = c.first().filter(|k| !k.is_empty()) else {
+                continue;
+            };
+            if pkg.join("findings").join(key).join("case.rs").exists()
+                || pkg.join("old_findings").join(key).exists()
+            {
                 continue;
             }
             let dir = pkg.join("old_findings").join(key);
@@ -221,7 +326,12 @@ fn migrate(pkg: &Path) {
         let _ = std::fs::remove_file(pkg.join("fixed.txt"));
     }
     let mut ver = String::new();
-    let mut keys: Vec<String> = std::fs::read_dir(pkg.join("findings")).into_iter().flatten().flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect();
+    let mut keys: Vec<String> = std::fs::read_dir(pkg.join("findings"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
     keys.sort();
     for k in keys {
         let st = read_cfg(&pkg.join("findings").join(&k).join("status.cfg"));
@@ -229,7 +339,10 @@ fn migrate(pkg: &Path) {
             if ver.is_empty() {
                 ver = nightly_version();
             }
-            let on = st.get("last_verified").cloned().unwrap_or_else(|| date.clone());
+            let on = st
+                .get("last_verified")
+                .cloned()
+                .unwrap_or_else(|| date.clone());
             println!("ARCHIVED {k} (does not reproduce on the newest nightly)");
             archive(pkg, &k, "fixed", &on, &ver);
         }
@@ -242,7 +355,12 @@ pub fn run(pkg: &Path, adds: &[PathBuf], toolchain: &str, contains: Option<&Path
     if let Some(keys) = contains {
         let mut missing = 0;
         let fixed = fixed_keys(pkg);
-        for k in std::fs::read_to_string(keys).unwrap_or_default().lines().map(str::trim).filter(|l| !l.is_empty()) {
+        for k in std::fs::read_to_string(keys)
+            .unwrap_or_default()
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+        {
             if !root.join(k).join("case.rs").exists() && !fixed.contains(k) {
                 warn!("MISSING {k}");
                 missing += 1;
@@ -269,12 +387,20 @@ pub fn run(pkg: &Path, adds: &[PathBuf], toolchain: &str, contains: Option<&Path
             let Some(key) = key_of(&d) else { continue };
             let mut key = key;
             // the same reduced program under another key (e.g. found again by another seed) is the same finding
-            let new_hash = read_cfg(&d.join("status.cfg")).get("reduced_hash").cloned().unwrap_or_default();
+            let new_hash = read_cfg(&d.join("status.cfg"))
+                .get("reduced_hash")
+                .cloned()
+                .unwrap_or_default();
             if !new_hash.is_empty() && !root.join(&key).join("case.rs").exists() {
-                let bad = read_cfg(&d.join("repro.cfg")).get("bad_name").cloned().unwrap_or_default();
+                let bad = read_cfg(&d.join("repro.cfg"))
+                    .get("bad_name")
+                    .cloned()
+                    .unwrap_or_default();
                 for e in std::fs::read_dir(&root).into_iter().flatten().flatten() {
                     let other = read_cfg(&e.path().join("status.cfg"));
-                    if other.get("reduced_hash") == Some(&new_hash) && read_cfg(&e.path().join("repro.cfg")).get("bad_name") == Some(&bad) {
+                    if other.get("reduced_hash") == Some(&new_hash)
+                        && read_cfg(&e.path().join("repro.cfg")).get("bad_name") == Some(&bad)
+                    {
                         key = e.file_name().to_string_lossy().to_string();
                         break;
                     }
@@ -304,17 +430,32 @@ pub fn run(pkg: &Path, adds: &[PathBuf], toolchain: &str, contains: Option<&Path
                 crate::steps::backfill(&mut b, &d);
                 // the result with more finished checklist steps (then more minimisation runs) wins
                 let better = crate::steps::score(&b, &date) > crate::steps::score(&a, &date);
-                if d.join("reduced.rs").exists() && (better || (!have_reduced && crate::steps::score(&b, &date) == crate::steps::score(&a, &date))) {
+                if d.join("reduced.rs").exists()
+                    && (better
+                        || (!have_reduced
+                            && crate::steps::score(&b, &date) == crate::steps::score(&a, &date)))
+                {
                     // every file the triage wrote (culprit.txt, variants.txt, miri.txt, search_llvm.txt ... included); the identity of the
                     // finding (case.rs, repro.cfg), its merged status.cfg and finding.json stay as they are
                     for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
                         let name = e.file_name().to_string_lossy().to_string();
-                        if e.path().is_file() && !["case.rs", "repro.cfg", "status.cfg", "finding.json"].contains(&name.as_str()) {
+                        if e.path().is_file()
+                            && !["case.rs", "repro.cfg", "status.cfg", "finding.json"]
+                                .contains(&name.as_str())
+                        {
                             let _ = std::fs::copy(e.path(), dest.join(&name));
                         }
                     }
                     // results the new triage did not produce (a culprit that is not there any more ...) must not outlive their step
-                    for f in ["culprit.txt", "variants.txt", "miri.txt", "search.txt", "search_llvm.txt", "bisect.txt"] {
+                    for f in [
+                        "culprit.txt",
+                        "variants.txt",
+                        "miri.txt",
+                        "search.txt",
+                        "search_llvm.txt",
+                        "bisect.txt",
+                        "LLVM_ISSUE.md",
+                    ] {
                         if !d.join(f).exists() {
                             let _ = std::fs::remove_file(dest.join(f));
                         }
@@ -325,8 +466,17 @@ pub fn run(pkg: &Path, adds: &[PathBuf], toolchain: &str, contains: Option<&Path
                 }
                 // whatever the triage found out that the stored copy does not have yet is kept, even when the stored result is the better one
                 // (only for the same reduced program: the files belong to it)
-                let same_program = a.get("reduced_hash").is_some() && a.get("reduced_hash") == b.get("reduced_hash");
-                for f in ["culprit.txt", "variants.txt", "miri.txt", "search.txt", "search_llvm.txt", "bisect.txt"] {
+                let same_program = a.contains_key("reduced_hash")
+                    && a.get("reduced_hash") == b.get("reduced_hash");
+                for f in [
+                    "culprit.txt",
+                    "variants.txt",
+                    "miri.txt",
+                    "search.txt",
+                    "search_llvm.txt",
+                    "bisect.txt",
+                    "LLVM_ISSUE.md",
+                ] {
                     if same_program && d.join(f).exists() && !dest.join(f).exists() {
                         let _ = std::fs::copy(d.join(f), dest.join(f));
                     }
@@ -338,7 +488,10 @@ pub fn run(pkg: &Path, adds: &[PathBuf], toolchain: &str, contains: Option<&Path
                 st.insert("times_seen".into(), "0".into());
             }
             if toolchain != "retriage" {
-                let n: u64 = st.get("times_seen").and_then(|v| v.parse().ok()).unwrap_or(0);
+                let n: u64 = st
+                    .get("times_seen")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0);
                 st.insert("times_seen".into(), (n + 1).to_string());
                 st.insert("last_seen".into(), date.clone());
             }
@@ -371,19 +524,28 @@ pub fn run(pkg: &Path, adds: &[PathBuf], toolchain: &str, contains: Option<&Path
 fn linkify(text: &str) -> String {
     text.split_whitespace()
         .map(|w| match w.split_once('#') {
-            Some((repo, n)) if repo.contains('/') && !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()) => format!("[{w}](https://github.com/{repo}/issues/{n})"),
+            Some((repo, n))
+                if repo.contains('/') && !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()) =>
+            {
+                format!("[{w}](https://github.com/{repo}/issues/{n})")
+            }
             _ => w.to_string(),
         })
         .collect::<Vec<_>>()
         .join(" ")
 }
 
-
 /// The optimisation pass that changes the result: from `culprit.txt`, or - when that file is not there - from the note of the step
 /// `pass_bisect` ("first LLVM pass that matters: 1844 of 1993: stack-coloring on reduced::main"). `None` when no pass was isolated.
 fn pass_of(dir: &Path, st: &Cfg) -> Option<(String, String)> {
     let t = std::fs::read_to_string(dir.join("culprit.txt")).unwrap_or_default();
-    let get = |key: &str| t.lines().find_map(|l| l.strip_prefix(key)).unwrap_or("").trim().to_string();
+    let get = |key: &str| {
+        t.lines()
+            .find_map(|l| l.strip_prefix(key))
+            .unwrap_or("")
+            .trim()
+            .to_string()
+    };
     let (kind, name) = (get("kind="), get("name="));
     if !name.is_empty() && get("n=").parse::<usize>().unwrap_or(0) > 0 {
         return Some((kind, name));
@@ -391,7 +553,13 @@ fn pass_of(dir: &Path, st: &Cfg) -> Option<(String, String)> {
     let note = crate::steps::get(st, "pass_bisect")?.note;
     let rest = note.strip_prefix("first ")?;
     let (kind, rest) = rest.split_once(" pass that matters: ")?;
-    let name = rest.splitn(3, ": ").nth(1)?.split(" on ").next()?.trim().to_string();
+    let name = rest
+        .split(": ")
+        .nth(1)?
+        .split(" on ")
+        .next()?
+        .trim()
+        .to_string();
     (!name.is_empty()).then(|| (kind.to_lowercase(), name))
 }
 
@@ -402,39 +570,80 @@ pub fn write_index(pkg: &Path) {
         .flatten()
         .flatten()
         .filter(|e| e.path().join("case.rs").exists())
-        .map(|e| (e.file_name().to_string_lossy().to_string(), read_cfg(&e.path().join("status.cfg"))))
+        .map(|e| {
+            (
+                e.file_name().to_string_lossy().to_string(),
+                read_cfg(&e.path().join("status.cfg")),
+            )
+        })
         .collect();
     let today = today();
     let rank = |c: &Cfg, dir: &str| {
         let mut c2 = c.clone();
         crate::steps::backfill(&mut c2, &root.join(dir));
-        if c2.get("state").map(String::as_str) == Some("fixed") { 99 } else { 100 - crate::steps::progress(&c2, &today).0 }
+        if c2.get("state").map(String::as_str) == Some("fixed") {
+            99
+        } else {
+            100 - crate::steps::progress(&c2, &today).0
+        }
     };
     rows.sort_by(|a, b| rank(&a.1, &a.0).cmp(&rank(&b.1, &b.0)).then(a.0.cmp(&b.0)));
-    let mut s = String::from("# Stored findings\n\nOne row per distinct finding. The `target` column says what it is compiled for: `host` is plain `rustc file.rs`, anything else needs `rustc --target <triple> ... file.rs && ./file` (e.g. `i686-unknown-linux-gnu`, run natively on x86_64 with gcc-multilib). Every directory under `findings/` has `finding.json` (with the checklist), `STATUS.md` (checklist, reproduction per channel, minimisation, UB check, upstream search) and, once triaged, `reduced.rs` + `ISSUE.md`. The checklist says what was done and what is still open; steps are redone when the tool gets better at them or when the reduced program changes.\n\n");
+    let mut s = String::from(
+        "# Stored findings\n\nOne row per distinct finding. The `target` column says what it is compiled for: `host` is plain `rustc file.rs`, anything else needs `rustc --target <triple> ... file.rs && ./file` (e.g. `i686-unknown-linux-gnu`, run natively on x86_64 with gcc-multilib). Every directory under `findings/` has `finding.json` (with the checklist), `STATUS.md` (checklist, reproduction per channel, minimisation, UB check, upstream search) and, once triaged, `reduced.rs` + `ISSUE.md`. The checklist says what was done and what is still open; steps are redone when the tool gets better at them or when the reduced program changes.\n\n",
+    );
     let finished = |k: &str, c: &Cfg| {
         let mut c2 = c.clone();
         crate::steps::backfill(&mut c2, &root.join(k));
         let (d, t) = crate::steps::progress(&c2, &today);
         d == t
     };
-    let (full, partial): (Vec<(String, Cfg)>, Vec<(String, Cfg)>) = rows.iter().cloned().partition(|(k, c)| finished(k, c));
+    let (full, partial): (Vec<Row>, Vec<Row>) =
+        rows.iter().cloned().partition(|(k, c)| finished(k, c));
     let table = |s: &mut String, set: &[(String, Cfg)]| {
-        let _ = writeln!(s, "| steps done | open steps | state | class | finding | target | kind | reduced lines | minimisation | seen | last seen | upstream |\n|---|---|---|---|---|---|---|---|---|---|---|---|");
+        let _ = writeln!(
+            s,
+            "| steps done | open steps | state | class | finding | target | kind | reduced lines | minimisation | seen | last seen | upstream |\n|---|---|---|---|---|---|---|---|---|---|---|---|"
+        );
         for (k, c) in set {
             let mut c2 = c.clone();
             crate::steps::backfill(&mut c2, &root.join(k));
             let g = |n: &str| c.get(n).cloned().unwrap_or_else(|| "-".into());
             let (done, total) = crate::steps::progress(&c2, &today);
-            let next = { let ids = crate::steps::open_ids(&c2, &today); if ids.is_empty() { "none - ready for a human to review and report".to_string() } else { ids.join(", ") } };
-            let up = std::fs::read_to_string(root.join(k).join("known-issues.txt")).map(|t| linkify(&t)).unwrap_or_else(|_| linkify(&g("upstream_search")));
-            let _ = writeln!(s, "| {done}/{total} | {} | {} | {} | `{k}` | {} | {} | {} | {} | {}x | {} | {} |", next.replace('|', "/"), g("state"), g("class"), target_of(c), g("kind"), g("reduced_lines"), g("min_status"), g("times_seen"), g("last_seen"), up);
+            let next = {
+                let ids = crate::steps::open_ids(&c2, &today);
+                if ids.is_empty() {
+                    "none - ready for a human to review and report".to_string()
+                } else {
+                    ids.join(", ")
+                }
+            };
+            let up = std::fs::read_to_string(root.join(k).join("known-issues.txt"))
+                .map(|t| linkify(&t))
+                .unwrap_or_else(|_| linkify(&g("upstream_search")));
+            let _ = writeln!(
+                s,
+                "| {done}/{total} | {} | {} | {} | `{k}` | {} | {} | {} | {} | {}x | {} | {} |",
+                next.replace('|', "/"),
+                g("state"),
+                g("class"),
+                target_of(c),
+                g("kind"),
+                g("reduced_lines"),
+                g("min_status"),
+                g("times_seen"),
+                g("last_seen"),
+                up
+            );
         }
     };
     for (k, _) in &rows {
         write_finding_json(&root.join(k));
     }
-    let _ = writeln!(s, "## Fully tested ({} finding(s), every step done)\n\nThese are the ones to review and report. Everything below this table (the groupings by commit and by pass) is about them only.\n", full.len());
+    let _ = writeln!(
+        s,
+        "## Fully tested ({} finding(s), every step done)\n\nThese are the ones to review and report. Everything below this table (the groupings by commit and by pass) is about them only.\n",
+        full.len()
+    );
     table(&mut s, &full);
     // what follows is only about the findings with every step done
     let rows = full.clone();
@@ -446,8 +655,16 @@ pub fn write_index(pkg: &Path) {
             let mut c2 = c.clone();
             crate::steps::backfill(&mut c2, &root.join(k));
             let pr = c.get("regression_pr").cloned().unwrap_or_default();
-            let commit = pr.split_whitespace().find(|w| w.starts_with("https://github.com/rust-lang/rust/commit/")).map(|u| u.trim_end_matches(|c: char| !c.is_ascii_hexdigit()).to_string());
-            let reg = crate::steps::get(&c2, "regression").map(|x| x.note).unwrap_or_default();
+            let commit = pr
+                .split_whitespace()
+                .find(|w| w.starts_with("https://github.com/rust-lang/rust/commit/"))
+                .map(|u| {
+                    u.trim_end_matches(|c: char| !c.is_ascii_hexdigit())
+                        .to_string()
+                });
+            let reg = crate::steps::get(&c2, "regression")
+                .map(|x| x.note)
+                .unwrap_or_default();
             match commit {
                 Some(u) => by_commit.entry(u).or_default().push(k.clone()),
                 None if reg.starts_with("long-standing") => old_bug.push(k.clone()),
@@ -455,17 +672,48 @@ pub fn write_index(pkg: &Path) {
                 None => todo.push(k.clone()),
             }
         }
-        let list = |v: &[String]| v.iter().map(|k| format!("`{k}`")).collect::<Vec<_>>().join(", ");
-        let _ = writeln!(s, "\n## Grouped by the commit that caused the regression\n\nFindings with the same commit are most likely one bug: report them together.\n");
-        for (u, ks) in by_commit.iter_mut().map(|(u, ks)| { ks.sort(); (u, &*ks) }).collect::<Vec<_>>() {
-            let short = u.rsplit('/').next().unwrap_or("").chars().take(10).collect::<String>();
+        let list = |v: &[String]| {
+            v.iter()
+                .map(|k| format!("`{k}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let _ = writeln!(
+            s,
+            "\n## Grouped by the commit that caused the regression\n\nFindings with the same commit are most likely one bug: report them together.\n"
+        );
+        for (u, ks) in by_commit
+            .iter_mut()
+            .map(|(u, ks)| {
+                ks.sort();
+                (u, &*ks)
+            })
+            .collect::<Vec<_>>()
+        {
+            let short = u
+                .rsplit('/')
+                .next()
+                .unwrap_or("")
+                .chars()
+                .take(10)
+                .collect::<String>();
             let _ = writeln!(s, "- [{short}]({u}) ({}): {}", ks.len(), list(ks));
         }
         if !not_found.is_empty() {
-            let _ = writeln!(s, "- regressed commit not found ({}): {}", not_found.len(), list(&not_found));
+            let _ = writeln!(
+                s,
+                "- regressed commit not found ({}): {}",
+                not_found.len(),
+                list(&not_found)
+            );
         }
         if !old_bug.is_empty() {
-            let _ = writeln!(s, "- long-standing, not a regression ({}): {}", old_bug.len(), list(&old_bug));
+            let _ = writeln!(
+                s,
+                "- long-standing, not a regression ({}): {}",
+                old_bug.len(),
+                list(&old_bug)
+            );
         }
         if !todo.is_empty() {
             let _ = writeln!(s, "- not bisected yet ({}): {}", todo.len(), list(&todo));
@@ -477,13 +725,28 @@ pub fn write_index(pkg: &Path) {
         let mut none: Vec<String> = Vec::new();
         for (k, c) in &rows {
             match pass_of(&root.join(k), c) {
-                Some((kind, name)) => by_pass.entry(format!("{} `{}`", if kind == "mir" { "MIR" } else { "LLVM" }, name)).or_default().push(k.clone()),
+                Some((kind, name)) => by_pass
+                    .entry(format!(
+                        "{} `{}`",
+                        if kind == "mir" { "MIR" } else { "LLVM" },
+                        name
+                    ))
+                    .or_default()
+                    .push(k.clone()),
                 None => none.push(k.clone()),
             }
         }
         if !by_pass.is_empty() || !none.is_empty() {
-            let list = |v: &[String]| v.iter().map(|k| format!("`{k}`")).collect::<Vec<_>>().join(", ");
-            let _ = writeln!(s, "\n## Grouped by the optimisation pass that causes it\n\nThe first pass whose execution changes the result (`-C llvm-args=-opt-bisect-limit` / `-Zmir-opt-bisect-limit`).\n");
+            let list = |v: &[String]| {
+                v.iter()
+                    .map(|k| format!("`{k}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            let _ = writeln!(
+                s,
+                "\n## Grouped by the optimisation pass that causes it\n\nThe first pass whose execution changes the result (`-C llvm-args=-opt-bisect-limit` / `-Zmir-opt-bisect-limit`).\n"
+            );
             let mut groups: Vec<(&String, &mut Vec<String>)> = by_pass.iter_mut().collect();
             groups.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then(a.0.cmp(b.0)));
             for (pass, ks) in groups {
@@ -491,7 +754,12 @@ pub fn write_index(pkg: &Path) {
                 let _ = writeln!(s, "- {pass} ({}): {}", ks.len(), list(ks));
             }
             if !none.is_empty() {
-                let _ = writeln!(s, "- no pass found yet / not applicable ({}): {}", none.len(), list(&none));
+                let _ = writeln!(
+                    s,
+                    "- no pass found yet / not applicable ({}): {}",
+                    none.len(),
+                    list(&none)
+                );
             }
         }
     }
@@ -501,36 +769,74 @@ pub fn write_index(pkg: &Path) {
             let mut c2 = c.clone();
             crate::steps::backfill(&mut c2, &root.join(k));
             let pr = c.get("regression_pr").cloned().unwrap_or_default();
-            let commit = pr.split_whitespace().find(|w| w.starts_with("https://github.com/rust-lang/rust/commit/")).map(|u| u.trim_end_matches(|c: char| !c.is_ascii_hexdigit()).to_string());
-            let reg = crate::steps::get(&c2, "regression").map(|x| x.note).unwrap_or_default();
+            let commit = pr
+                .split_whitespace()
+                .find(|w| w.starts_with("https://github.com/rust-lang/rust/commit/"))
+                .map(|u| {
+                    u.trim_end_matches(|c: char| !c.is_ascii_hexdigit())
+                        .to_string()
+                });
+            let reg = crate::steps::get(&c2, "regression")
+                .map(|x| x.note)
+                .unwrap_or_default();
             match commit {
-                Some(u) => format!("[{}]({u})", u.rsplit('/').next().unwrap_or("").chars().take(10).collect::<String>()),
-                None if reg.starts_with("long-standing") => "long-standing, not a regression".to_string(),
+                Some(u) => format!(
+                    "[{}]({u})",
+                    u.rsplit('/')
+                        .next()
+                        .unwrap_or("")
+                        .chars()
+                        .take(10)
+                        .collect::<String>()
+                ),
+                None if reg.starts_with("long-standing") => {
+                    "long-standing, not a regression".to_string()
+                }
                 None if pr.contains("not found") => "regressed commit not found".to_string(),
                 None => "not bisected yet".to_string(),
             }
         };
         let label_pass = |k: &str, c: &Cfg| -> String {
             match pass_of(&root.join(k), c) {
-                Some((kind, name)) => format!("{} `{}`", if kind == "mir" { "MIR" } else { "LLVM" }, name),
+                Some((kind, name)) => {
+                    format!("{} `{}`", if kind == "mir" { "MIR" } else { "LLVM" }, name)
+                }
                 None => "no pass found".to_string(),
             }
         };
-        let mut both: std::collections::BTreeMap<(String, String), Vec<String>> = Default::default();
+        let mut both: std::collections::BTreeMap<(String, String), Vec<String>> =
+            Default::default();
         for (k, c) in &rows {
-            both.entry((label_commit(k, c), label_pass(k, c))).or_default().push(k.clone());
+            both.entry((label_commit(k, c), label_pass(k, c)))
+                .or_default()
+                .push(k.clone());
         }
         if !both.is_empty() {
-            let _ = writeln!(s, "\n## Grouped by the commit and the optimisation pass together\n\nThe tightest grouping: the same regressing commit and the same first pass that changes the result.\n");
+            let _ = writeln!(
+                s,
+                "\n## Grouped by the commit and the optimisation pass together\n\nThe tightest grouping: the same regressing commit and the same first pass that changes the result.\n"
+            );
             let mut groups: Vec<_> = both.into_iter().collect();
             groups.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then(a.0.cmp(&b.0)));
             for ((commit, pass), mut ks) in groups {
                 ks.sort();
-                let _ = writeln!(s, "- {commit} + {pass} ({}): {}", ks.len(), ks.iter().map(|k| format!("`{k}`")).collect::<Vec<_>>().join(", "));
+                let _ = writeln!(
+                    s,
+                    "- {commit} + {pass} ({}): {}",
+                    ks.len(),
+                    ks.iter()
+                        .map(|k| format!("`{k}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
             }
         }
     }
-    let _ = writeln!(s, "\n## Not fully tested yet ({} finding(s))\n\nThe checklist is not complete for these: the next retriage runs work on them, closest to completion first. Do not report them yet.\n", partial.len());
+    let _ = writeln!(
+        s,
+        "\n## Not fully tested yet ({} finding(s))\n\nThe checklist is not complete for these: the next retriage runs work on them, closest to completion first. Do not report them yet.\n",
+        partial.len()
+    );
     table(&mut s, &partial);
     std::fs::write(pkg.join("INDEX.md"), s).unwrap();
     write_old_index(pkg);
@@ -538,17 +844,23 @@ pub fn write_index(pkg: &Path) {
 
 /// The compilation target a finding needs: from `--target` in any of its flag sets, else the host.
 fn target_of(c: &Cfg) -> String {
-    for key in ["min_bad_flags", "min_base_flags", "min_common_flags", "bad_flags", "base_flags"] {
+    for key in [
+        "min_bad_flags",
+        "min_base_flags",
+        "min_common_flags",
+        "bad_flags",
+        "base_flags",
+    ] {
         let Some(flags) = c.get(key) else { continue };
         let words: Vec<&str> = flags.split_whitespace().collect();
         for (i, w) in words.iter().enumerate() {
             if let Some(t) = w.strip_prefix("--target=") {
                 return format!("`{t}`");
             }
-            if *w == "--target" {
-                if let Some(t) = words.get(i + 1) {
-                    return format!("`{t}`");
-                }
+            if *w == "--target"
+                && let Some(t) = words.get(i + 1)
+            {
+                return format!("`{t}`");
             }
         }
     }
@@ -566,13 +878,33 @@ fn write_old_index(pkg: &Path) {
         .flatten()
         .flatten()
         .filter(|e| e.path().is_dir())
-        .map(|e| (e.file_name().to_string_lossy().to_string(), read_cfg(&e.path().join("status.cfg")), e.path().join("case.rs").exists()))
+        .map(|e| {
+            (
+                e.file_name().to_string_lossy().to_string(),
+                read_cfg(&e.path().join("status.cfg")),
+                e.path().join("case.rs").exists(),
+            )
+        })
         .collect();
-    rows.sort_by(|a, b| b.1.get("fixed_on").cmp(&a.1.get("fixed_on")).then(a.0.cmp(&b.0)));
-    let mut s = String::from("# Old findings\n\nThese stopped reproducing on the newest nightly (most are fixed in LLVM / rustc). They are not triaged any more. A finding that the nightly shows again moves back to `findings/`.\n\n| finding | state | no longer reproduces since | checked with | first seen | files kept |\n|---|---|---|---|---|---|\n");
+    rows.sort_by(|a, b| {
+        b.1.get("fixed_on")
+            .cmp(&a.1.get("fixed_on"))
+            .then(a.0.cmp(&b.0))
+    });
+    let mut s = String::from(
+        "# Old findings\n\nThese stopped reproducing on the newest nightly (most are fixed in LLVM / rustc). They are not triaged any more. A finding that the nightly shows again moves back to `findings/`.\n\n| finding | state | no longer reproduces since | checked with | first seen | files kept |\n|---|---|---|---|---|---|\n",
+    );
     for (k, st, kept) in &rows {
         let g = |n: &str| st.get(n).cloned().unwrap_or_default();
-        let _ = writeln!(s, "| `{k}` | {} | {} | {} | {} | {} |", g("state"), g("fixed_on"), g("fixed_rustc"), g("first_seen"), if *kept { "yes" } else { "key only" });
+        let _ = writeln!(
+            s,
+            "| `{k}` | {} | {} | {} | {} | {} |",
+            g("state"),
+            g("fixed_on"),
+            g("fixed_rustc"),
+            g("first_seen"),
+            if *kept { "yes" } else { "key only" }
+        );
     }
     let _ = std::fs::write(dir.join("INDEX.md"), s);
 }

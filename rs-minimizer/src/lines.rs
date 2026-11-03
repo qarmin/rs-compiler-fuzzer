@@ -16,8 +16,21 @@ pub fn shrink_lines(it: &dyn Oracle, src: &str, deadline: Instant) -> String {
                 return lines.join("\n");
             }
             // chunks i, i+n, i+2n, ... are tried at the same time; the first one that works is dropped
-            let starts: Vec<usize> = (0..width).map(|k| i + k * n).take_while(|&s| s < lines.len()).collect();
-            let cands: Vec<String> = starts.iter().map(|&s| lines[..s].iter().chain(lines[(s + n).min(lines.len())..].iter()).cloned().collect::<Vec<_>>().join("\n")).collect();
+            let starts: Vec<usize> = (0..width)
+                .map(|k| i + k * n)
+                .take_while(|&s| s < lines.len())
+                .collect();
+            let cands: Vec<String> = starts
+                .iter()
+                .map(|&s| {
+                    lines[..s]
+                        .iter()
+                        .chain(lines[(s + n).min(lines.len())..].iter())
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                })
+                .collect();
             let res = par_map(&cands, width, |c| !c.is_empty() && it.check(c));
             match res.iter().position(|&ok| ok) {
                 Some(p) => {
@@ -38,13 +51,24 @@ pub fn shrink_lines(it: &dyn Oracle, src: &str, deadline: Instant) -> String {
 
 /// Comments and blank lines: they never matter to a reducer, so all of them go in one step.
 pub fn strip_comments(it: &dyn Oracle, src: &str) -> String {
-    if !src.lines().any(|l| l.trim().is_empty() || l.trim_start().starts_with("//")) {
+    if !src
+        .lines()
+        .any(|l| l.trim().is_empty() || l.trim_start().starts_with("//"))
+    {
         return src.to_string();
     }
-    let cand: Vec<String> = src.lines().filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with("//")).map(|l| l.to_string()).collect();
+    let cand: Vec<String> = src
+        .lines()
+        .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with("//"))
+        .map(|l| l.to_string())
+        .collect();
     let cand = cand.join("\n") + "\n";
     if cand != src && it.check(&cand) {
-        info!("comments and blank lines removed ({} -> {} lines)", src.lines().count(), cand.lines().count());
+        info!(
+            "comments and blank lines removed ({} -> {} lines)",
+            src.lines().count(),
+            cand.lines().count()
+        );
         cand
     } else {
         src.to_string()

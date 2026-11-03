@@ -25,11 +25,27 @@ fn trait_impls(src: &str, items: &[Item]) -> Vec<TraitImpl> {
         .filter_map(|i| {
             let head = &src[i.start..i.header_end];
             let after = head[head.find("impl")? + 4..].trim_start();
-            let (generic, rest) = if after.starts_with('<') { (true, &after[matching_angle(after)? + 1..]) } else { (false, after) };
+            let (generic, rest) = if after.starts_with('<') {
+                (true, &after[matching_angle(after)? + 1..])
+            } else {
+                (false, after)
+            };
             let (tr, ty) = rest.split_once(" for ")?;
-            let tr = tr.trim().split('<').next()?.rsplit("::").next()?.trim().to_string();
+            let tr = tr
+                .trim()
+                .split('<')
+                .next()?
+                .rsplit("::")
+                .next()?
+                .trim()
+                .to_string();
             let ty = ty.split(" where ").next()?.trim().to_string();
-            (!tr.is_empty() && !ty.is_empty()).then_some(TraitImpl { item: i.clone(), trait_name: tr, ty, generic })
+            (!tr.is_empty() && !ty.is_empty()).then_some(TraitImpl {
+                item: i.clone(),
+                trait_name: tr,
+                ty,
+                generic,
+            })
         })
         .collect()
 }
@@ -74,7 +90,12 @@ fn first_accepted(it: &dyn Oracle, cands: &[String], deadline: Instant) -> Optio
 
 fn word_positions(text: &str, word: &str) -> Vec<usize> {
     let b = text.as_bytes();
-    text.match_indices(word).map(|(i, _)| i).filter(|&i| (i == 0 || !is_ident(b[i - 1])) && b.get(i + word.len()).is_none_or(|&c| !is_ident(c))).collect()
+    text.match_indices(word)
+        .map(|(i, _)| i)
+        .filter(|&i| {
+            (i == 0 || !is_ident(b[i - 1])) && b.get(i + word.len()).is_none_or(|&c| !is_ident(c))
+        })
+        .collect()
 }
 
 /// `Trait::f(..)` -> `Type::f(..)` for traits with a single, non-generic impl: the call then looks like a call of the impl's method.
@@ -93,7 +114,11 @@ pub fn specialize_trait_paths(it: &dyn Oracle, src: &str, deadline: Instant) -> 
             let after = &src[p + name.len()..];
             let before = src[..p].trim_end();
             let in_header = items.iter().any(|i| i.start <= p && p < i.header_end);
-            if after.starts_with("::") && !before.ends_with("::") && !before.ends_with('<') && !in_header {
+            if after.starts_with("::")
+                && !before.ends_with("::")
+                && !before.ends_with('<')
+                && !in_header
+            {
                 sites.push((p, p + name.len(), only.ty.clone()));
             }
         }
@@ -159,10 +184,16 @@ pub fn monomorphize(it: &dyn Oracle, src: &str, deadline: Instant) -> String {
         }
         let items = item_ranges(&cur);
         let impls = trait_impls(&cur, &items);
-        let traits: Vec<&str> = items.iter().filter(|i| i.kw == "trait").filter_map(|i| i.name_in(&cur)).collect();
+        let traits: Vec<&str> = items
+            .iter()
+            .filter(|i| i.kw == "trait")
+            .filter_map(|i| i.name_in(&cur))
+            .collect();
         let mut cands: Vec<String> = Vec::new();
         for f in items.iter().filter(|i| i.kw == "fn") {
-            let Some((_, name_end)) = f.name else { continue };
+            let Some((_, name_end)) = f.name else {
+                continue;
+            };
             let b = cur.as_bytes();
             let open = skip_ws(b, name_end);
             if b.get(open) != Some(&b'<') {
@@ -176,7 +207,12 @@ pub fn monomorphize(it: &dyn Oracle, src: &str, deadline: Instant) -> String {
             let tys: Vec<&str> = traits
                 .iter()
                 .filter(|t| has_word(header, t))
-                .flat_map(|t| impls.iter().filter(move |i| i.trait_name == *t && !i.generic && plain_type(&i.ty)).map(|i| i.ty.as_str()))
+                .flat_map(|t| {
+                    impls
+                        .iter()
+                        .filter(move |i| i.trait_name == *t && !i.generic && plain_type(&i.ty))
+                        .map(|i| i.ty.as_str())
+                })
                 .collect();
             let parts = param_parts(&cur, open, close);
             for (pi, &(ps, pe)) in parts.iter().enumerate() {
@@ -189,17 +225,30 @@ pub fn monomorphize(it: &dyn Oracle, src: &str, deadline: Instant) -> String {
                     let generics = if parts.len() == 1 {
                         String::new()
                     } else {
-                        let kept: Vec<&str> = parts.iter().enumerate().filter(|(k, _)| *k != pi).map(|(_, &(s, e))| cur[s..e].trim()).collect();
+                        let kept: Vec<&str> = parts
+                            .iter()
+                            .enumerate()
+                            .filter(|(k, _)| *k != pi)
+                            .map(|(_, &(s, e))| cur[s..e].trim())
+                            .collect();
                         format!("<{}>", kept.join(", "))
                     };
                     let rest = replace_word(&cur[close + 1..f.end], &pname, ty);
-                    cands.push(format!("{}{}{}{}", &cur[..open], generics, rest, &cur[f.end..]));
+                    cands.push(format!(
+                        "{}{}{}{}",
+                        &cur[..open],
+                        generics,
+                        rest,
+                        &cur[f.end..]
+                    ));
                 }
             }
         }
         cands.sort();
         cands.dedup();
-        let Some(p) = first_accepted(it, &cands, deadline) else { break };
+        let Some(p) = first_accepted(it, &cands, deadline) else {
+            break;
+        };
         info!("monomorphized a generic parameter");
         cur = cands[p].clone();
     }
@@ -213,12 +262,22 @@ pub fn remove_trait_methods(it: &dyn Oracle, src: &str, deadline: Instant) -> St
     let impls = trait_impls(src, &items);
     let mut groups: Vec<Vec<(usize, usize)>> = Vec::new();
     for t in items.iter().filter(|i| i.kw == "trait") {
-        let Some(tname) = t.name_in(src) else { continue };
+        let Some(tname) = t.name_in(src) else {
+            continue;
+        };
         let mut containers: Vec<&Item> = vec![t];
-        containers.extend(impls.iter().filter(|i| i.trait_name == tname).map(|i| &i.item));
+        containers.extend(
+            impls
+                .iter()
+                .filter(|i| i.trait_name == tname)
+                .map(|i| &i.item),
+        );
         let mut by_name: Vec<(String, Vec<(usize, usize)>)> = Vec::new();
         for c in &containers {
-            for m in children(&items, Some(c)).into_iter().filter(|m| m.kw == "fn") {
+            for m in children(&items, Some(c))
+                .into_iter()
+                .filter(|m| m.kw == "fn")
+            {
                 let Some(mn) = m.name_in(src) else { continue };
                 match by_name.iter_mut().find(|(n, _)| n == mn) {
                     Some((_, v)) => v.push((m.start, m.end)),
@@ -236,7 +295,11 @@ pub fn remove_trait_methods(it: &dyn Oracle, src: &str, deadline: Instant) -> St
     }
     let cur = delete_groups(it, src, groups, deadline);
     if cur.len() < src.len() {
-        info!("trait methods: {} -> {} lines", src.lines().count(), cur.lines().count());
+        info!(
+            "trait methods: {} -> {} lines",
+            src.lines().count(),
+            cur.lines().count()
+        );
     }
     cur
 }
@@ -265,7 +328,11 @@ fn bound_deletions(src: &str, colon: usize, from: usize, to: usize, out: &mut Ve
         return;
     }
     for (i, &(s, e)) in pieces.iter().enumerate() {
-        out.push(if i + 1 < pieces.len() { (s, pieces[i + 1].0) } else { (pieces[i - 1].1, e) });
+        out.push(if i + 1 < pieces.len() {
+            (s, pieces[i + 1].0)
+        } else {
+            (pieces[i - 1].1, e)
+        });
     }
 }
 
@@ -273,7 +340,10 @@ fn bound_deletions(src: &str, colon: usize, from: usize, to: usize, out: &mut Ve
 fn bound_ranges(src: &str) -> Vec<(usize, usize)> {
     let b = src.as_bytes();
     let mut out = Vec::new();
-    for item in item_ranges(src).iter().filter(|i| matches!(i.kw.as_str(), "fn" | "impl" | "trait" | "struct" | "enum")) {
+    for item in item_ranges(src)
+        .iter()
+        .filter(|i| matches!(i.kw.as_str(), "fn" | "impl" | "trait" | "struct" | "enum"))
+    {
         let end = item.header_end;
         let mut k = item.start;
         // parentheses hold parameters and their types: `x: T` there is no bound
@@ -282,7 +352,10 @@ fn bound_ranges(src: &str) -> Vec<(usize, usize)> {
             match b[k] {
                 b'(' => paren += 1,
                 b')' => paren -= 1,
-                b':' if paren == 0 && b.get(k + 1) != Some(&b':') && (k == 0 || b[k - 1] != b':') => {
+                b':' if paren == 0
+                    && b.get(k + 1) != Some(&b':')
+                    && (k == 0 || b[k - 1] != b':') =>
+                {
                     let (mut depth, mut e) = (0i32, k + 1);
                     while e < end {
                         match b[e] {
@@ -290,7 +363,12 @@ fn bound_ranges(src: &str) -> Vec<(usize, usize)> {
                             b'>' if b[e - 1] != b'-' => depth -= 1,
                             b')' | b']' => depth -= 1,
                             b',' | b'=' | b';' if depth == 0 => break,
-                            b'w' if depth == 0 && src[e..].starts_with("where") && !is_ident(b[e - 1]) => break,
+                            b'w' if depth == 0
+                                && src[e..].starts_with("where")
+                                && !is_ident(b[e - 1]) =>
+                            {
+                                break;
+                            }
                             _ => {}
                         }
                         if depth < 0 {
@@ -338,5 +416,9 @@ fn drop_dangling_plus(it: &dyn Oracle, src: String) -> String {
     for k in spots.into_iter().rev() {
         out.replace_range(k..k + 1, "");
     }
-    if out != src && it.check(&out) { out } else { src }
+    if out != src && it.check(&out) {
+        out
+    } else {
+        src
+    }
 }

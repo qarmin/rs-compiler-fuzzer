@@ -8,10 +8,10 @@
 //!  5. writes `status.cfg`, `STATUS.md`, `ISSUE.md` and a "Status" block at the top of `report.md`,
 //!     ending in an explicit verdict with the reasons.
 
-use log::info;
-use crate::reduce::{reduce_all, Interest, ReduceLog};
+use crate::reduce::{Interest, ReduceLog, reduce_all};
+use crate::runner::{Config, Limits, Outcome, build_and_run, crash_signature, exec};
 use crate::steps;
-use crate::runner::{build_and_run, crash_signature, exec, Config, Limits, Outcome};
+use log::info;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -42,7 +42,12 @@ impl TriageOpts {
 
 /// Seconds until the run's hard deadline (a very large number when there is none).
 fn left_secs(o: &TriageOpts) -> u64 {
-    o.deadline.map(|d| d.saturating_duration_since(std::time::Instant::now()).as_secs()).unwrap_or(u64::MAX / 4)
+    o.deadline
+        .map(|d| {
+            d.saturating_duration_since(std::time::Instant::now())
+                .as_secs()
+        })
+        .unwrap_or(u64::MAX / 4)
 }
 
 /// Version of the triage / minimisation logic. Bump it by hand whenever the results of `triage` get
@@ -58,7 +63,11 @@ const STAGES: usize = STAGE_MARKS.len();
 
 /// Reduction time a program of that size needs before it may be called settled.
 fn required_secs(lines: usize) -> u64 {
-    if lines > SHORT_LINES { STAGE_MARKS[STAGES - 1] } else { STAGE_MARKS[STAGES - 2] }
+    if lines > SHORT_LINES {
+        STAGE_MARKS[STAGES - 1]
+    } else {
+        STAGE_MARKS[STAGES - 2]
+    }
 }
 
 /// Stages of a run that starts after `done` seconds of earlier reduction: (index, length). Stages whose mark is behind us are
@@ -94,17 +103,27 @@ pub fn read_cfg(path: &Path) -> Cfg {
     std::fs::read_to_string(path)
         .unwrap_or_default()
         .lines()
-        .filter_map(|l| l.split_once('=').map(|(k, v)| (k.to_string(), v.to_string())))
+        .filter_map(|l| {
+            l.split_once('=')
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+        })
         .collect()
 }
 
 pub fn write_cfg(path: &Path, cfg: &Cfg) {
-    let s: String = cfg.iter().map(|(k, v)| format!("{k}={}\n", v.replace('\n', " "))).collect();
+    let s: String = cfg
+        .iter()
+        .map(|(k, v)| format!("{k}={}\n", v.replace('\n', " ")))
+        .collect();
     std::fs::write(path, s).unwrap();
 }
 
 fn today() -> String {
-    Command::new("date").args(["-u", "+%F"]).output().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default()
+    Command::new("date")
+        .args(["-u", "+%F"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default()
 }
 
 /// Installed channels as (name, "rustc 1.99.1 (...)").
@@ -113,10 +132,13 @@ pub fn channels() -> Vec<(String, String)> {
     for ch in ["stable", "beta", "nightly"] {
         let mut c = Command::new("rustc");
         c.arg(format!("+{ch}")).arg("--version");
-        if let Ok(r) = exec(c, Duration::from_secs(30)) {
-            if r.code == Some(0) {
-                out.push((ch.to_string(), String::from_utf8_lossy(&r.stdout).trim().to_string()));
-            }
+        if let Ok(r) = exec(c, Duration::from_secs(30))
+            && r.code == Some(0)
+        {
+            out.push((
+                ch.to_string(),
+                String::from_utf8_lossy(&r.stdout).trim().to_string(),
+            ));
         }
     }
     out
@@ -139,7 +161,15 @@ impl Repro {
     }
 }
 
-pub fn reproduces(rustc: &[String], src: &Path, base: &Config, bad: &Config, sig: &Option<String>, lim: &Limits, work: &Path) -> (Repro, Outcome, Outcome) {
+pub fn reproduces(
+    rustc: &[String],
+    src: &Path,
+    base: &Config,
+    bad: &Config,
+    sig: &Option<String>,
+    lim: &Limits,
+    work: &Path,
+) -> (Repro, Outcome, Outcome) {
     let id = std::process::id();
     let a = build_and_run(rustc, src, &work.join(format!("tri_a_{id}")), base, lim);
     let b = build_and_run(rustc, src, &work.join(format!("tri_b_{id}")), bad, lim);
@@ -149,8 +179,19 @@ pub fn reproduces(rustc: &[String], src: &Path, base: &Config, bad: &Config, sig
         return (Repro::NotApplicable, a, b);
     }
     let yes = match sig {
-        Some(s) => matches!(a, Outcome::Ran { .. }) && crash_signature(&b).as_deref() == Some(s.as_str()),
-        None => matches!((&a, &b), (Outcome::Ran { .. }, Outcome::Ran { .. })) && crate::runner::differs_src(&a, &b, base, bad, &std::fs::read_to_string(src).unwrap_or_default()),
+        Some(s) => {
+            matches!(a, Outcome::Ran { .. }) && crash_signature(&b).as_deref() == Some(s.as_str())
+        }
+        None => {
+            matches!((&a, &b), (Outcome::Ran { .. }, Outcome::Ran { .. }))
+                && crate::runner::differs_src(
+                    &a,
+                    &b,
+                    base,
+                    bad,
+                    &std::fs::read_to_string(src).unwrap_or_default(),
+                )
+        }
     };
     (if yes { Repro::Yes } else { Repro::No }, a, b)
 }
@@ -167,47 +208,113 @@ fn miri(src: &str, work: &Path) -> MiriResult {
     let have = {
         let mut c = Command::new("cargo");
         c.args(["+nightly", "miri", "--version"]);
-        exec(c, Duration::from_secs(60)).map(|r| r.code == Some(0)).unwrap_or(false)
+        exec(c, Duration::from_secs(60))
+            .map(|r| r.code == Some(0))
+            .unwrap_or(false)
     };
     if !have {
-        return MiriResult { verdict: "skipped".into(), detail: "Miri is not installed (rustup component add miri rust-src --toolchain nightly)".into(), stdout: String::new(), report: String::new() };
+        return MiriResult {
+            verdict: "skipped".into(),
+            detail:
+                "Miri is not installed (rustup component add miri rust-src --toolchain nightly)"
+                    .into(),
+            stdout: String::new(),
+            report: String::new(),
+        };
     }
     let dir = work.join(format!("miri_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("src")).unwrap();
     std::fs::write(dir.join("Cargo.toml"), "[package]\nname = \"miri_check\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n# the findings build with --cap-lints allow: deny-by-default lints must not stop Miri\n[lints.rust]\noverflowing_literals = \"allow\"\narithmetic_overflow = \"allow\"\nunconditional_panic = \"allow\"\ninvalid_value = \"allow\"\n\n# below the repository (a workspace): not a member\n[workspace]\n").unwrap();
-    std::fs::write(dir.join("src/main.rs"), format!("#![allow(warnings)]\n{src}")).unwrap();
+    std::fs::write(
+        dir.join("src/main.rs"),
+        format!("#![allow(warnings)]\n{src}"),
+    )
+    .unwrap();
     let mut c = Command::new("cargo");
-    c.args(["+nightly", "miri", "run", "-q"]).current_dir(&dir).env("MIRIFLAGS", "-Zmiri-disable-isolation -Zmiri-ignore-leaks").env("CARGO_PROFILE_DEV_OVERFLOW_CHECKS", "false").env("CARGO_PROFILE_DEV_DEBUG_ASSERTIONS", "false");
+    c.args(["+nightly", "miri", "run", "-q"])
+        .current_dir(&dir)
+        .env("MIRIFLAGS", "-Zmiri-disable-isolation -Zmiri-ignore-leaks")
+        .env("CARGO_PROFILE_DEV_OVERFLOW_CHECKS", "false")
+        .env("CARGO_PROFILE_DEV_DEBUG_ASSERTIONS", "false");
     let r = exec(c, Duration::from_secs(900));
     let _ = std::fs::remove_dir_all(&dir);
     match r {
-        Ok(r) if r.timed_out => MiriResult { verdict: "error".into(), detail: "Miri timed out".into(), stdout: String::new(), report: String::new() },
-        Ok(r) if r.code == Some(0) => MiriResult { verdict: "ok".into(), detail: "Miri ran the program to completion".into(), stdout: String::from_utf8_lossy(&r.stdout).into_owned(), report: String::new() },
+        Ok(r) if r.timed_out => MiriResult {
+            verdict: "error".into(),
+            detail: "Miri timed out".into(),
+            stdout: String::new(),
+            report: String::new(),
+        },
+        Ok(r) if r.code == Some(0) => MiriResult {
+            verdict: "ok".into(),
+            detail: "Miri ran the program to completion".into(),
+            stdout: String::from_utf8_lossy(&r.stdout).into_owned(),
+            report: String::new(),
+        },
         Ok(r) => {
             let e = r.stderr;
-            let first = e.lines().find(|l| l.contains("Undefined Behavior") || l.contains("panicked") || l.starts_with("error")).unwrap_or("").trim().to_string();
-            let v = if e.contains("Undefined Behavior") { "ub" } else if e.contains("panicked") || e.contains("overflow") { "panic" } else { "error" };
+            let first = e
+                .lines()
+                .find(|l| {
+                    l.contains("Undefined Behavior")
+                        || l.contains("panicked")
+                        || l.starts_with("error")
+                })
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let v = if e.contains("Undefined Behavior") {
+                "ub"
+            } else if e.contains("panicked") || e.contains("overflow") {
+                "panic"
+            } else {
+                "error"
+            };
             // the program did not even build for Miri (a lint, a type error): that says nothing about the program, keep it out of the issue
-            let not_built = v == "error" && (e.contains("could not compile") || e.contains("aborting due to"));
-            let report = if not_built { String::new() } else { e.lines().take(40).collect::<Vec<_>>().join("\n") };
-            MiriResult { verdict: v.into(), detail: if not_built { format!("did not build for Miri: {first}") } else { first }, stdout: String::from_utf8_lossy(&r.stdout).into_owned(), report }
+            let not_built =
+                v == "error" && (e.contains("could not compile") || e.contains("aborting due to"));
+            let report = if not_built {
+                String::new()
+            } else {
+                e.lines().take(40).collect::<Vec<_>>().join("\n")
+            };
+            MiriResult {
+                verdict: v.into(),
+                detail: if not_built {
+                    format!("did not build for Miri: {first}")
+                } else {
+                    first
+                },
+                stdout: String::from_utf8_lossy(&r.stdout).into_owned(),
+                report,
+            }
         }
-        Err(e) => MiriResult { verdict: "error".into(), detail: e.to_string(), stdout: String::new(), report: String::new() },
+        Err(e) => MiriResult {
+            verdict: "error".into(),
+            detail: e.to_string(),
+            stdout: String::new(),
+            report: String::new(),
+        },
     }
 }
 
 #[derive(Default)]
 struct Search {
     performed: bool,
-    lines: Vec<String>,   // human readable, one per query
+    lines: Vec<String>,    // human readable, one per query
     possible: Vec<String>, // "#N title (state) url"
     note: String,
 }
 
 fn gh_issues(args: &[&str]) -> Result<Vec<(String, String, String, String)>, String> {
     let mut c = Command::new("gh");
-    c.args(["search", "issues"]).args(args).args(["--json", "number,title,state,url", "--jq", r#".[] | "\(.number)\t\(.state)\t\(.title)\t\(.url)""#]);
+    c.args(["search", "issues"]).args(args).args([
+        "--json",
+        "number,title,state,url",
+        "--jq",
+        r#".[] | "\(.number)\t\(.state)\t\(.title)\t\(.url)""#,
+    ]);
     let r = exec(c, Duration::from_secs(60)).map_err(|e| e.to_string())?;
     if r.code != Some(0) {
         return Err(r.stderr.lines().next().unwrap_or("gh failed").to_string());
@@ -216,7 +323,12 @@ fn gh_issues(args: &[&str]) -> Result<Vec<(String, String, String, String)>, Str
         .lines()
         .filter_map(|l| {
             let mut p = l.splitn(4, '\t');
-            Some((p.next()?.to_string(), p.next()?.to_string(), p.next()?.to_string(), p.next()?.to_string()))
+            Some((
+                p.next()?.to_string(),
+                p.next()?.to_string(),
+                p.next()?.to_string(),
+                p.next()?.to_string(),
+            ))
         })
         .collect())
 }
@@ -224,12 +336,56 @@ fn gh_issues(args: &[&str]) -> Result<Vec<(String, String, String, String)>, Str
 /// Method names (`.foo(`) in the program, rarest-looking first.
 fn distinctive_methods(src: &str) -> Vec<String> {
     const INTERESTING: &[&str] = &[
-        "abs_diff", "isqrt", "midpoint", "ilog2", "ilog10", "rem_euclid", "div_euclid", "wrapping_rem_euclid", "wrapping_div_euclid",
-        "is_power_of_two", "leading_ones", "trailing_ones", "count_zeros", "saturating_pow", "checked_pow", "overflowing_pow",
-        "swap_bytes", "reverse_bits", "copysign", "mul_add", "sqrt", "round_ties_even", "signum", "recip", "fract", "select_nth_unstable",
-        "binary_search", "partition_point", "sort_unstable_by_key", "rotate_left", "rotate_right", "checked_next_power_of_two", "unsigned_abs",
-        "wrapping_abs", "saturating_mul", "checked_shl", "overflowing_shl", "catch_unwind", "read_unaligned", "write_unaligned", "expose_provenance",
-        "wrapping_pow", "wrapping_neg", "checked_neg", "saturating_sub", "saturating_add", "wrapping_shl", "wrapping_shr", "wrapping_mul", "wrapping_add",
+        "abs_diff",
+        "isqrt",
+        "midpoint",
+        "ilog2",
+        "ilog10",
+        "rem_euclid",
+        "div_euclid",
+        "wrapping_rem_euclid",
+        "wrapping_div_euclid",
+        "is_power_of_two",
+        "leading_ones",
+        "trailing_ones",
+        "count_zeros",
+        "saturating_pow",
+        "checked_pow",
+        "overflowing_pow",
+        "swap_bytes",
+        "reverse_bits",
+        "copysign",
+        "mul_add",
+        "sqrt",
+        "round_ties_even",
+        "signum",
+        "recip",
+        "fract",
+        "select_nth_unstable",
+        "binary_search",
+        "partition_point",
+        "sort_unstable_by_key",
+        "rotate_left",
+        "rotate_right",
+        "checked_next_power_of_two",
+        "unsigned_abs",
+        "wrapping_abs",
+        "saturating_mul",
+        "checked_shl",
+        "overflowing_shl",
+        "catch_unwind",
+        "read_unaligned",
+        "write_unaligned",
+        "expose_provenance",
+        "wrapping_pow",
+        "wrapping_neg",
+        "checked_neg",
+        "saturating_sub",
+        "saturating_add",
+        "wrapping_shl",
+        "wrapping_shr",
+        "wrapping_mul",
+        "wrapping_add",
     ];
     let mut found = Vec::new();
     for m in INTERESTING {
@@ -241,94 +397,214 @@ fn distinctive_methods(src: &str) -> Vec<String> {
 }
 
 /// One repository (`rust-lang/rust` or `llvm/llvm-project`). A query that fails keeps the whole search "not performed": a search with holes is no search.
-fn upstream_search(repo_scope: &str, reduced: &str, bad: &Config, sig: &Option<String>, llvm_pass: &Option<String>) -> Search {
+fn upstream_search(
+    repo_scope: &str,
+    reduced: &str,
+    bad: &Config,
+    sig: &Option<String>,
+    llvm_pass: &Option<String>,
+) -> Search {
     let mut s = Search::default();
     // is gh usable at all?
     if let Err(e) = gh_issues(&["--repo", "rust-lang/rust", "--limit", "1", "miscompile"]) {
-        s.note = format!("NOT PERFORMED: `gh search` is unavailable ({e}). Search rust-lang/rust and llvm/llvm-project by hand.");
+        s.note = format!(
+            "NOT PERFORMED: `gh search` is unavailable ({e}). Search rust-lang/rust and llvm/llvm-project by hand."
+        );
         return s;
     }
     s.performed = true;
     let failed = std::cell::RefCell::new(Vec::<String>::new());
-    let run = |s: &mut Search, repo: &str, label: &str, extra: &[&str], q: &str, state_filter: bool| {
-        let mut args: Vec<&str> = vec!["--repo", repo, "--limit", "10"];
-        args.extend_from_slice(extra);
-        args.push(q);
-        match gh_issues(&args) {
-            Err(e) => {
-                failed.borrow_mut().push(format!("`{repo}` {label} `{q}`: {e}"));
-                s.lines.push(format!("- `{repo}` {label} `{q}`: search failed ({e})"));
-            }
-            Ok(hits) if hits.is_empty() => s.lines.push(format!("- `{repo}` {label} `{q}`: **no issues found**")),
-            Ok(hits) => {
-                s.lines.push(format!("- `{repo}` {label} `{q}`: {} result(s)", hits.len()));
-                for (n, st, title, url) in hits {
-                    s.lines.push(format!("    - #{n} [{st}] {title} - {url}"));
-                    if state_filter {
-                        s.possible.push(format!("{repo}#{n}"));
+    let run =
+        |s: &mut Search, repo: &str, label: &str, extra: &[&str], q: &str, state_filter: bool| {
+            let mut args: Vec<&str> = vec!["--repo", repo, "--limit", "10"];
+            args.extend_from_slice(extra);
+            args.push(q);
+            match gh_issues(&args) {
+                Err(e) => {
+                    failed
+                        .borrow_mut()
+                        .push(format!("`{repo}` {label} `{q}`: {e}"));
+                    s.lines
+                        .push(format!("- `{repo}` {label} `{q}`: search failed ({e})"));
+                }
+                Ok(hits) if hits.is_empty() => s
+                    .lines
+                    .push(format!("- `{repo}` {label} `{q}`: **no issues found**")),
+                Ok(hits) => {
+                    s.lines.push(format!(
+                        "- `{repo}` {label} `{q}`: {} result(s)",
+                        hits.len()
+                    ));
+                    for (n, st, title, url) in hits {
+                        s.lines.push(format!("    - #{n} [{st}] {title} - {url}"));
+                        if state_filter {
+                            s.possible.push(format!("{repo}#{n}"));
+                        }
                     }
                 }
             }
-        }
-    };
+        };
     if let Some(sig) = sig {
-        let text: String = sig.replace("rustc-LLVM ERROR: ", "").replace("error: ", "").replace('#', "");
+        let text: String = sig
+            .replace("rustc-LLVM ERROR: ", "")
+            .replace("error: ", "")
+            .replace('#', "");
         let text = text.trim().chars().take(70).collect::<String>();
-        let text = text.trim_end_matches(|c: char| !c.is_alphanumeric()).to_string();
+        let text = text
+            .trim_end_matches(|c: char| !c.is_alphanumeric())
+            .to_string();
         let q = format!("\"{text}\"");
         run(&mut s, repo_scope, "crash text", &[], &q, true);
     } else if repo_scope == "llvm/llvm-project" {
         if let Some(pass) = llvm_pass {
-            run(&mut s, repo_scope, "pass + miscompilation", &["--label", "miscompilation"], &format!("\"{pass}\""), true);
-            run(&mut s, repo_scope, "pass", &[], &format!("\"{pass}\" miscompile"), true);
+            run(
+                &mut s,
+                repo_scope,
+                "pass + miscompilation",
+                &["--label", "miscompilation"],
+                &format!("\"{pass}\""),
+                true,
+            );
+            run(
+                &mut s,
+                repo_scope,
+                "pass",
+                &[],
+                &format!("\"{pass}\" miscompile"),
+                true,
+            );
         }
     } else {
-        let flag = bad.flags.iter().find(|f| f.contains("opt-level") || f.contains("lto") || f.contains("target-cpu") || f.contains("mir")).cloned().unwrap_or_default();
+        let flag = bad
+            .flags
+            .iter()
+            .find(|f| {
+                f.contains("opt-level")
+                    || f.contains("lto")
+                    || f.contains("target-cpu")
+                    || f.contains("mir")
+            })
+            .cloned()
+            .unwrap_or_default();
         let methods = distinctive_methods(reduced);
         if !flag.is_empty() {
-            run(&mut s, "rust-lang/rust", "miscompile + flag", &["--label", "I-miscompile"], &format!("\"{flag}\""), false);
+            run(
+                &mut s,
+                "rust-lang/rust",
+                "miscompile + flag",
+                &["--label", "I-miscompile"],
+                &format!("\"{flag}\""),
+                false,
+            );
         }
         if methods.len() >= 2 {
             let q = format!("{} {}", methods[0], methods[1]);
             run(&mut s, "rust-lang/rust", "methods", &[], &q, true);
         }
         if let Some(m) = methods.first() {
-            run(&mut s, "rust-lang/rust", "method + miscompile", &["--label", "I-miscompile"], m, true);
+            run(
+                &mut s,
+                "rust-lang/rust",
+                "method + miscompile",
+                &["--label", "I-miscompile"],
+                m,
+                true,
+            );
         }
         // title scan of every I-miscompile issue for words that appear in the reduced program
-        match gh_issues(&["--repo", "rust-lang/rust", "--label", "I-miscompile", "--limit", "100", ""]) {
+        match gh_issues(&[
+            "--repo",
+            "rust-lang/rust",
+            "--label",
+            "I-miscompile",
+            "--limit",
+            "100",
+            "",
+        ]) {
             Ok(all) => {
-                let mut words: Vec<String> = ["i128", "u128", "i64", "u64", "i32", "u32", "i16", "u16", "i8", "u8", "f64", "f32", "union", "packed", "MaybeUninit", "NonZero", "async", "closure", "dyn", "drop", "loop", "match", "enum", "slice", "LTO", "vector", "select", "unwind", "panic", "simd", "avx"]
-                    .iter()
-                    .filter(|w| reduced.contains(&w.to_lowercase()) || reduced.contains(**w))
-                    .map(|w| w.to_string())
-                    .collect();
+                let mut words: Vec<String> = [
+                    "i128",
+                    "u128",
+                    "i64",
+                    "u64",
+                    "i32",
+                    "u32",
+                    "i16",
+                    "u16",
+                    "i8",
+                    "u8",
+                    "f64",
+                    "f32",
+                    "union",
+                    "packed",
+                    "MaybeUninit",
+                    "NonZero",
+                    "async",
+                    "closure",
+                    "dyn",
+                    "drop",
+                    "loop",
+                    "match",
+                    "enum",
+                    "slice",
+                    "LTO",
+                    "vector",
+                    "select",
+                    "unwind",
+                    "panic",
+                    "simd",
+                    "avx",
+                ]
+                .iter()
+                .filter(|w| reduced.contains(&w.to_lowercase()) || reduced.contains(**w))
+                .map(|w| w.to_string())
+                .collect();
                 if !flag.is_empty() {
                     words.push(flag.rsplit('=').next().unwrap_or("").to_string());
                 }
                 words.retain(|w| !w.is_empty());
-                let related: Vec<_> = all.iter().filter(|(_, _, t, _)| words.iter().any(|w| t.to_lowercase().contains(&w.to_lowercase()))).take(12).collect();
+                let related: Vec<_> = all
+                    .iter()
+                    .filter(|(_, _, t, _)| {
+                        words
+                            .iter()
+                            .any(|w| t.to_lowercase().contains(&w.to_lowercase()))
+                    })
+                    .take(12)
+                    .collect();
                 s.lines.push(format!("- scanned titles of {} `I-miscompile` issues in rust-lang/rust for {:?}: {} possibly related (by keyword only - read them)", all.len(), words, related.len()));
                 for (n, st, title, url) in related {
                     s.lines.push(format!("    - #{n} [{st}] {title} - {url}"));
                 }
             }
             Err(e) => {
-                failed.borrow_mut().push(format!("title scan of I-miscompile issues: {e}"));
-                s.lines.push(format!("- title scan of I-miscompile issues failed ({e})"));
+                failed
+                    .borrow_mut()
+                    .push(format!("title scan of I-miscompile issues: {e}"));
+                s.lines
+                    .push(format!("- title scan of I-miscompile issues failed ({e})"));
             }
         }
     }
     let failed = failed.into_inner();
     if !failed.is_empty() {
         s.performed = false;
-        s.note = format!("NOT COMPLETE: {} quer{} failed ({}); the next run repeats the search", failed.len(), if failed.len() == 1 { "y" } else { "ies" }, failed.join("; ").chars().take(300).collect::<String>());
+        s.note = format!(
+            "NOT COMPLETE: {} quer{} failed ({}); the next run repeats the search",
+            failed.len(),
+            if failed.len() == 1 { "y" } else { "ies" },
+            failed.join("; ").chars().take(300).collect::<String>()
+        );
     }
     s
 }
 
 fn show_flags(f: &str) -> String {
-    if f.trim().is_empty() { "(none)".to_string() } else { format!("`{f}`") }
+    if f.trim().is_empty() {
+        "(none)".to_string()
+    } else {
+        format!("`{f}`")
+    }
 }
 
 fn lines_of(s: &str) -> usize {
@@ -340,7 +616,11 @@ fn flag_groups(flags: &[String]) -> Vec<Vec<String>> {
     let mut out: Vec<Vec<String>> = Vec::new();
     let mut i = 0;
     while i < flags.len() {
-        let takes_value = (flags[i] == "-C" || flags[i] == "-Z" || (flags[i].starts_with("--") && !flags[i].contains('='))) && i + 1 < flags.len() && !flags[i + 1].starts_with('-');
+        let takes_value = (flags[i] == "-C"
+            || flags[i] == "-Z"
+            || (flags[i].starts_with("--") && !flags[i].contains('=')))
+            && i + 1 < flags.len()
+            && !flags[i + 1].starts_with('-');
         if takes_value {
             out.push(vec![flags[i].clone(), flags[i + 1].clone()]);
             i += 2;
@@ -414,7 +694,7 @@ fn shorten_flags(it: &mut Interest, src: &str) -> bool {
 }
 
 /// The same program built with other optimisation levels: which ones show the bug.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 struct Variant {
     flags: String,
     bug: bool,
@@ -422,14 +702,27 @@ struct Variant {
 }
 
 fn variants_to_text(v: &[Variant]) -> String {
-    v.iter().map(|x| format!("{}\t{}\t{}\n", x.flags, if x.bug { "bug" } else { "ok" }, x.out.replace('\n', "\\n"))).collect()
+    v.iter()
+        .map(|x| {
+            format!(
+                "{}\t{}\t{}\n",
+                x.flags,
+                if x.bug { "bug" } else { "ok" },
+                x.out.replace('\n', "\\n")
+            )
+        })
+        .collect()
 }
 
 fn variants_from_text(t: &str) -> Vec<Variant> {
     t.lines()
         .filter_map(|l| {
             let mut p = l.splitn(3, '\t');
-            Some(Variant { flags: p.next()?.to_string(), bug: p.next()? == "bug", out: p.next().unwrap_or("").replace("\\n", "\n") })
+            Some(Variant {
+                flags: p.next()?.to_string(),
+                bug: p.next()? == "bug",
+                out: p.next().unwrap_or("").replace("\\n", "\n"),
+            })
         })
         .collect()
 }
@@ -439,7 +732,9 @@ fn variants_from_text(t: &str) -> Vec<Variant> {
 fn crash_backtrace(rustc: &[String], src: &Path, cfg: &Config, work: &Path) -> Option<String> {
     // debug info gives file:line and inlined frames; it can hide a code-generation bug, so the plain build is the fallback
     let mut with_debug = cfg.clone();
-    with_debug.flags.extend(["-C".to_string(), "debuginfo=2".to_string()]);
+    with_debug
+        .flags
+        .extend(["-C".to_string(), "debuginfo=2".to_string()]);
     backtrace_of(rustc, src, &with_debug, work).or_else(|| backtrace_of(rustc, src, cfg, work))
 }
 
@@ -449,20 +744,39 @@ fn backtrace_of(rustc: &[String], src: &Path, cfg: &Config, work: &Path) -> Opti
     let bin = dir.join("bt_bin");
     let mut c = crate::runner::rustc_cmd(rustc);
     c.args(crate::runner::compile_args(src, &bin, cfg));
-    let built = exec(c, Duration::from_secs(120)).map(|r| r.code == Some(0)).unwrap_or(false);
-    let stem = src.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let built = exec(c, Duration::from_secs(120))
+        .map(|r| r.code == Some(0))
+        .unwrap_or(false);
+    let stem = src
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let mut out = None;
     if built {
         let mut g = Command::new("gdb");
-        g.args(["-batch", "-nx", "-ex", "set pagination off", "-ex", "run", "-ex", "bt 30"]).arg(&bin);
+        g.args([
+            "-batch",
+            "-nx",
+            "-ex",
+            "set pagination off",
+            "-ex",
+            "run",
+            "-ex",
+            "bt 30",
+        ])
+        .arg(&bin);
         if let Ok(r) = exec(g, Duration::from_secs(90)) {
             let text = String::from_utf8_lossy(&r.stdout).into_owned();
             let mut lines: Vec<String> = Vec::new();
             for l in text.lines() {
-                if l.starts_with("Program received signal") || l.starts_with("Program terminated with signal") {
+                if l.starts_with("Program received signal")
+                    || l.starts_with("Program terminated with signal")
+                {
                     lines.push(l.to_string());
                 } else if l.starts_with('#') {
-                    let l = crate::demangle::demangle_text(l).replace(&format!("{stem}::"), "reduced::").replace(&format!("{stem}.rs"), "reduced.rs");
+                    let l = crate::demangle::demangle_text(l)
+                        .replace(&format!("{stem}::"), "reduced::")
+                        .replace(&format!("{stem}.rs"), "reduced.rs");
                     // the directory the file was compiled from is of no interest
                     let l = match l.find("reduced.rs:") {
                         Some(end) => match l[..end].rfind(' ') {
@@ -473,12 +787,17 @@ fn backtrace_of(rustc: &[String], src: &Path, cfg: &Config, work: &Path) -> Opti
                     };
                     let l = match l.find("/lib/rustlib/src/rust/library/") {
                         Some(at) => match l[..at].rfind(" at ") {
-                            Some(from) => format!("{} at {}", &l[..from], &l[at + "/lib/rustlib/src/rust/".len()..]),
+                            Some(from) => format!(
+                                "{} at {}",
+                                &l[..from],
+                                &l[at + "/lib/rustlib/src/rust/".len()..]
+                            ),
                             None => l,
                         },
                         None => l,
                     };
-                    let past_user_code = l.contains("lang_start") || l.contains("__rust_begin_short_backtrace");
+                    let past_user_code =
+                        l.contains("lang_start") || l.contains("__rust_begin_short_backtrace");
                     if past_user_code {
                         break;
                     }
@@ -500,7 +819,12 @@ fn backtrace_of(rustc: &[String], src: &Path, cfg: &Config, work: &Path) -> Opti
 /// What a run printed, as shown in the issue.
 fn show_out(o: &Outcome) -> String {
     match o {
-        Outcome::Ran { stdout, code, signal, .. } => {
+        Outcome::Ran {
+            stdout,
+            code,
+            signal,
+            ..
+        } => {
             // how the process ended is part of the result: a crash by a signal (`exit code None`) is not a normal exit
             let ended = match (code, signal) {
                 (_, Some(s)) => {
@@ -535,7 +859,8 @@ fn show_out(o: &Outcome) -> String {
 fn has_flag(g: &[String], name: &str) -> bool {
     g.iter().any(|t| {
         let n = t.trim_start_matches('-');
-        n.starts_with(name) || ((n.starts_with('C') || n.starts_with('Z')) && n[1..].starts_with(name))
+        n.starts_with(name)
+            || ((n.starts_with('C') || n.starts_with('Z')) && n[1..].starts_with(name))
     })
 }
 
@@ -566,31 +891,72 @@ fn variant_of(o: &Outcome, sig: &Option<String>, reference: &Option<Outcome>) ->
 }
 
 /// The same program at the other `opt-level`s (on the channel the issue shows) and at the other `-Zmir-opt-level`s (nightly): which of them show the bug.
-fn opt_variants(rustc: &[String], src: &Path, base: &Config, bad: &Config, sig: &Option<String>, reference: &Option<Outcome>, lim: &Limits, work: &Path) -> Vec<Variant> {
+#[allow(clippy::too_many_arguments)]
+fn opt_variants(
+    rustc: &[String],
+    src: &Path,
+    base: &Config,
+    bad: &Config,
+    sig: &Option<String>,
+    reference: &Option<Outcome>,
+    lim: &Limits,
+    work: &Path,
+) -> Vec<Variant> {
     let groups = flag_groups(&bad.flags);
     let mut cfgs: Vec<(Vec<String>, Config)> = Vec::new();
     for l in ["0", "1", "2", "3", "s", "z"] {
         let mut c = bad.clone();
         c.name = format!("opt-{l}");
-        c.flags = with_flag(&groups, "opt-level=", vec!["-C".to_string(), format!("opt-level={l}")]).into_iter().flatten().collect();
+        c.flags = with_flag(
+            &groups,
+            "opt-level=",
+            vec!["-C".to_string(), format!("opt-level={l}")],
+        )
+        .into_iter()
+        .flatten()
+        .collect();
         cfgs.push((rustc.to_vec(), c));
     }
     let _ = base;
     let id = std::process::id();
-    let mut outs = crate::runner::par_map(&cfgs, 3, |(r, c)| build_and_run(r, src, &work.join(format!("var_{id}_{}", c.name)), c, lim));
+    let mut outs = crate::runner::par_map(&cfgs, 3, |(r, c)| {
+        build_and_run(r, src, &work.join(format!("var_{id}_{}", c.name)), c, lim)
+    });
     // The MIR levels are tried on top of -C opt-level=3 when that level shows the bug too (it is the level a reader expects, and
     // maintainers ask for `-Zmir-opt-level=0 -Copt-level=3`); otherwise on top of the failing configuration.
-    let opt3_bug = cfgs.iter().zip(&outs).any(|((_, c), o)| c.name == "opt-3" && variant_of(o, sig, reference).0);
-    let mir_groups = if opt3_bug { flag_groups(&cfgs.iter().find(|(_, c)| c.name == "opt-3").map(|(_, c)| c.flags.clone()).unwrap_or_default()) } else { groups.clone() };
+    let opt3_bug = cfgs
+        .iter()
+        .zip(&outs)
+        .any(|((_, c), o)| c.name == "opt-3" && variant_of(o, sig, reference).0);
+    let mir_groups = if opt3_bug {
+        flag_groups(
+            &cfgs
+                .iter()
+                .find(|(_, c)| c.name == "opt-3")
+                .map(|(_, c)| c.flags.clone())
+                .unwrap_or_default(),
+        )
+    } else {
+        groups.clone()
+    };
     // MIR optimisation levels need the nightly compiler
     let mut mir_cfgs: Vec<(Vec<String>, Config)> = Vec::new();
     for l in ["0", "1", "2", "3"] {
         let mut c = bad.clone();
         c.name = format!("mir{l}");
-        c.flags = with_flag(&mir_groups, "mir-opt-level=", vec![format!("-Zmir-opt-level={l}")]).into_iter().flatten().collect();
+        c.flags = with_flag(
+            &mir_groups,
+            "mir-opt-level=",
+            vec![format!("-Zmir-opt-level={l}")],
+        )
+        .into_iter()
+        .flatten()
+        .collect();
         mir_cfgs.push((vec!["rustc".to_string(), "+nightly".to_string()], c));
     }
-    let mir_outs = crate::runner::par_map(&mir_cfgs, 3, |(r, c)| build_and_run(r, src, &work.join(format!("var_{id}_{}", c.name)), c, lim));
+    let mir_outs = crate::runner::par_map(&mir_cfgs, 3, |(r, c)| {
+        build_and_run(r, src, &work.join(format!("var_{id}_{}", c.name)), c, lim)
+    });
     cfgs.extend(mir_cfgs);
     outs.extend(mir_outs);
     cfgs.iter()
@@ -607,7 +973,11 @@ fn opt_variants(rustc: &[String], src: &Path, base: &Config, bad: &Config, sig: 
 
 /// The value of `-C opt-level=V` (`mir == false`) or `-Zmir-opt-level=V` in a flag string, and the flags with that value cut out.
 fn split_level(flags: &str, mir: bool) -> Option<(String, String)> {
-    let (pre, key) = if mir { ("-Z", "mir-opt-level=") } else { ("-C", "opt-level=") };
+    let (pre, key) = if mir {
+        ("-Z", "mir-opt-level=")
+    } else {
+        ("-C", "opt-level=")
+    };
     let toks: Vec<&str> = flags.split_whitespace().collect();
     for (i, t) in toks.iter().enumerate() {
         let bare = t.strip_prefix(pre).unwrap_or(t);
@@ -626,7 +996,11 @@ fn split_level(flags: &str, mir: bool) -> Option<(String, String)> {
 fn compress_siblings(all: &[String]) -> Vec<(String, String)> {
     let mut items: Vec<(String, String)> = all.iter().map(|f| (f.clone(), String::new())).collect();
     for mir in [true, false] {
-        let (name, prefer) = if mir { ("mir-opt-level=", "0") } else { ("opt-level=", "3") };
+        let (name, prefer) = if mir {
+            ("mir-opt-level=", "0")
+        } else {
+            ("opt-level=", "3")
+        };
         let mut clusters: Vec<(String, Vec<(usize, String)>)> = Vec::new();
         for (i, (f, c)) in items.iter().enumerate() {
             if !c.is_empty() {
@@ -642,9 +1016,20 @@ fn compress_siblings(all: &[String]) -> Vec<(String, String)> {
         let mut drop: Vec<usize> = Vec::new();
         for (_, members) in clusters.iter().filter(|(_, m)| m.len() > 1) {
             let rep = members.iter().position(|(_, v)| v == prefer).unwrap_or(0);
-            let others: Vec<&str> = members.iter().enumerate().filter(|(k, _)| *k != rep).map(|(_, (_, v))| v.as_str()).collect();
+            let others: Vec<&str> = members
+                .iter()
+                .enumerate()
+                .filter(|(k, _)| *k != rep)
+                .map(|(_, (_, v))| v.as_str())
+                .collect();
             items[members[rep].0].1 = format!("Same with {name}{}", others.join("/"));
-            drop.extend(members.iter().enumerate().filter(|(k, _)| *k != rep).map(|(_, (i, _))| *i));
+            drop.extend(
+                members
+                    .iter()
+                    .enumerate()
+                    .filter(|(k, _)| *k != rep)
+                    .map(|(_, (i, _))| *i),
+            );
         }
         drop.sort_unstable();
         for i in drop.into_iter().rev() {
@@ -652,6 +1037,54 @@ fn compress_siblings(all: &[String]) -> Vec<(String, String)> {
         }
     }
     items
+}
+
+/// Runs `tools/llvm_issue.py`: verifies the culprit LLVM pass against the apt.llvm.org release and trunk binaries and writes
+/// `LLVM_ISSUE.md`. Returns `(status, note)` for the checklist.
+fn llvm_issue(dir: &Path, reduced: &Path, flags: &str, work: &Path) -> (String, String) {
+    let tool = std::env::var("LLVM_ISSUE_TOOL")
+        .ok()
+        .map(PathBuf::from)
+        .into_iter()
+        .chain([PathBuf::from("tools/llvm_issue.py")])
+        .chain(
+            std::env::current_exe()
+                .ok()
+                .and_then(|e| e.ancestors().nth(3).map(|r| r.join("tools/llvm_issue.py"))),
+        )
+        .find(|p| p.exists());
+    let Some(tool) = tool else {
+        return (
+            "todo".into(),
+            "tools/llvm_issue.py not found (set LLVM_ISSUE_TOOL)".into(),
+        );
+    };
+    let mut c = Command::new("python3");
+    c.arg("-I")
+        .arg(&tool)
+        .arg(dir)
+        .arg("--src")
+        .arg(reduced)
+        .arg("--flags")
+        .arg(flags)
+        .arg("--work")
+        .arg(work.join(format!("llvm_issue_{}", std::process::id())));
+    match exec(c, Duration::from_secs(1500)) {
+        Ok(r) => {
+            let out = String::from_utf8_lossy(&r.stdout).to_string();
+            match out.lines().last().and_then(|l| l.split_once('|')) {
+                Some((s @ ("done" | "n/a" | "todo"), note)) => (s.to_string(), note.to_string()),
+                _ => (
+                    "todo".into(),
+                    format!(
+                        "llvm_issue.py failed: {}",
+                        r.stderr.lines().last().unwrap_or("")
+                    ),
+                ),
+            }
+        }
+        Err(e) => ("todo".into(), format!("llvm_issue.py could not run: {e}")),
+    }
 }
 
 /// The culprit found by bisecting the optimisation passes.
@@ -667,12 +1100,6 @@ struct Culprit {
     note: String,
 }
 
-impl Default for Variant {
-    fn default() -> Self {
-        Variant { flags: String::new(), bug: false, out: String::new() }
-    }
-}
-
 fn culprit_to_text(c: &Culprit) -> String {
     format!(
         "kind={}\nn={}\ntotal={}\nname={}\ntarget={}\nnote={}\n{}{}",
@@ -682,8 +1109,16 @@ fn culprit_to_text(c: &Culprit) -> String {
         c.name,
         c.target,
         c.note,
-        variants_to_text(&[c.good.clone()]).replace('\t', "\u{1}").lines().map(|l| format!("good={l}\n")).collect::<String>(),
-        variants_to_text(&[c.bad.clone()]).replace('\t', "\u{1}").lines().map(|l| format!("bad={l}\n")).collect::<String>()
+        variants_to_text(std::slice::from_ref(&c.good))
+            .replace('\t', "\u{1}")
+            .lines()
+            .map(|l| format!("good={l}\n"))
+            .collect::<String>(),
+        variants_to_text(std::slice::from_ref(&c.bad))
+            .replace('\t', "\u{1}")
+            .lines()
+            .map(|l| format!("bad={l}\n"))
+            .collect::<String>()
     )
 }
 
@@ -703,9 +1138,13 @@ fn culprit_from_text(t: &str) -> Culprit {
         } else if let Some(x) = l.strip_prefix("note=") {
             c.note = x.into();
         } else if let Some(x) = l.strip_prefix("good=") {
-            c.good = variants_from_text(&x.replace('\u{1}', "\t")).pop().unwrap_or_default();
+            c.good = variants_from_text(&x.replace('\u{1}', "\t"))
+                .pop()
+                .unwrap_or_default();
         } else if let Some(x) = l.strip_prefix("bad=") {
-            c.bad = variants_from_text(&x.replace('\u{1}', "\t")).pop().unwrap_or_default();
+            c.bad = variants_from_text(&x.replace('\u{1}', "\t"))
+                .pop()
+                .unwrap_or_default();
         }
     }
     c
@@ -713,22 +1152,45 @@ fn culprit_from_text(t: &str) -> Culprit {
 
 /// Binary search over the passes of LLVM (`-C llvm-args=-opt-bisect-limit=N`, one codegen unit) or of MIR (`-Zmir-opt-bisect-limit=N`)
 /// for the first pass whose execution makes the difference. Nightly only.
-fn pass_bisect(kind: &str, src: &Path, base: &Config, bad: &Config, sig: &Option<String>, lim: &Limits, work: &Path) -> Culprit {
+fn pass_bisect(
+    kind: &str,
+    src: &Path,
+    base: &Config,
+    bad: &Config,
+    sig: &Option<String>,
+    lim: &Limits,
+    work: &Path,
+) -> Culprit {
     let rustc = vec!["rustc".to_string(), "+nightly".to_string()];
     let groups = flag_groups(&bad.flags);
     let mk = |n: i64| -> Config {
         let g2 = if kind == "llvm" {
-            let g = with_flag(&groups, "codegen-units=", vec!["-C".into(), "codegen-units=1".into()]);
-            with_flag(&g, "llvm-args=-opt-bisect-limit=", vec!["-C".into(), format!("llvm-args=-opt-bisect-limit={n}")])
+            let g = with_flag(
+                &groups,
+                "codegen-units=",
+                vec!["-C".into(), "codegen-units=1".into()],
+            );
+            with_flag(
+                &g,
+                "llvm-args=-opt-bisect-limit=",
+                vec!["-C".into(), format!("llvm-args=-opt-bisect-limit={n}")],
+            )
         } else {
-            with_flag(&groups, "mir-opt-bisect-limit=", vec![format!("-Zmir-opt-bisect-limit={n}")])
+            with_flag(
+                &groups,
+                "mir-opt-bisect-limit=",
+                vec![format!("-Zmir-opt-bisect-limit={n}")],
+            )
         };
         let mut c = bad.clone();
         c.name = format!("bis{}", n.max(0));
         c.flags = g2.into_iter().flatten().collect();
         c
     };
-    let mut res = Culprit { kind: kind.to_string(), ..Default::default() };
+    let mut res = Culprit {
+        kind: kind.to_string(),
+        ..Default::default()
+    };
     let id = std::process::id();
     // the crate is named after the file: keep the temporary name out of the report
     let sdir = work.join(format!("pbsrc_{id}"));
@@ -736,19 +1198,45 @@ fn pass_bisect(kind: &str, src: &Path, base: &Config, bad: &Config, sig: &Option
     let _ = std::fs::copy(src, sdir.join("reduced.rs"));
     let src_owned = sdir.join("reduced.rs");
     let src = src_owned.as_path();
-    let reference = Some(build_and_run(&rustc, src, &work.join(format!("pb_{id}_ref")), base, lim));
+    let reference = Some(build_and_run(
+        &rustc,
+        src,
+        &work.join(format!("pb_{id}_ref")),
+        base,
+        lim,
+    ));
     let run = |n: i64| -> (Variant, bool) {
         let c = mk(n);
-        let o = build_and_run(&rustc, src, &work.join(format!("pb_{id}_{}", c.name)), &c, lim);
+        let o = build_and_run(
+            &rustc,
+            src,
+            &work.join(format!("pb_{id}_{}", c.name)),
+            &c,
+            lim,
+        );
         let (bug, out) = variant_of(&o, sig, &reference);
-        (Variant { flags: c.flags.join(" "), bug, out }, bug)
+        (
+            Variant {
+                flags: c.flags.join(" "),
+                bug,
+                out,
+            },
+            bug,
+        )
     };
     // all passes, listed
     let c_all = mk(1_000_000);
     let mut cmd = crate::runner::rustc_cmd(&rustc);
-    cmd.args(crate::runner::compile_args(src, &work.join(format!("pb_{id}_list")), &c_all));
+    cmd.args(crate::runner::compile_args(
+        src,
+        &work.join(format!("pb_{id}_list")),
+        &c_all,
+    ));
     let listing = exec(cmd, lim.compile).map(|r| r.stderr).unwrap_or_default();
-    let passes: Vec<&str> = listing.lines().filter(|l| l.starts_with("BISECT: running pass (")).collect();
+    let passes: Vec<&str> = listing
+        .lines()
+        .filter(|l| l.starts_with("BISECT: running pass ("))
+        .collect();
     res.total = passes.len();
     if passes.is_empty() {
         res.note = "the compiler did not list any pass".into();
@@ -756,7 +1244,10 @@ fn pass_bisect(kind: &str, src: &Path, base: &Config, bad: &Config, sig: &Option
     }
     let (v_all, bug_all) = run(res.total as i64);
     if !bug_all {
-        res.note = format!("does not reproduce with {} (so the difference depends on the pass pipeline as a whole)", v_all.flags);
+        res.note = format!(
+            "does not reproduce with {} (so the difference depends on the pass pipeline as a whole)",
+            v_all.flags
+        );
         return res;
     }
     let (v0, bug0) = run(0);
@@ -778,12 +1269,16 @@ fn pass_bisect(kind: &str, src: &Path, base: &Config, bad: &Config, sig: &Option
     }
     // "BISECT: running pass (N) name on target"
     let line = passes[hi - 1];
-    let rest = line.splitn(2, ") ").nth(1).unwrap_or("");
+    let rest = line.split_once(") ").map(|x| x.1).unwrap_or("");
     let (name, target) = rest.split_once(" on ").unwrap_or((rest, ""));
     res.n = hi;
     res.name = name.to_string();
     let t = crate::demangle::demangle_text(target.trim());
-    res.target = t.strip_prefix("function (").and_then(|x| x.strip_suffix(')')).unwrap_or(&t).to_string();
+    res.target = t
+        .strip_prefix("function (")
+        .and_then(|x| x.strip_suffix(')'))
+        .unwrap_or(&t)
+        .to_string();
     let _ = std::fs::remove_dir_all(&sdir);
     res.good = v_lo;
     res.bad = v_hi;
@@ -791,7 +1286,12 @@ fn pass_bisect(kind: &str, src: &Path, base: &Config, bad: &Config, sig: &Option
 }
 
 fn search_to_text(s: &Search) -> String {
-    let mut t = format!("performed={}\nnote={}\npossible={}\n", s.performed, s.note, s.possible.join(" "));
+    let mut t = format!(
+        "performed={}\nnote={}\npossible={}\n",
+        s.performed,
+        s.note,
+        s.possible.join(" ")
+    );
     for l in &s.lines {
         t += &format!("line={l}\n");
     }
@@ -819,15 +1319,21 @@ const STORED_LIMIT_LINES: usize = 100;
 
 pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     let meta = read_cfg(&dir.join("repro.cfg"));
-    let case = std::fs::read_to_string(dir.join("case.rs")).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let case = std::fs::read_to_string(dir.join("case.rs"))
+        .map_err(|e| format!("{}: {e}", dir.display()))?;
     let get = |k: &str| meta.get(k).cloned().unwrap_or_default();
     crate::runner::set_common_flags(None);
     let mut base = Config::new(&get("base_name"), &get("base_flags"));
     let mut bad = Config::new(&get("bad_name"), &get("bad_flags"));
-    let sig = std::fs::read_to_string(dir.join("signature.txt")).ok().filter(|s| !s.trim().is_empty());
+    let sig = std::fs::read_to_string(dir.join("signature.txt"))
+        .ok()
+        .filter(|s| !s.trim().is_empty());
     let crash = sig.is_some();
     std::fs::create_dir_all(&o.work).unwrap();
-    let lim = Limits { compile: Duration::from_secs(300), run: Duration::from_secs(20) };
+    let lim = Limits {
+        compile: Duration::from_secs(300),
+        run: Duration::from_secs(20),
+    };
     let chans = channels();
     let case_path = o.work.join(format!("tri_case_{}.rs", std::process::id()));
     std::fs::write(&case_path, &case).unwrap();
@@ -836,9 +1342,15 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     // what is already known about this finding (older findings get their checklist derived from the fields they have)
     let mut old = read_cfg(&dir.join("status.cfg"));
     steps::backfill(&mut old, dir);
-    let prev_reduced = std::fs::read_to_string(dir.join("reduced.rs")).ok().filter(|p| !p.trim().is_empty() && p.len() < case.len());
+    let prev_reduced = std::fs::read_to_string(dir.join("reduced.rs"))
+        .ok()
+        .filter(|p| !p.trim().is_empty() && p.len() < case.len());
 
-    info!("triage {}: step 1, reproduction matrix on the original program ({} lines)", dir.display(), case.lines().count());
+    info!(
+        "triage {}: step 1, reproduction matrix on the original program ({} lines)",
+        dir.display(),
+        case.lines().count()
+    );
     // 1. reproduction matrix on the original reproducer
     let mut matrix: Vec<(String, String, Repro)> = Vec::new();
     for (ch, ver) in &chans {
@@ -846,7 +1358,12 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
         let (r, _, _) = reproduces(&rustc, &case_path, &base, &bad, &sig, &lim, &o.work);
         matrix.push((ch.clone(), ver.clone(), r));
     }
-    let primary = matrix.iter().filter(|m| m.2 == Repro::Yes).map(|m| m.0.clone()).max_by_key(|c| (c == "nightly") as u8).or_else(|| chans.iter().find(|c| c.0 == "nightly").map(|c| c.0.clone()));
+    let primary = matrix
+        .iter()
+        .filter(|m| m.2 == Repro::Yes)
+        .map(|m| m.0.clone())
+        .max_by_key(|c| (c == "nightly") as u8)
+        .or_else(|| chans.iter().find(|c| c.0 == "nightly").map(|c| c.0.clone()));
 
     // 2. reduction - skipped when an earlier run already converged with this version of the minimiser
     let mut reduce_log = ReduceLog(Vec::new());
@@ -854,182 +1371,314 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     let mut did_reduce = false;
     let mut continued_from: Option<String> = None;
     let reduce_started = std::time::Instant::now();
-    let min_done = !o.force_reduce && steps::current(&old, "minimized", "", &date).filter(|m| m.status == "done").is_some();
-    let min_version_ok = steps::get(&old, "minimized").map(|m| m.version == steps::REDUCE_VERSION).unwrap_or(true);
-    let prev_runs: u32 = if min_version_ok { old.get("min_runs").and_then(|v| v.parse().ok()).unwrap_or(0) } else { 0 };
-    let prev_total: u64 = if min_version_ok { old.get("min_total_seconds").and_then(|v| v.parse().ok()).unwrap_or(0) } else { 0 };
+    let min_done = !o.force_reduce
+        && steps::current(&old, "minimized", "", &date)
+            .filter(|m| m.status == "done")
+            .is_some();
+    let min_version_ok = steps::get(&old, "minimized")
+        .map(|m| m.version == steps::REDUCE_VERSION)
+        .unwrap_or(true);
+    let prev_runs: u32 = if min_version_ok {
+        old.get("min_runs")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    let prev_total: u64 = if min_version_ok {
+        old.get("min_total_seconds")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0)
+    } else {
+        0
+    };
     let mut reduction_kept = false;
     match (&prev_reduced, min_done) {
         (Some(prev), true) => {
             reduced = prev.clone();
             reduction_kept = true;
-            reduce_log.push(format!("minimisation converged earlier ({} lines); not repeated", prev.lines().count()));
+            reduce_log.push(format!(
+                "minimisation converged earlier ({} lines); not repeated",
+                prev.lines().count()
+            ));
         }
         _ => {
-            if let (Some(pc), false) = (&primary, o.no_reduce) {
-                if matrix.iter().any(|m| m.2 == Repro::Yes) {
-                    let mut it = Interest { rustc: vec!["rustc".into(), format!("+{pc}")], a: base.clone(), b: bad.clone(), crash_sig: sig.clone(), limits: Limits { compile: Duration::from_secs(120), run: Duration::from_secs(10) }, work: o.work.clone(), cache: Default::default() };
-                    // a finding that is triaged again continues from its earlier (already small) result when that still shows the bug
-                    let start_src = match &prev_reduced {
-                        Some(prev) if prev.lines().count() <= STORED_LIMIT_LINES && it.check(prev) => {
-                            reduce_log.push(format!("continuing from the previously reduced program ({} lines)", prev.lines().count()));
-                            continued_from = Some(crate::pack::text_hash(prev));
-                            prev.clone()
+            if let (Some(pc), false) = (&primary, o.no_reduce)
+                && matrix.iter().any(|m| m.2 == Repro::Yes)
+            {
+                let mut it = Interest {
+                    rustc: vec!["rustc".into(), format!("+{pc}")],
+                    a: base.clone(),
+                    b: bad.clone(),
+                    crash_sig: sig.clone(),
+                    limits: Limits {
+                        compile: Duration::from_secs(120),
+                        run: Duration::from_secs(10),
+                    },
+                    work: o.work.clone(),
+                    cache: Default::default(),
+                };
+                // a finding that is triaged again continues from its earlier (already small) result when that still shows the bug
+                let start_src = match &prev_reduced {
+                    Some(prev) if prev.lines().count() <= STORED_LIMIT_LINES && it.check(prev) => {
+                        reduce_log.push(format!(
+                            "continuing from the previously reduced program ({} lines)",
+                            prev.lines().count()
+                        ));
+                        continued_from = Some(crate::pack::text_hash(prev));
+                        prev.clone()
+                    }
+                    Some(prev) => {
+                        // a stored result that is still big is a dead end of an earlier, weaker run: start again from the original, the
+                        // stored one stays as the fallback
+                        reduce_log.push(format!("the stored reduced program has {} lines (more than {STORED_LIMIT_LINES}): starting again from the original ({} lines)", prev.lines().count(), case.lines().count()));
+                        case.clone()
+                    }
+                    _ => case.clone(),
+                };
+                if it.check(&start_src) {
+                    if o.checkpoint {
+                        // the checkpoint overwrites reduced.rs: an earlier result that the reducer could not use is kept aside
+                        if let (Some(prev), None) = (&prev_reduced, &continued_from) {
+                            let _ = std::fs::write(dir.join("reduced.rs.bak"), prev);
+                            reduce_log.push("the earlier reduced.rs was not interesting under the reducer's limits: saved as reduced.rs.bak");
                         }
-                        Some(prev) => {
-                            // a stored result that is still big is a dead end of an earlier, weaker run: start again from the original, the
-                            // stored one stays as the fallback
-                            reduce_log.push(format!("the stored reduced program has {} lines (more than {STORED_LIMIT_LINES}): starting again from the original ({} lines)", prev.lines().count(), case.lines().count()));
-                            case.clone()
-                        }
-                        _ => case.clone(),
-                    };
-                    if it.check(&start_src) {
+                        crate::reduce::set_checkpoint(Some(dir.join("reduced.rs")));
+                    }
+                    info!(
+                        "step 2: reduction from {} lines, {}s budget{}",
+                        start_src.lines().count(),
+                        o.budget.as_secs(),
                         if o.checkpoint {
-                            // the checkpoint overwrites reduced.rs: an earlier result that the reducer could not use is kept aside
-                            if let (Some(prev), None) = (&prev_reduced, &continued_from) {
-                                let _ = std::fs::write(dir.join("reduced.rs.bak"), prev);
-                                reduce_log.push("the earlier reduced.rs was not interesting under the reducer's limits: saved as reduced.rs.bak");
+                            ", checkpointed to reduced.rs"
+                        } else {
+                            ""
+                        }
+                    );
+                    // Rounds until the time is used: a round that changed the program is followed by another one on its result; one that
+                    // changed nothing is followed by a harder one (random subsets, pairs, bigger token windows, other seeds, a fresh start
+                    // from the original) instead of giving up. Only a round at the highest effort that changes nothing ends it early.
+                    let t0 = std::time::Instant::now();
+                    let mut round_src = start_src.clone();
+                    if shorten_flags(&mut it, &round_src) {
+                        info!(
+                            "the command line got shorter before the reduction: shared `{}`, reference `{}`, failing `{}`",
+                            crate::runner::common_flags().join(" "),
+                            it.a.flags.join(" "),
+                            it.b.flags.join(" ")
+                        );
+                    }
+                    let mut last_unchanged = false;
+                    let mut rounds_done = 0usize;
+                    let interrupted =
+                        || crate::reduce::INTERRUPTED.load(std::sync::atomic::Ordering::Relaxed);
+                    'stages: for (si, stage_budget) in stage_budgets(prev_total, o.budget) {
+                        let stage_t0 = std::time::Instant::now();
+                        if si == STAGES - 1
+                            && round_src.lines().count() <= SHORT_LINES
+                            && prev_total + t0.elapsed().as_secs()
+                                >= required_secs(round_src.lines().count())
+                        {
+                            break;
+                        }
+                        let mut effort = si.min(3);
+                        info!(
+                            "stage {} of {STAGES}: {}s, starting at effort {effort}",
+                            si + 1,
+                            stage_budget.as_secs()
+                        );
+                        loop {
+                            rounds_done += 1;
+                            rs_minimizer::control::set_effort(effort);
+                            rs_minimizer::control::set_salt(rounds_done - 1);
+                            let left = stage_budget.saturating_sub(stage_t0.elapsed());
+                            let mut out = reduce_all(&it, &round_src, left, &mut reduce_log);
+                            if effort == 2
+                                && out.lines().count() > 60
+                                && !interrupted()
+                                && it.check(&case)
+                            {
+                                // the stored program may be a dead end: the same pipeline from the original, the smaller result wins
+                                info!(
+                                    "a fresh start from the original program ({} lines) for comparison",
+                                    case.lines().count()
+                                );
+                                // its intermediate programs are bigger than the stored one: they must not overwrite the checkpoint
+                                if o.checkpoint {
+                                    crate::reduce::set_checkpoint(Some(
+                                        dir.join("reduced.rs.fresh"),
+                                    ));
+                                }
+                                let fresh = reduce_all(
+                                    &it,
+                                    &case,
+                                    stage_budget.saturating_sub(stage_t0.elapsed()) / 2,
+                                    &mut reduce_log,
+                                );
+                                if o.checkpoint {
+                                    crate::reduce::set_checkpoint(Some(dir.join("reduced.rs")));
+                                    let _ = std::fs::remove_file(dir.join("reduced.rs.fresh"));
+                                }
+                                if fresh.len() < out.len() {
+                                    reduce_log.push(format!(
+                                        "the fresh start got smaller: {} lines instead of {}",
+                                        fresh.lines().count(),
+                                        out.lines().count()
+                                    ));
+                                    out = fresh;
+                                }
                             }
-                            crate::reduce::set_checkpoint(Some(dir.join("reduced.rs")));
-                        }
-                        info!("step 2: reduction from {} lines, {}s budget{}", start_src.lines().count(), o.budget.as_secs(), if o.checkpoint { ", checkpointed to reduced.rs" } else { "" });
-                        // Rounds until the time is used: a round that changed the program is followed by another one on its result; one that
-                        // changed nothing is followed by a harder one (random subsets, pairs, bigger token windows, other seeds, a fresh start
-                        // from the original) instead of giving up. Only a round at the highest effort that changes nothing ends it early.
-                        let t0 = std::time::Instant::now();
-                        let mut round_src = start_src.clone();
-                        if shorten_flags(&mut it, &round_src) {
-                            info!("the command line got shorter before the reduction: shared `{}`, reference `{}`, failing `{}`", crate::runner::common_flags().join(" "), it.a.flags.join(" "), it.b.flags.join(" "));
-                        }
-                        let mut last_unchanged = false;
-                        let mut rounds_done = 0usize;
-                        let interrupted = || crate::reduce::INTERRUPTED.load(std::sync::atomic::Ordering::Relaxed);
-                        'stages: for (si, stage_budget) in stage_budgets(prev_total, o.budget) {
-                            let stage_t0 = std::time::Instant::now();
-                            if si == STAGES - 1 && round_src.lines().count() <= SHORT_LINES && prev_total + t0.elapsed().as_secs() >= required_secs(round_src.lines().count()) {
+                            let changed = out != round_src;
+                            round_src = out;
+                            let total = prev_total + t0.elapsed().as_secs();
+                            let settled = total >= required_secs(round_src.lines().count());
+                            if interrupted() {
+                                last_unchanged = false;
+                                break 'stages;
+                            }
+                            let stage_over = stage_t0.elapsed() * 4 >= stage_budget * 3;
+                            if changed {
+                                info!(
+                                    "round {rounds_done} (effort {effort}) changed the program to {} lines ({}s of {}s used)",
+                                    round_src.lines().count(),
+                                    t0.elapsed().as_secs(),
+                                    o.budget.as_secs()
+                                );
+                            } else if effort < 3 {
+                                effort += 1;
+                                info!(
+                                    "round {rounds_done} changed nothing; trying harder (effort {effort}, {}s of {}s used)",
+                                    t0.elapsed().as_secs(),
+                                    o.budget.as_secs()
+                                );
+                            } else if settled {
+                                last_unchanged = true;
+                                break 'stages;
+                            } else {
+                                info!(
+                                    "round {rounds_done} changed nothing, but only {total}s of the required {}s of minimisation were spent: another round with other seeds",
+                                    required_secs(round_src.lines().count())
+                                );
+                            }
+                            if stage_over {
                                 break;
                             }
-                            let mut effort = si.min(3);
-                            info!("stage {} of {STAGES}: {}s, starting at effort {effort}", si + 1, stage_budget.as_secs());
-                            loop {
-                                rounds_done += 1;
-                                rs_minimizer::control::set_effort(effort);
-                                rs_minimizer::control::set_salt(rounds_done - 1);
-                                let left = stage_budget.saturating_sub(stage_t0.elapsed());
-                                let mut out = reduce_all(&it, &round_src, left, &mut reduce_log);
-                                if effort == 2 && out.lines().count() > 60 && !interrupted() && it.check(&case) {
-                                    // the stored program may be a dead end: the same pipeline from the original, the smaller result wins
-                                    info!("a fresh start from the original program ({} lines) for comparison", case.lines().count());
-                                    // its intermediate programs are bigger than the stored one: they must not overwrite the checkpoint
-                                    if o.checkpoint {
-                                        crate::reduce::set_checkpoint(Some(dir.join("reduced.rs.fresh")));
-                                    }
-                                    let fresh = reduce_all(&it, &case, stage_budget.saturating_sub(stage_t0.elapsed()) / 2, &mut reduce_log);
-                                    if o.checkpoint {
-                                        crate::reduce::set_checkpoint(Some(dir.join("reduced.rs")));
-                                        let _ = std::fs::remove_file(dir.join("reduced.rs.fresh"));
-                                    }
-                                    if fresh.len() < out.len() {
-                                        reduce_log.push(format!("the fresh start got smaller: {} lines instead of {}", fresh.lines().count(), out.lines().count()));
-                                        out = fresh;
-                                    }
-                                }
-                                let changed = out != round_src;
-                                round_src = out;
-                                let total = prev_total + t0.elapsed().as_secs();
-                                let settled = total >= required_secs(round_src.lines().count());
-                                if interrupted() {
-                                    last_unchanged = false;
-                                    break 'stages;
-                                }
-                                let stage_over = stage_t0.elapsed() * 4 >= stage_budget * 3;
-                                if changed {
-                                    info!("round {rounds_done} (effort {effort}) changed the program to {} lines ({}s of {}s used)", round_src.lines().count(), t0.elapsed().as_secs(), o.budget.as_secs());
-                                } else if effort < 3 {
-                                    effort += 1;
-                                    info!("round {rounds_done} changed nothing; trying harder (effort {effort}, {}s of {}s used)", t0.elapsed().as_secs(), o.budget.as_secs());
-                                } else if settled {
-                                    last_unchanged = true;
-                                    break 'stages;
-                                } else {
-                                    info!("round {rounds_done} changed nothing, but only {total}s of the required {}s of minimisation were spent: another round with other seeds", required_secs(round_src.lines().count()));
-                                }
-                                if stage_over {
-                                    break;
-                                }
-                            }
-                            last_unchanged = false;
-                            if round_src.len() < reduced.len() && it.check(&round_src) {
-                                let _ = std::fs::write(dir.join("reduced.rs"), &round_src);
-                            }
-                            if shorten_flags(&mut it, &round_src) {
-                                info!("stage {}: the smaller program needs fewer flags: shared `{}`, reference `{}`, failing `{}`", si + 1, crate::runner::common_flags().join(" "), it.a.flags.join(" "), it.b.flags.join(" "));
-                                reduce_log.push(format!("flags after stage {}: shared `{}`, reference `{}`, failing `{}`", si + 1, crate::runner::common_flags().join(" "), it.a.flags.join(" "), it.b.flags.join(" ")));
-                            }
-                            store_min_progress(dir, prev_total + t0.elapsed().as_secs(), si + 1);
                         }
-                        rs_minimizer::control::set_effort(0);
-                        rs_minimizer::control::set_salt(0);
-                        base.flags = it.a.flags.clone();
-                        bad.flags = it.b.flags.clone();
-                        reduced = round_src;
-                        if let Some(prev) = prev_reduced.as_ref().filter(|p| p.len() < reduced.len() && it.check(p)) {
-                            reduce_log.push(format!("the stored program ({} lines) is smaller than what this run found ({} lines): kept", prev.lines().count(), reduced.lines().count()));
-                            reduced = prev.clone();
+                        last_unchanged = false;
+                        if round_src.len() < reduced.len() && it.check(&round_src) {
+                            let _ = std::fs::write(dir.join("reduced.rs"), &round_src);
                         }
-                        let describe = |t: &str| format!("{} lines / {} bytes", t.lines().count(), t.len());
-                        let line = format!(
-                            "REDUCTION of {}: original {} -> {}{} -> now {} ({:.1}% fewer bytes than the original), {} rounds, {}s of {}s",
-                            dir.display(),
-                            describe(&case),
-                            if continued_from.is_some() && prev_reduced.is_some() { "stored " } else { "start " },
-                            describe(&start_src),
-                            describe(&reduced),
-                            100.0 * (case.len() as f64 - reduced.len() as f64) / case.len().max(1) as f64,
-                            rounds_done,
-                            t0.elapsed().as_secs(),
-                            o.budget.as_secs()
-                        );
-                        reduce_log.push(line);
-                        if reduced.lines().count() > STORED_LIMIT_LINES {
-                            log::warn!("the reduced program has {} lines: more than the {STORED_LIMIT_LINES} that fit an issue without an attachment", reduced.lines().count());
+                        if shorten_flags(&mut it, &round_src) {
+                            info!(
+                                "stage {}: the smaller program needs fewer flags: shared `{}`, reference `{}`, failing `{}`",
+                                si + 1,
+                                crate::runner::common_flags().join(" "),
+                                it.a.flags.join(" "),
+                                it.b.flags.join(" ")
+                            );
+                            reduce_log.push(format!(
+                                "flags after stage {}: shared `{}`, reference `{}`, failing `{}`",
+                                si + 1,
+                                crate::runner::common_flags().join(" "),
+                                it.a.flags.join(" "),
+                                it.b.flags.join(" ")
+                            ));
                         }
-                        if last_unchanged {
-                            continued_from = Some(crate::pack::text_hash(&reduced));
-                        }
-                        if o.checkpoint {
-                            // an interrupted run may hold a smaller program than the pass that was cut short returned
-                            if let Some(best) = crate::reduce::best_so_far().filter(|b| b.len() < reduced.len() && it.check(b)) {
-                                reduce_log.push(format!("kept the smallest program seen: {} lines", best.lines().count()));
-                                reduced = best;
-                            }
-                            crate::reduce::set_checkpoint(None);
-                        }
-                        did_reduce = true;
-                    } else {
-                        reduce_log.push("original no longer interesting under the reducer's stricter limits - not reduced");
+                        store_min_progress(dir, prev_total + t0.elapsed().as_secs(), si + 1);
                     }
+                    rs_minimizer::control::set_effort(0);
+                    rs_minimizer::control::set_salt(0);
+                    base.flags = it.a.flags.clone();
+                    bad.flags = it.b.flags.clone();
+                    reduced = round_src;
+                    if let Some(prev) = prev_reduced
+                        .as_ref()
+                        .filter(|p| p.len() < reduced.len() && it.check(p))
+                    {
+                        reduce_log.push(format!("the stored program ({} lines) is smaller than what this run found ({} lines): kept", prev.lines().count(), reduced.lines().count()));
+                        reduced = prev.clone();
+                    }
+                    let describe =
+                        |t: &str| format!("{} lines / {} bytes", t.lines().count(), t.len());
+                    let line = format!(
+                        "REDUCTION of {}: original {} -> {}{} -> now {} ({:.1}% fewer bytes than the original), {} rounds, {}s of {}s",
+                        dir.display(),
+                        describe(&case),
+                        if continued_from.is_some() && prev_reduced.is_some() {
+                            "stored "
+                        } else {
+                            "start "
+                        },
+                        describe(&start_src),
+                        describe(&reduced),
+                        100.0 * (case.len() as f64 - reduced.len() as f64)
+                            / case.len().max(1) as f64,
+                        rounds_done,
+                        t0.elapsed().as_secs(),
+                        o.budget.as_secs()
+                    );
+                    reduce_log.push(line);
+                    if reduced.lines().count() > STORED_LIMIT_LINES {
+                        log::warn!(
+                            "the reduced program has {} lines: more than the {STORED_LIMIT_LINES} that fit an issue without an attachment",
+                            reduced.lines().count()
+                        );
+                    }
+                    if last_unchanged {
+                        continued_from = Some(crate::pack::text_hash(&reduced));
+                    }
+                    if o.checkpoint {
+                        // an interrupted run may hold a smaller program than the pass that was cut short returned
+                        if let Some(best) = crate::reduce::best_so_far()
+                            .filter(|b| b.len() < reduced.len() && it.check(b))
+                        {
+                            reduce_log.push(format!(
+                                "kept the smallest program seen: {} lines",
+                                best.lines().count()
+                            ));
+                            reduced = best;
+                        }
+                        crate::reduce::set_checkpoint(None);
+                    }
+                    did_reduce = true;
+                } else {
+                    reduce_log.push("original no longer interesting under the reducer's stricter limits - not reduced");
                 }
             }
         }
     }
-    let reduced_path = o.work.join(format!("tri_reduced_{}.rs", std::process::id()));
+    let reduced_path = o
+        .work
+        .join(format!("tri_reduced_{}.rs", std::process::id()));
     std::fs::write(&reduced_path, &reduced).unwrap();
     std::fs::write(dir.join("reduced.rs"), &reduced).unwrap();
     let rhash = crate::pack::text_hash(&reduced);
     // results of older findings that carry no program hash cannot be trusted once the program changed
-    if old.get("reduced_hash").map(|h| *h != rhash).unwrap_or(false) {
+    if old
+        .get("reduced_hash")
+        .map(|h| *h != rhash)
+        .unwrap_or(false)
+    {
         steps::forget_unhashed(&mut old);
     }
 
     info!("step 3: shortest command line");
     // 3. flags: reuse the stored shortest command line when the program is the same
-    let flags_ctx = |old: &Cfg| ["flags_common", "flags_reference", "flags_failing"].iter().all(|id| steps::current(old, id, &rhash, &date).is_some()) && old.contains_key("min_bad_flags");
+    let flags_ctx = |old: &Cfg| {
+        ["flags_common", "flags_reference", "flags_failing"]
+            .iter()
+            .all(|id| steps::current(old, id, &rhash, &date).is_some())
+            && old.contains_key("min_bad_flags")
+    };
     let flags_reused = flags_ctx(&old);
     if flags_reused {
         let g = |k: &str| old.get(k).cloned().unwrap_or_default();
-        crate::runner::set_common_flags(Some(g("min_common_flags").split_whitespace().map(String::from).collect()));
+        crate::runner::set_common_flags(Some(
+            g("min_common_flags")
+                .split_whitespace()
+                .map(String::from)
+                .collect(),
+        ));
         base = Config::new(&base.name, &g("min_base_flags"));
         bad = Config::new(&bad.name, &g("min_bad_flags"));
     }
@@ -1048,8 +1697,15 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     let mut still = matrix2.iter().any(|m| m.2 == Repro::Yes);
 
     // 3b. the shortest command line that still shows it (the issue shows exactly these flags)
-    if still && !flags_reused && !crate::reduce::INTERRUPTED.load(std::sync::atomic::Ordering::Relaxed) {
-        let yes_channels: Vec<String> = matrix2.iter().filter(|m| m.2 == Repro::Yes).map(|m| m.0.clone()).collect();
+    if still
+        && !flags_reused
+        && !crate::reduce::INTERRUPTED.load(std::sync::atomic::Ordering::Relaxed)
+    {
+        let yes_channels: Vec<String> = matrix2
+            .iter()
+            .filter(|m| m.2 == Repro::Yes)
+            .map(|m| m.0.clone())
+            .collect();
         let ok = |base: &Config, bad: &Config| {
             yes_channels.iter().all(|ch| {
                 let rustc = vec!["rustc".to_string(), format!("+{ch}")];
@@ -1113,7 +1769,11 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     }
     // everything below depends on the program *and* the command line
     let common_txt = crate::runner::common_flags().join(" ");
-    let ctx = crate::pack::text_hash(&format!("{reduced}\n{common_txt}|{}|{}", base.flags.join(" "), bad.flags.join(" ")));
+    let ctx = crate::pack::text_hash(&format!(
+        "{reduced}\n{common_txt}|{}|{}",
+        base.flags.join(" "),
+        bad.flags.join(" ")
+    ));
     let cur = |id: &str| steps::current(&old, id, &ctx, &date).is_some();
 
     info!("step 4: MIR vs LLVM, optimisation levels, pass bisection");
@@ -1121,7 +1781,11 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     let mir_reused = cur("mir_llvm") && old.contains_key("mir_opt");
     let mir_opt = if mir_reused {
         old.get("mir_opt").cloned().unwrap_or_default()
-    } else if still && matrix2.iter().any(|m| m.0 == "nightly" && m.2 == Repro::Yes) {
+    } else if still
+        && matrix2
+            .iter()
+            .any(|m| m.0 == "nightly" && m.2 == Repro::Yes)
+    {
         let with0 = |c: &Config| {
             let mut c = c.clone();
             c.flags.push("-Zmir-opt-level=0".into());
@@ -1138,13 +1802,29 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     };
 
     // 4b. the same program at the other optimisation levels (on the channel the issue shows)
-    let var_chan = matrix2.iter().find(|m| m.2 == Repro::Yes).map(|m| m.0.clone());
+    let var_chan = matrix2
+        .iter()
+        .find(|m| m.2 == Repro::Yes)
+        .map(|m| m.0.clone());
     let var_reused = cur("opt_levels") && cur("mir_levels") && dir.join("variants.txt").exists();
     let variants: Vec<Variant> = if var_reused {
         variants_from_text(&std::fs::read_to_string(dir.join("variants.txt")).unwrap_or_default())
-    } else if let (true, Some(ch), false) = (still, &var_chan, crate::reduce::INTERRUPTED.load(std::sync::atomic::Ordering::Relaxed)) {
+    } else if let (true, Some(ch), false) = (
+        still,
+        &var_chan,
+        crate::reduce::INTERRUPTED.load(std::sync::atomic::Ordering::Relaxed),
+    ) {
         let rustc = vec!["rustc".to_string(), format!("+{ch}")];
-        opt_variants(&rustc, &reduced_path, &base, &bad, &sig, &outputs.as_ref().map(|o| o.0.clone()), &lim, &o.work)
+        opt_variants(
+            &rustc,
+            &reduced_path,
+            &base,
+            &bad,
+            &sig,
+            &outputs.as_ref().map(|o| o.0.clone()),
+            &lim,
+            &o.work,
+        )
     } else {
         Vec::new()
     };
@@ -1153,12 +1833,33 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     }
 
     // 4c. which optimisation pass? (opt-bisect: LLVM when MIR is cleared, MIR otherwise)
-    let culprit_kind = if mir_opt.starts_with("llvm") { Some("llvm") } else if mir_opt.starts_with("mir") { Some("mir") } else { None };
+    let culprit_kind = if mir_opt.starts_with("llvm") {
+        Some("llvm")
+    } else if mir_opt.starts_with("mir") {
+        Some("mir")
+    } else {
+        None
+    };
     let cul_reused = cur("pass_bisect") && dir.join("culprit.txt").exists();
     let culprit: Option<Culprit> = if cul_reused {
-        Some(culprit_from_text(&std::fs::read_to_string(dir.join("culprit.txt")).unwrap_or_default()))
-    } else if let (true, Some(k), false, true) = (still, culprit_kind, crate::reduce::INTERRUPTED.load(std::sync::atomic::Ordering::Relaxed), left_secs(o) > 900) {
-        Some(pass_bisect(k, &reduced_path, &base, &bad, &sig, &lim, &o.work))
+        Some(culprit_from_text(
+            &std::fs::read_to_string(dir.join("culprit.txt")).unwrap_or_default(),
+        ))
+    } else if let (true, Some(k), false, true) = (
+        still,
+        culprit_kind,
+        crate::reduce::INTERRUPTED.load(std::sync::atomic::Ordering::Relaxed),
+        left_secs(o) > 900,
+    ) {
+        Some(pass_bisect(
+            k,
+            &reduced_path,
+            &base,
+            &bad,
+            &sig,
+            &lim,
+            &o.work,
+        ))
     } else {
         None
     };
@@ -1175,22 +1876,62 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     // 5. Miri (only meaningful for wrong-code findings)
     let ub_reused = !crash && still && cur("ub_check") && old.contains_key("miri");
     let (m, miri_agrees) = if crash || !still {
-        (MiriResult { verdict: "skipped".into(), detail: if crash { "not applicable (compiler crash)".into() } else { "does not reproduce".into() }, stdout: String::new(), report: String::new() }, String::new())
+        (
+            MiriResult {
+                verdict: "skipped".into(),
+                detail: if crash {
+                    "not applicable (compiler crash)".into()
+                } else {
+                    "does not reproduce".into()
+                },
+                stdout: String::new(),
+                report: String::new(),
+            },
+            String::new(),
+        )
     } else if ub_reused {
         let s = old.get("miri").cloned().unwrap_or_default();
         let (v, d) = s.split_once(": ").unwrap_or((s.as_str(), ""));
-        (MiriResult { verdict: v.to_string(), detail: d.to_string(), stdout: String::new(), report: std::fs::read_to_string(dir.join("miri.txt")).unwrap_or_default() }, old.get("miri_agrees").cloned().unwrap_or_default())
+        (
+            MiriResult {
+                verdict: v.to_string(),
+                detail: d.to_string(),
+                stdout: String::new(),
+                report: std::fs::read_to_string(dir.join("miri.txt")).unwrap_or_default(),
+            },
+            old.get("miri_agrees").cloned().unwrap_or_default(),
+        )
     } else {
         let m = miri(&reduced, &o.work);
         let agrees = match (&outputs, m.verdict.as_str()) {
             (Some((a, b)), "ok") => {
                 let norm = |s: &str| s.trim().to_string();
                 let (sa, sb) = (
-                    if let Outcome::Ran { stdout, .. } = a { norm(stdout) } else { String::new() },
-                    if let Outcome::Ran { stdout, .. } = b { norm(stdout) } else { String::new() },
+                    if let Outcome::Ran { stdout, .. } = a {
+                        norm(stdout)
+                    } else {
+                        String::new()
+                    },
+                    if let Outcome::Ran { stdout, .. } = b {
+                        norm(stdout)
+                    } else {
+                        String::new()
+                    },
                 );
                 let sm = norm(&m.stdout);
-                if sm == sa { format!("Miri's output equals `{}` (so `{}` looks wrong)", base.name, bad.name) } else if sm == sb { format!("Miri's output equals `{}` (so `{}` looks wrong)", bad.name, base.name) } else { "Miri's output matches neither side".to_string() }
+                if sm == sa {
+                    format!(
+                        "Miri's output equals `{}` (so `{}` looks wrong)",
+                        base.name, bad.name
+                    )
+                } else if sm == sb {
+                    format!(
+                        "Miri's output equals `{}` (so `{}` looks wrong)",
+                        bad.name, base.name
+                    )
+                } else {
+                    "Miri's output matches neither side".to_string()
+                }
             }
             _ => String::new(),
         };
@@ -1199,7 +1940,10 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
 
     info!("step 6: upstream search");
     // 6. upstream search (repeated after two weeks)
-    let llvm_pass = culprit.as_ref().filter(|c| c.kind == "llvm" && c.n > 0).map(|c| c.name.clone());
+    let llvm_pass = culprit
+        .as_ref()
+        .filter(|c| c.kind == "llvm" && c.n > 0)
+        .map(|c| c.name.clone());
     let rust_reused = cur("upstream_rust") && dir.join("search.txt").exists();
     let llvm_reused = cur("upstream_llvm") && dir.join("search_llvm.txt").exists();
     let interrupted = crate::reduce::INTERRUPTED.load(std::sync::atomic::Ordering::Relaxed);
@@ -1208,41 +1952,121 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     } else if o.search && !interrupted {
         upstream_search("rust-lang/rust", &reduced, &bad, &sig, &None)
     } else {
-        Search { note: "NOT PERFORMED (disabled)".into(), ..Default::default() }
+        Search {
+            note: "NOT PERFORMED (disabled)".into(),
+            ..Default::default()
+        }
     };
     let llvm_applicable = crash || llvm_pass.is_some();
     let search_llvm = if llvm_reused {
         search_from_text(&std::fs::read_to_string(dir.join("search_llvm.txt")).unwrap_or_default())
     } else if !llvm_applicable {
-        Search { note: "not applicable: no LLVM pass was found to be involved".into(), ..Default::default() }
+        Search {
+            note: "not applicable: no LLVM pass was found to be involved".into(),
+            ..Default::default()
+        }
     } else if o.search && !interrupted {
         upstream_search("llvm/llvm-project", &reduced, &bad, &sig, &llvm_pass)
     } else {
-        Search { note: "NOT PERFORMED (disabled)".into(), ..Default::default() }
+        Search {
+            note: "NOT PERFORMED (disabled)".into(),
+            ..Default::default()
+        }
+    };
+    // 6b. LLVM_ISSUE.md: only when an LLVM pass is the culprit of a wrong-code finding
+    let llvm_issue_reused =
+        cur("llvm_issue") && (dir.join("LLVM_ISSUE.md").exists() || llvm_pass.is_none());
+    let llvm_issue_result: Option<(String, String)> = if llvm_issue_reused {
+        None
+    } else if llvm_pass.is_none() || crash {
+        let _ = std::fs::remove_file(dir.join("LLVM_ISSUE.md"));
+        Some((
+            "n/a".into(),
+            if crash {
+                "a compiler crash: only wrong-code findings are verified".into()
+            } else {
+                "the culprit is not an LLVM pass".into()
+            },
+        ))
+    } else if !still || interrupted || left_secs(o) < 900 {
+        Some((
+            "todo".into(),
+            "not run yet (no time left or the program does not reproduce)".into(),
+        ))
+    } else {
+        info!("step 6b: LLVM issue");
+        let flags = format!(
+            "{} {}",
+            crate::runner::common_flags().join(" "),
+            bad.flags.join(" ")
+        );
+        Some(llvm_issue(dir, &reduced_path, flags.trim(), &o.work))
     };
     // both searches, as one for the status files
     let search = Search {
         performed: search_rust.performed && (search_llvm.performed || !llvm_applicable),
-        lines: search_rust.lines.iter().chain(search_llvm.lines.iter()).cloned().collect(),
-        possible: search_rust.possible.iter().chain(search_llvm.possible.iter()).cloned().collect(),
-        note: [search_rust.note.clone(), search_llvm.note.clone()].iter().filter(|n| !n.is_empty()).cloned().collect::<Vec<_>>().join(" / "),
+        lines: search_rust
+            .lines
+            .iter()
+            .chain(search_llvm.lines.iter())
+            .cloned()
+            .collect(),
+        possible: search_rust
+            .possible
+            .iter()
+            .chain(search_llvm.possible.iter())
+            .cloned()
+            .collect(),
+        note: [search_rust.note.clone(), search_llvm.note.clone()]
+            .iter()
+            .filter(|n| !n.is_empty())
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" / "),
     };
 
-    info!("step 7: regression range (bisect budget {}s)", o.bisect.as_secs());
+    info!(
+        "step 7: regression range (bisect budget {}s)",
+        o.bisect.as_secs()
+    );
     // 7. regression range: only the parts that are still open
-    let prior = std::fs::read_to_string(dir.join("bisect.txt")).ok().map(|t| crate::bisect::Bisect::from_text(&t)).or_else(|| crate::bisect::Bisect::from_legacy(&old));
+    let prior = std::fs::read_to_string(dir.join("bisect.txt"))
+        .ok()
+        .map(|t| crate::bisect::Bisect::from_text(&t))
+        .or_else(|| crate::bisect::Bisect::from_legacy(&old));
     let prior_known = prior.is_some();
     let mut bis = prior.unwrap_or_default();
-    if !o.bisect.is_zero() && still && m.verdict != "ub" && !crate::reduce::INTERRUPTED.load(std::sync::atomic::Ordering::Relaxed) {
+    if !o.bisect.is_zero()
+        && still
+        && m.verdict != "ub"
+        && !crate::reduce::INTERRUPTED.load(std::sync::atomic::Ordering::Relaxed)
+    {
         let yes = |ch: &str| matrix2.iter().any(|m| m.0 == ch && m.2 == Repro::Yes);
-        let want = crate::bisect::Want { stable: !prior_known || !cur("bisect_stable"), nightly: !prior_known || !cur("bisect_nightly"), pr: !prior_known || !cur("bisect_pr") };
+        let want = crate::bisect::Want {
+            stable: !prior_known || !cur("bisect_stable"),
+            nightly: !prior_known || !cur("bisect_nightly"),
+            pr: !prior_known || !cur("bisect_pr"),
+        };
         if want.stable || want.nightly || want.pr {
             let left = left_secs(o);
             // the stable / nightly searches get up to 60 % of what is left, cargo-bisect-rustc up to 35 %; with less than 5 minutes the steps stay open
             if left > 300 {
                 let b1 = o.bisect.min(Duration::from_secs(left * 6 / 10));
-                let b2 = Duration::from_secs(crate::bisect::PR_SECONDS).min(Duration::from_secs(left * 35 / 100));
-                bis = crate::bisect::bisect(&reduced_path, &base, &bad, &sig, &o.work, b1, b2, want, yes("stable"), yes("nightly"), &bis);
+                let b2 = Duration::from_secs(crate::bisect::PR_SECONDS)
+                    .min(Duration::from_secs(left * 35 / 100));
+                bis = crate::bisect::bisect(
+                    &reduced_path,
+                    &base,
+                    &bad,
+                    &sig,
+                    &o.work,
+                    b1,
+                    b2,
+                    want,
+                    yes("stable"),
+                    yes("nightly"),
+                    &bis,
+                );
             }
         }
     }
@@ -1250,19 +2074,37 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
 
     info!("step 8: writing the checklist and the issue draft");
     // 8. how settled is the minimisation? (the daily job keeps going until two runs agree)
-    let min_runs = if reduction_kept { prev_runs } else if did_reduce { prev_runs + 1 } else { prev_runs };
+    let min_runs = if reduction_kept {
+        prev_runs
+    } else if did_reduce {
+        prev_runs + 1
+    } else {
+        prev_runs
+    };
     let complete = did_reduce && crate::reduce::last_run_complete();
     let unchanged = continued_from.as_deref() == Some(rhash.as_str());
     let rl = lines_of(&reduced);
-    let min_total = if reduction_kept { prev_total } else if did_reduce { prev_total + reduce_started.elapsed().as_secs() } else { prev_total };
+    let min_total = if reduction_kept {
+        prev_total
+    } else if did_reduce {
+        prev_total + reduce_started.elapsed().as_secs()
+    } else {
+        prev_total
+    };
     let need = required_secs(lines_of(&reduced));
     let time_spent = min_total >= need;
     let min_status = if reduction_kept {
-        old.get("min_status").cloned().unwrap_or_else(|| "converged".into())
+        old.get("min_status")
+            .cloned()
+            .unwrap_or_else(|| "converged".into())
     } else if !did_reduce {
         "not reduced".to_string()
     } else if !time_spent {
-        format!("in progress - {} of the required {} minutes of minimisation spent", min_total / 60, need / 60)
+        format!(
+            "in progress - {} of the required {} minutes of minimisation spent",
+            min_total / 60,
+            need / 60
+        )
     } else if complete && unchanged {
         "converged".to_string()
     } else if min_runs >= 6 {
@@ -1276,7 +2118,9 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
 
     // ---- the checklist
     let mut st = old.clone();
-    let put = |st: &mut Cfg, id: &str, status: &str, hash: &str, note: String| steps::set(st, id, steps::State::new(status, hash, &date, &note));
+    let put = |st: &mut Cfg, id: &str, status: &str, hash: &str, note: String| {
+        steps::set(st, id, steps::State::new(status, hash, &date, &note))
+    };
     // a step that was not redone keeps its result (and date) but now belongs to this program
     let keep = |st: &mut Cfg, id: &str| {
         if let Some(s) = steps::current(&old, id, &ctx, &date) {
@@ -1293,70 +2137,229 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
         }
         match r {
             Repro::Yes => put(&mut st, &id, "done", &ctx, format!("reproduces on {ch}")),
-            Repro::NotApplicable => put(&mut st, &id, "n/a", &ctx, format!("the options only exist on nightly")),
+            Repro::NotApplicable => put(&mut st, &id, "n/a", &ctx, "the options only exist on nightly".to_string()),
             Repro::No if ch == "nightly" => put(&mut st, &id, "failed", &ctx, "does not reproduce on the newest nightly any more (the next verification moves it to old_findings/)".into()),
             Repro::No => put(&mut st, &id, "done", &ctx, format!("does not reproduce on {ch}")),
         }
     }
     if !converged {
-        let note = if !did_reduce { "not reduced (the reducer did not run or the original was not interesting under its limits)".to_string() } else { format!("{min_status}; run {min_runs} of at most 6") };
+        let note = if !did_reduce {
+            "not reduced (the reducer did not run or the original was not interesting under its limits)".to_string()
+        } else {
+            format!("{min_status}; run {min_runs} of at most 6")
+        };
         put(&mut st, "minimized", "todo", "", note);
     } else if rl > 300 {
-        put(&mut st, "minimized", "todo", "", format!("still {rl} lines and no single case shows it on its own: it depends on the size/shape of the whole program (inlining or similar) - needs a longer reduction or a hand investigation"));
+        put(
+            &mut st,
+            "minimized",
+            "todo",
+            "",
+            format!(
+                "still {rl} lines and no single case shows it on its own: it depends on the size/shape of the whole program (inlining or similar) - needs a longer reduction or a hand investigation"
+            ),
+        );
     } else {
-        let extra = if rl > 80 { format!(" - but still {rl} lines: reduce further by hand (tools/reduce.py)") } else { String::new() };
-        put(&mut st, "minimized", "done", "", format!("{min_status}, {rl} lines after {min_runs} run(s){extra}"));
+        let extra = if rl > 80 {
+            format!(" - but still {rl} lines: reduce further by hand (tools/reduce.py)")
+        } else {
+            String::new()
+        };
+        put(
+            &mut st,
+            "minimized",
+            "done",
+            "",
+            format!("{min_status}, {rl} lines after {min_runs} run(s){extra}"),
+        );
     }
     if still && flags_reused {
         for id in ["flags_common", "flags_reference", "flags_failing"] {
             keep(&mut st, id);
         }
     } else if still {
-        put(&mut st, "flags_common", "done", &ctx, format!("shared flags: {}", show_flags(&common_txt)));
-        put(&mut st, "flags_reference", "done", &ctx, format!("reference: {}", show_flags(&base.flags.join(" "))));
-        put(&mut st, "flags_failing", "done", &ctx, format!("failing: {}", show_flags(&bad.flags.join(" "))));
+        put(
+            &mut st,
+            "flags_common",
+            "done",
+            &ctx,
+            format!("shared flags: {}", show_flags(&common_txt)),
+        );
+        put(
+            &mut st,
+            "flags_reference",
+            "done",
+            &ctx,
+            format!("reference: {}", show_flags(&base.flags.join(" "))),
+        );
+        put(
+            &mut st,
+            "flags_failing",
+            "done",
+            &ctx,
+            format!("failing: {}", show_flags(&bad.flags.join(" "))),
+        );
     } else {
         for id in ["flags_common", "flags_reference", "flags_failing"] {
-            put(&mut st, id, "todo", &ctx, "needs a reproducing program first".into());
+            put(
+                &mut st,
+                id,
+                "todo",
+                &ctx,
+                "needs a reproducing program first".into(),
+            );
         }
     }
     if var_reused {
         keep(&mut st, "opt_levels");
         keep(&mut st, "mir_levels");
     } else if variants.is_empty() {
-        put(&mut st, "opt_levels", "todo", &ctx, "needs a reproducing program first".into());
-        put(&mut st, "mir_levels", "todo", &ctx, "needs a reproducing program first".into());
+        put(
+            &mut st,
+            "opt_levels",
+            "todo",
+            &ctx,
+            "needs a reproducing program first".into(),
+        );
+        put(
+            &mut st,
+            "mir_levels",
+            "todo",
+            &ctx,
+            "needs a reproducing program first".into(),
+        );
     } else {
         // the first six variants are the -C opt-level values, the rest the -Zmir-opt-level values
-        let list = |vs: &[Variant], bug: bool| vs.iter().filter(|v| v.bug == bug).map(|v| v.flags.clone()).collect::<Vec<_>>().join(", ");
+        let list = |vs: &[Variant], bug: bool| {
+            vs.iter()
+                .filter(|v| v.bug == bug)
+                .map(|v| v.flags.clone())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
         let (opt, mir) = variants.split_at(variants.len().min(6));
-        put(&mut st, "opt_levels", "done", &ctx, format!("{} levels tried; bug with: {}; not with: {}", opt.len(), list(opt, true), list(opt, false)));
+        put(
+            &mut st,
+            "opt_levels",
+            "done",
+            &ctx,
+            format!(
+                "{} levels tried; bug with: {}; not with: {}",
+                opt.len(),
+                list(opt, true),
+                list(opt, false)
+            ),
+        );
         if mir.is_empty() {
-            put(&mut st, "mir_levels", "todo", &ctx, "no nightly compiler available for -Zmir-opt-level".into());
+            put(
+                &mut st,
+                "mir_levels",
+                "todo",
+                &ctx,
+                "no nightly compiler available for -Zmir-opt-level".into(),
+            );
         } else {
-            put(&mut st, "mir_levels", "done", &ctx, format!("{} levels tried; bug with: {}; not with: {}", mir.len(), list(mir, true), list(mir, false)));
+            put(
+                &mut st,
+                "mir_levels",
+                "done",
+                &ctx,
+                format!(
+                    "{} levels tried; bug with: {}; not with: {}",
+                    mir.len(),
+                    list(mir, true),
+                    list(mir, false)
+                ),
+            );
         }
     }
     if ub_reused {
         keep(&mut st, "ub_check");
     } else {
-    match m.verdict.as_str() {
-        "ok" => put(&mut st, "ub_check", "done", &ctx, "Miri found no undefined behaviour".into()),
-        "ub" => put(&mut st, "ub_check", "failed", &ctx, format!("Miri reports undefined behaviour: {}", m.detail)),
-        "panic" => put(&mut st, "ub_check", "failed", &ctx, format!("the program panics under Miri (arithmetic overflow?): {}", m.detail)),
-        "skipped" if crash => put(&mut st, "ub_check", "n/a", &ctx, "compiler crash: there is no program output to check".into()),
-        "skipped" => put(&mut st, "ub_check", "todo", &ctx, m.detail.clone()),
-        _ => put(&mut st, "ub_check", "todo", &ctx, format!("Miri could not decide: {}", m.detail)),
-    }
+        match m.verdict.as_str() {
+            "ok" => put(
+                &mut st,
+                "ub_check",
+                "done",
+                &ctx,
+                "Miri found no undefined behaviour".into(),
+            ),
+            "ub" => put(
+                &mut st,
+                "ub_check",
+                "failed",
+                &ctx,
+                format!("Miri reports undefined behaviour: {}", m.detail),
+            ),
+            "panic" => put(
+                &mut st,
+                "ub_check",
+                "failed",
+                &ctx,
+                format!(
+                    "the program panics under Miri (arithmetic overflow?): {}",
+                    m.detail
+                ),
+            ),
+            "skipped" if crash => put(
+                &mut st,
+                "ub_check",
+                "n/a",
+                &ctx,
+                "compiler crash: there is no program output to check".into(),
+            ),
+            "skipped" => put(&mut st, "ub_check", "todo", &ctx, m.detail.clone()),
+            _ => put(
+                &mut st,
+                "ub_check",
+                "todo",
+                &ctx,
+                format!("Miri could not decide: {}", m.detail),
+            ),
+        }
     }
     if cul_reused {
         keep(&mut st, "pass_bisect");
     } else {
         match &culprit {
-            Some(c) if c.n > 0 => put(&mut st, "pass_bisect", "done", &ctx, format!("first {} pass that matters: {} of {}: {} on {}", c.kind.to_uppercase(), c.n, c.total, c.name, c.target)),
-            Some(c) => put(&mut st, "pass_bisect", "done", &ctx, format!("tried, {} pass bisection could not isolate a pass: {}", c.kind, c.note)),
-            None if still => put(&mut st, "pass_bisect", "n/a", &ctx, "neither MIR nor LLVM could be determined as the cause".into()),
-            None => put(&mut st, "pass_bisect", "todo", &ctx, "needs a reproducing program first".into()),
+            Some(c) if c.n > 0 => put(
+                &mut st,
+                "pass_bisect",
+                "done",
+                &ctx,
+                format!(
+                    "first {} pass that matters: {} of {}: {} on {}",
+                    c.kind.to_uppercase(),
+                    c.n,
+                    c.total,
+                    c.name,
+                    c.target
+                ),
+            ),
+            Some(c) => put(
+                &mut st,
+                "pass_bisect",
+                "done",
+                &ctx,
+                format!(
+                    "tried, {} pass bisection could not isolate a pass: {}",
+                    c.kind, c.note
+                ),
+            ),
+            None if still => put(
+                &mut st,
+                "pass_bisect",
+                "n/a",
+                &ctx,
+                "neither MIR nor LLVM could be determined as the cause".into(),
+            ),
+            None => put(
+                &mut st,
+                "pass_bisect",
+                "todo",
+                &ctx,
+                "needs a reproducing program first".into(),
+            ),
         }
     }
     if mir_reused {
@@ -1364,7 +2367,13 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     } else if mir_opt.starts_with("llvm") || mir_opt.starts_with("mir") {
         put(&mut st, "mir_llvm", "done", &ctx, mir_opt.clone());
     } else if mir_opt.starts_with("unknown: not reproduced") {
-        put(&mut st, "mir_llvm", "n/a", &ctx, "does not reproduce on nightly".into());
+        put(
+            &mut st,
+            "mir_llvm",
+            "n/a",
+            &ctx,
+            "does not reproduce on nightly".into(),
+        );
     } else {
         put(&mut st, "mir_llvm", "todo", &ctx, mir_opt.clone());
     }
@@ -1372,12 +2381,34 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     {
         let n = reduced.matches("mod case_").count();
         if n <= 1 {
-            put(&mut st, "minimize_cases", "done", "", if n == 0 { "reduced to a plain program".into() } else { "a single case is enough".into() });
+            put(
+                &mut st,
+                "minimize_cases",
+                "done",
+                "",
+                if n == 0 {
+                    "reduced to a plain program".into()
+                } else {
+                    "a single case is enough".into()
+                },
+            );
         } else {
-            put(&mut st, "minimize_cases", "todo", "", format!("{n} cases of the batch are still needed together (the bug depends on the size/shape of the whole program)"));
+            put(
+                &mut st,
+                "minimize_cases",
+                "todo",
+                "",
+                format!(
+                    "{n} cases of the batch are still needed together (the bug depends on the size/shape of the whole program)"
+                ),
+            );
         }
     }
-    for (id, part) in [("bisect_stable", &bis.stable), ("bisect_nightly", &bis.nightly), ("bisect_pr", &bis.pr)] {
+    for (id, part) in [
+        ("bisect_stable", &bis.stable),
+        ("bisect_nightly", &bis.nightly),
+        ("bisect_pr", &bis.pr),
+    ] {
         let ran_here = !o.bisect.is_zero() && still && m.verdict != "ub";
         if cur(id) && prior_known && !ran_here {
             keep(&mut st, id);
@@ -1391,39 +2422,118 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
         } else if cur(id) && prior_known {
             keep(&mut st, id);
         } else if !part.note.is_empty() || !part.lines.is_empty() {
-            put(&mut st, id, "todo", &ctx, if part.note.is_empty() { "started, not finished (the next run continues)".to_string() } else { part.note.clone() });
+            put(
+                &mut st,
+                id,
+                "todo",
+                &ctx,
+                if part.note.is_empty() {
+                    "started, not finished (the next run continues)".to_string()
+                } else {
+                    part.note.clone()
+                },
+            );
         } else {
-            put(&mut st, id, "todo", &ctx, if o.bisect.is_zero() { "regression search disabled".into() } else { "not done yet".into() });
+            put(
+                &mut st,
+                id,
+                "todo",
+                &ctx,
+                if o.bisect.is_zero() {
+                    "regression search disabled".into()
+                } else {
+                    "not done yet".into()
+                },
+            );
         }
     }
     // regression or long-standing? decides whether the bisection applies at all
     // only from stable/nightly results of this version of the tool (never from stored data that is open again)
-    if ["bisect_stable", "bisect_nightly"].iter().all(|id| steps::is_complete(id, &st, &ctx, &date)) {
+    if ["bisect_stable", "bisect_nightly"]
+        .iter()
+        .all(|id| steps::is_complete(id, &st, &ctx, &date))
+    {
         let reg = |p: &crate::bisect::Part| p.summary.contains("first bad");
         let old_bug = |p: &crate::bisect::Part| p.summary.contains("since <=");
         if reg(&bis.stable) || reg(&bis.nightly) {
-            put(&mut st, "regression", "done", &ctx, format!("a regression ({})", [bis.stable.summary.as_str(), bis.nightly.summary.as_str()].iter().filter(|x| !x.is_empty()).cloned().collect::<Vec<_>>().join("; ")));
+            put(
+                &mut st,
+                "regression",
+                "done",
+                &ctx,
+                format!(
+                    "a regression ({})",
+                    [bis.stable.summary.as_str(), bis.nightly.summary.as_str()]
+                        .iter()
+                        .filter(|x| !x.is_empty())
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                ),
+            );
         } else if old_bug(&bis.stable) || old_bug(&bis.nightly) {
             put(&mut st, "regression", "done", &ctx, "long-standing: present in the oldest release that can compile it - not a regression, so the bisection steps are skipped".into());
         } else if bis.stable.na && bis.nightly.na {
-            put(&mut st, "regression", "n/a", &ctx, "does not reproduce on the current stable or nightly".into());
+            put(
+                &mut st,
+                "regression",
+                "n/a",
+                &ctx,
+                "does not reproduce on the current stable or nightly".into(),
+            );
         } else {
-            put(&mut st, "regression", "todo", &ctx, "needs the stable/nightly search first".into());
+            put(
+                &mut st,
+                "regression",
+                "todo",
+                &ctx,
+                "needs the stable/nightly search first".into(),
+            );
         }
     }
-    for (id, reused, sr, applicable) in [("upstream_rust", rust_reused, &search_rust, true), ("upstream_llvm", llvm_reused, &search_llvm, llvm_applicable)] {
+    for (id, reused, sr, applicable) in [
+        ("upstream_rust", rust_reused, &search_rust, true),
+        ("upstream_llvm", llvm_reused, &search_llvm, llvm_applicable),
+    ] {
         if reused {
             keep(&mut st, id);
         } else if !applicable {
             put(&mut st, id, "n/a", &ctx, sr.note.clone());
         } else if sr.performed {
-            let note = if sr.possible.is_empty() { "no matching issue found".to_string() } else { format!("possible duplicates: {} - read them before reporting", sr.possible.join(" ")) };
+            let note = if sr.possible.is_empty() {
+                "no matching issue found".to_string()
+            } else {
+                format!(
+                    "possible duplicates: {} - read them before reporting",
+                    sr.possible.join(" ")
+                )
+            };
             put(&mut st, id, "done", &ctx, note);
         } else {
-            put(&mut st, id, "todo", &ctx, if sr.note.is_empty() { "not performed".into() } else { sr.note.clone() });
+            put(
+                &mut st,
+                id,
+                "todo",
+                &ctx,
+                if sr.note.is_empty() {
+                    "not performed".into()
+                } else {
+                    sr.note.clone()
+                },
+            );
         }
     }
-    put(&mut st, "issue_draft", if still { "done" } else { "todo" }, &ctx, String::new());
+    match llvm_issue_result {
+        None => keep(&mut st, "llvm_issue"),
+        Some((status, note)) => put(&mut st, "llvm_issue", &status, &ctx, note),
+    }
+    put(
+        &mut st,
+        "issue_draft",
+        if still { "done" } else { "todo" },
+        &ctx,
+        String::new(),
+    );
 
     if m.report.is_empty() {
         let _ = std::fs::remove_file(dir.join("miri.txt"));
@@ -1440,24 +2550,67 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     st.insert("miri".into(), format!("{}: {}", m.verdict, m.detail));
     st.insert("miri_agrees".into(), miri_agrees.clone());
     st.insert("mir_opt".into(), mir_opt.clone());
-    st.insert("upstream_search".into(), if search.performed { if search.possible.is_empty() { "no matching issue found".into() } else { format!("possible duplicates: {}", search.possible.join(" ")) } } else { "not performed".into() });
-    st.insert("kind".into(), if crash { "compiler-crash".into() } else { "wrong-code".into() });
+    st.insert(
+        "upstream_search".into(),
+        if search.performed {
+            if search.possible.is_empty() {
+                "no matching issue found".into()
+            } else {
+                format!("possible duplicates: {}", search.possible.join(" "))
+            }
+        } else {
+            "not performed".into()
+        },
+    );
+    st.insert(
+        "kind".into(),
+        if crash {
+            "compiler-crash".into()
+        } else {
+            "wrong-code".into()
+        },
+    );
     st.insert("fuzzer_id".into(), FUZZER_ID.to_string());
     st.insert("min_status".into(), min_status.clone());
     st.insert("min_runs".into(), min_runs.to_string());
     st.insert("min_total_seconds".into(), min_total.to_string());
     if !reduction_kept {
-        st.insert("min_last_run_seconds".into(), reduce_started.elapsed().as_secs().to_string());
+        st.insert(
+            "min_last_run_seconds".into(),
+            reduce_started.elapsed().as_secs().to_string(),
+        );
     }
     st.insert("min_common_flags".into(), common_txt.clone());
     st.insert("min_base_flags".into(), base.flags.join(" "));
     st.insert("min_bad_flags".into(), bad.flags.join(" "));
     st.insert("reduced_hash".into(), rhash.clone());
     st.insert("context_hash".into(), ctx.clone());
-    st.insert("regression_edges".into(), bis.edges().iter().map(|(l, y)| format!("{l} => {}", if *y { "yes" } else { "no" })).collect::<Vec<_>>().join(" ; "));
-    st.insert("regression".into(), if bis.summary().is_empty() { "unknown".into() } else { bis.summary() });
+    st.insert(
+        "regression_edges".into(),
+        bis.edges()
+            .iter()
+            .map(|(l, y)| format!("{l} => {}", if *y { "yes" } else { "no" }))
+            .collect::<Vec<_>>()
+            .join(" ; "),
+    );
+    st.insert(
+        "regression".into(),
+        if bis.summary().is_empty() {
+            "unknown".into()
+        } else {
+            bis.summary()
+        },
+    );
     if !bis.pr.lines.is_empty() {
-        st.insert("regression_pr".into(), bis.pr.lines.iter().map(|l| l.trim_start_matches("- ").to_string()).collect::<Vec<_>>().join(" | "));
+        st.insert(
+            "regression_pr".into(),
+            bis.pr
+                .lines
+                .iter()
+                .map(|l| l.trim_start_matches("- ").to_string())
+                .collect::<Vec<_>>()
+                .join(" | "),
+        );
     } else {
         st.remove("regression_pr");
     }
@@ -1467,7 +2620,15 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     st.insert("last_verified".into(), date.clone());
     st.entry("state".into()).or_insert_with(|| "open".into());
     // steps that no longer exist (renamed or split up) leave no trace
-    let stale_keys: Vec<String> = st.keys().filter(|k| k.strip_prefix("step.").map(|id| !steps::STEPS.iter().any(|d| d.id == id)).unwrap_or(false)).cloned().collect();
+    let stale_keys: Vec<String> = st
+        .keys()
+        .filter(|k| {
+            k.strip_prefix("step.")
+                .map(|id| !steps::STEPS.iter().any(|d| d.id == id))
+                .unwrap_or(false)
+        })
+        .cloned()
+        .collect();
     for k in stale_keys {
         st.remove(&k);
     }
@@ -1493,9 +2654,24 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
         }
     }
     let _ = writeln!(md);
-    let _ = writeln!(md, "Kind: {}\n", if crash { "compiler crash / compile failure" } else { "wrong code (different output between two configurations)" });
-    let _ = writeln!(md, "### Reproduction (reduced program, `reduced.rs`: {rl} lines; original `case.rs`: {} lines)\n", lines_of(&case));
-    let _ = writeln!(md, "| channel | original case.rs | reduced.rs |\n|---|---|---|");
+    let _ = writeln!(
+        md,
+        "Kind: {}\n",
+        if crash {
+            "compiler crash / compile failure"
+        } else {
+            "wrong code (different output between two configurations)"
+        }
+    );
+    let _ = writeln!(
+        md,
+        "### Reproduction (reduced program, `reduced.rs`: {rl} lines; original `case.rs`: {} lines)\n",
+        lines_of(&case)
+    );
+    let _ = writeln!(
+        md,
+        "| channel | original case.rs | reduced.rs |\n|---|---|---|"
+    );
     for ((ch, ver, r1), (_, _, r2)) in matrix.iter().zip(matrix2.iter()) {
         let _ = writeln!(md, "| {ch} ({ver}) | {} | {} |", r1.word(), r2.word());
     }
@@ -1513,21 +2689,51 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
         let _ = writeln!(md, "- not determined");
     }
     for l in &bl {
-        let _ = writeln!(md, "{}", if l.starts_with("- ") { l.clone() } else { format!("- {l}") });
+        let _ = writeln!(
+            md,
+            "{}",
+            if l.starts_with("- ") {
+                l.clone()
+            } else {
+                format!("- {l}")
+            }
+        );
     }
     let _ = writeln!(md);
     let _ = writeln!(md, "### MIR optimisations or LLVM?\n\n- {mir_opt}\n");
-    let _ = writeln!(md, "### Minimisation\n\n- status: **{min_status}** (run {min_runs}; last run {}s; every pass finished before its deadline: {})\n", reduce_started.elapsed().as_secs(), if complete { "yes" } else if reduction_kept { "kept from an earlier run" } else { "no" });
-    let _ = writeln!(md, "### UB check (Miri, nightly)\n\n- result: **{}** - {}", m.verdict, m.detail);
+    let _ = writeln!(
+        md,
+        "### Minimisation\n\n- status: **{min_status}** (run {min_runs}; last run {}s; every pass finished before its deadline: {})\n",
+        reduce_started.elapsed().as_secs(),
+        if complete {
+            "yes"
+        } else if reduction_kept {
+            "kept from an earlier run"
+        } else {
+            "no"
+        }
+    );
+    let _ = writeln!(
+        md,
+        "### UB check (Miri, nightly)\n\n- result: **{}** - {}",
+        m.verdict, m.detail
+    );
     if !miri_agrees.is_empty() {
         let _ = writeln!(md, "- {miri_agrees}");
     }
     let _ = writeln!(md, "\n### Already reported upstream? (searched {date})\n");
     if search.performed {
         if search.possible.is_empty() {
-            let _ = writeln!(md, "**No matching issue found on GitHub** by any of the queries below (this does not prove it was never reported - skim the keyword scan too):\n");
+            let _ = writeln!(
+                md,
+                "**No matching issue found on GitHub** by any of the queries below (this does not prove it was never reported - skim the keyword scan too):\n"
+            );
         } else {
-            let _ = writeln!(md, "**Possible duplicates found - review them:** {}\n", search.possible.join(", "));
+            let _ = writeln!(
+                md,
+                "**Possible duplicates found - review them:** {}\n",
+                search.possible.join(", ")
+            );
         }
         for l in &search.lines {
             let _ = writeln!(md, "{l}");
@@ -1542,30 +2748,53 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     let shown_common = crate::runner::shown_flags(&crate::runner::common_flags());
     let vcmd = |flags: &str| {
         let line = format!("{shown_common} {flags}");
-        format!("{} reduced.rs {line}", crate::runner::compiler_for(&line)).split_whitespace().collect::<Vec<_>>().join(" ")
+        format!("{} reduced.rs {line}", crate::runner::compiler_for(&line))
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
     };
     let cmd = |c: &Config| vcmd(&c.flags.join(" "));
-    let first_yes = matrix2.iter().find(|m| m.2 == Repro::Yes).map(|m| m.0.clone());
+    let first_yes = matrix2
+        .iter()
+        .find(|m| m.2 == Repro::Yes)
+        .map(|m| m.0.clone());
     let vv = first_yes
         .as_ref()
         .and_then(|ch| {
             let mut c = Command::new("rustc");
             c.arg(format!("+{ch}")).arg("-vV");
-            exec(c, Duration::from_secs(30)).ok().map(|r| String::from_utf8_lossy(&r.stdout).trim().to_string())
+            exec(c, Duration::from_secs(30))
+                .ok()
+                .map(|r| String::from_utf8_lossy(&r.stdout).trim().to_string())
         })
         .unwrap_or_default();
     let title = if crash {
         let s = sig.clone().unwrap_or_default().replace('#', "N");
-        if bad.flags.is_empty() { s } else { format!("{s} with `{}`", bad.flags.join(" ")) }
+        if bad.flags.is_empty() {
+            s
+        } else {
+            format!("{s} with `{}`", bad.flags.join(" "))
+        }
     } else {
         if base.flags.is_empty() {
-            format!("Miscompilation with `{}`: different output than the default build", bad.flags.join(" "))
+            format!(
+                "Miscompilation with `{}`: different output than the default build",
+                bad.flags.join(" ")
+            )
         } else {
-            format!("Miscompilation: `{}` and `{}` produce different output", base.flags.join(" "), bad.flags.join(" "))
+            format!(
+                "Miscompilation: `{}` and `{}` produce different output",
+                base.flags.join(" "),
+                bad.flags.join(" ")
+            )
         }
     };
     let _ = std::fs::write(dir.join("ISSUE_TITLE.txt"), format!("{title}\n"));
-    let _ = writeln!(is, "I tried this code:\n\n```rust\n{}\n```\n", reduced.trim_end());
+    let _ = writeln!(
+        is,
+        "I tried this code:\n\n```rust\n{}\n```\n",
+        reduced.trim_end()
+    );
     // every command with what it printed: the reference build, the failing build and the sibling optimisation levels
     struct Entry {
         flags: String,
@@ -1575,67 +2804,185 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     let mut entries: Vec<Entry> = Vec::new();
     let mut crash_err = String::new();
     if let Some((a, b)) = &outputs {
-        entries.push(Entry { flags: base.flags.join(" "), text: show_out(a), fails: false });
+        entries.push(Entry {
+            flags: base.flags.join(" "),
+            text: show_out(a),
+            fails: false,
+        });
         crash_err = match b {
-            Outcome::CompileFail(e) => crate::demangle::demangle_text(e.trim()).chars().take(20000).collect::<String>(),
+            Outcome::CompileFail(e) => crate::demangle::demangle_text(e.trim())
+                .chars()
+                .take(20000)
+                .collect::<String>(),
             other => other.describe(),
         };
-        entries.push(Entry { flags: bad.flags.join(" "), text: if crash { crash_err.clone() } else { show_out(b) }, fails: true });
+        entries.push(Entry {
+            flags: bad.flags.join(" "),
+            text: if crash {
+                crash_err.clone()
+            } else {
+                show_out(b)
+            },
+            fails: true,
+        });
     }
     // the opt-bisect runs only tell us which pass is to blame (the sentence below); their commands are not part of the issue
     for v in variants.iter() {
         if entries.iter().any(|e| e.flags == v.flags) {
             continue;
         }
-        entries.push(Entry { flags: v.flags.clone(), text: if crash && v.bug { crash_err.clone() } else { v.out.clone() }, fails: v.bug });
+        entries.push(Entry {
+            flags: v.flags.clone(),
+            text: if crash && v.bug {
+                crash_err.clone()
+            } else {
+                v.out.clone()
+            },
+            fails: v.bug,
+        });
     }
     if entries.is_empty() {
-        let _ = writeln!(is, "Commands:\n```\n{}\n{}\n```\n(did not reproduce when this draft was written)\n", cmd(&base), cmd(&bad));
+        let _ = writeln!(
+            is,
+            "Commands:\n```\n{}\n{}\n```\n(did not reproduce when this draft was written)\n",
+            cmd(&base),
+            cmd(&bad)
+        );
     } else {
         // group by result; the group of the reference build comes first
         let mut groups: Vec<(String, bool, Vec<String>)> = Vec::new();
         for e in &entries {
-            let key = if crash && e.fails { "\u{0}fail".to_string() } else { e.text.clone() };
+            let key = if crash && e.fails {
+                "\u{0}fail".to_string()
+            } else {
+                e.text.clone()
+            };
             match groups.iter_mut().find(|g| g.0 == key) {
                 Some(g) => g.2.push(e.flags.clone()),
                 None => groups.push((key, crash && e.fails, vec![e.flags.clone()])),
             }
         }
         for (i, (key, is_fail, all_flags)) in groups.iter().enumerate() {
-            let lead = match i { 0 => "Rust compiled with", 1 => "but compiled with", _ => "and compiled with" };
-            let text = if *is_fail { crash_err.as_str() } else { key.as_str() };
-            let verb = if *is_fail { "fails with" } else if crash { "compiles and prints" } else { "prints" };
+            let lead = match i {
+                0 => "Rust compiled with",
+                1 => "but compiled with",
+                _ => "and compiled with",
+            };
+            let text = if *is_fail {
+                crash_err.as_str()
+            } else {
+                key.as_str()
+            };
+            let verb = if *is_fail {
+                "fails with"
+            } else if crash {
+                "compiles and prints"
+            } else {
+                "prints"
+            };
             // siblings that differ in one optimisation level only share one command and a comment
             let shown: Vec<(String, String)> = compress_siblings(all_flags)
                 .into_iter()
-                .map(|(f, c)| (if crash && *is_fail { vcmd(&f) } else { format!("{}; ./reduced", vcmd(&f)) }, c))
+                .map(|(f, c)| {
+                    (
+                        if crash && *is_fail {
+                            vcmd(&f)
+                        } else {
+                            format!("{}; ./reduced", vcmd(&f))
+                        },
+                        c,
+                    )
+                })
                 .collect();
-            let width = shown.iter().filter(|(_, c)| !c.is_empty()).map(|(cmd, _)| cmd.len()).max().unwrap_or(0);
-            let cmds: Vec<String> = shown.iter().map(|(cmd, c)| if c.is_empty() { cmd.clone() } else { format!("{cmd:<width$} # {c}") }).collect();
+            let width = shown
+                .iter()
+                .filter(|(_, c)| !c.is_empty())
+                .map(|(cmd, _)| cmd.len())
+                .max()
+                .unwrap_or(0);
+            let cmds: Vec<String> = shown
+                .iter()
+                .map(|(cmd, c)| {
+                    if c.is_empty() {
+                        cmd.clone()
+                    } else {
+                        format!("{cmd:<width$} # {c}")
+                    }
+                })
+                .collect();
             if crash && !*is_fail && text == "(no output)" {
-                let _ = writeln!(is, "{lead}\n```\n{}\n```\nthe program builds and runs without errors.\n", cmds.join("\n"));
+                let _ = writeln!(
+                    is,
+                    "{lead}\n```\n{}\n```\nthe program builds and runs without errors.\n",
+                    cmds.join("\n")
+                );
             } else {
-                let _ = writeln!(is, "{lead}\n```\n{}\n```\n{verb}\n```\n{text}\n```\n", cmds.join("\n"));
+                let _ = writeln!(
+                    is,
+                    "{lead}\n```\n{}\n```\n{verb}\n```\n{text}\n```\n",
+                    cmds.join("\n")
+                );
             }
         }
     }
-    if let (false, Some((_, Outcome::Ran { signal: Some(_), .. }))) = (crash, &outputs) {
-        let chan = matrix2.iter().find(|m| m.2 == Repro::Yes).map(|m| m.0.clone());
-        let bt = chan.and_then(|ch| crash_backtrace(&["rustc".to_string(), format!("+{ch}")], &reduced_path, &bad, &o.work));
+    if let (
+        false,
+        Some((
+            _,
+            Outcome::Ran {
+                signal: Some(_), ..
+            },
+        )),
+    ) = (crash, &outputs)
+    {
+        let chan = matrix2
+            .iter()
+            .find(|m| m.2 == Repro::Yes)
+            .map(|m| m.0.clone());
+        let bt = chan.and_then(|ch| {
+            crash_backtrace(
+                &["rustc".to_string(), format!("+{ch}")],
+                &reduced_path,
+                &bad,
+                &o.work,
+            )
+        });
         if let Some(bt) = bt {
-            let _ = writeln!(is, "Where the failing build crashes (`gdb -batch -ex run -ex bt`):\n```\n{bt}\n```\n");
+            let _ = writeln!(
+                is,
+                "Where the failing build crashes (`gdb -batch -ex run -ex bt`):\n```\n{bt}\n```\n"
+            );
         }
     }
     if let Some(c) = culprit.as_ref().filter(|c| c.n > 0) {
-        let what = if c.kind == "llvm" { "LLVM pass" } else { "MIR pass" };
-        let limit = if c.kind == "llvm" { "-C llvm-args=-opt-bisect-limit" } else { "-Zmir-opt-bisect-limit" };
-        let _ = writeln!(is, "Bisecting the optimization passes with `{limit}`: the first {what} that changes the result is pass {} of {}, `{}` on `{}`.\n", c.n, c.total, c.name, c.target);
+        let what = if c.kind == "llvm" {
+            "LLVM pass"
+        } else {
+            "MIR pass"
+        };
+        let limit = if c.kind == "llvm" {
+            "-C llvm-args=-opt-bisect-limit"
+        } else {
+            "-Zmir-opt-bisect-limit"
+        };
+        let _ = writeln!(
+            is,
+            "Bisecting the optimization passes with `{limit}`: the first {what} that changes the result is pass {} of {}, `{}` on `{}`.\n",
+            c.n, c.total, c.name, c.target
+        );
     }
     // Miri is a required step of every finding; its output only belongs here when the program has no `unsafe` and Miri still complains
     if !m.report.is_empty() && !reduced.contains("unsafe") {
-        let _ = writeln!(is, "Miri reports for this program (it contains no `unsafe`):\n```\n{}\n```\n", m.report.trim());
+        let _ = writeln!(
+            is,
+            "Miri reports for this program (it contains no `unsafe`):\n```\n{}\n```\n",
+            m.report.trim()
+        );
     }
-    let _ = writeln!(is, "### Meta\n\n`rustc --version --verbose`:\n```\n{vv}\n```\n");
+    let _ = writeln!(
+        is,
+        "### Meta\n\n`rustc --version --verbose`:\n```\n{vv}\n```\n"
+    );
     let _ = writeln!(is, "| channel | reproducible |\n|---|---|");
     for (ch, ver, r) in &matrix2 {
         let _ = writeln!(is, "| {ch} ({ver}) | {} |", r.word());
@@ -1652,15 +2999,28 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     } else if !bis.pr.na && !bis.nightly.na {
         // not part of the report (an HTML comment): tells whoever reads the draft whether the search still has to be done by hand
         let why = if bis.nightly.range.is_none() {
-            format!("needs the one-day nightly range first ({})", if bis.nightly.note.is_empty() { bis.nightly.summary.clone() } else { bis.nightly.note.clone() })
+            format!(
+                "needs the one-day nightly range first ({})",
+                if bis.nightly.note.is_empty() {
+                    bis.nightly.summary.clone()
+                } else {
+                    bis.nightly.note.clone()
+                }
+            )
         } else if bis.pr.note.is_empty() {
             "not run yet".to_string()
         } else {
             bis.pr.note.clone()
         };
-        let _ = writeln!(is, "\n<!-- cargo-bisect-rustc: NOT DONE ({why}). The next retriage run tries again; the command is `cargo bisect-rustc --regress success --start <good nightly> --end <bad nightly> --script <script that exits 0 while the bug shows>`. -->");
+        let _ = writeln!(
+            is,
+            "\n<!-- cargo-bisect-rustc: NOT DONE ({why}). The next retriage run tries again; the command is `cargo bisect-rustc --regress success --start <good nightly> --end <bad nightly> --script <script that exits 0 while the bug shows>`. -->"
+        );
     }
-    let _ = writeln!(is, "\nProblem was found by and minimized by rust fuzzer(created by llm) - https://github.com/qarmin/rs-compiler-fuzzer (the latest findings of the fuzzer can be checked by hand in https://github.com/qarmin/rs-compiler-fuzzer/releases/download/Nightly/findings.zip)");
+    let _ = writeln!(
+        is,
+        "\nProblem was found by and minimized by rust fuzzer(created by llm) - https://github.com/qarmin/rs-compiler-fuzzer (the latest findings of the fuzzer can be checked by hand in https://github.com/qarmin/rs-compiler-fuzzer/releases/download/Nightly/findings.zip)"
+    );
     std::fs::write(dir.join("ISSUE.md"), is).unwrap();
 
     // put the status at the top of report.md (replace an older block)
@@ -1674,8 +3034,20 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     }
     let _ = std::fs::remove_file(&case_path);
     let _ = std::fs::remove_file(&reduced_path);
-    let summary = open.iter().map(|(t, _)| *t).take(3).collect::<Vec<_>>().join("; ");
-    Ok(format!("{done_n}/{total_n} steps done{}", if open.is_empty() { String::new() } else { format!("; open: {summary}") }))
+    let summary = open
+        .iter()
+        .map(|(t, _)| *t)
+        .take(3)
+        .collect::<Vec<_>>()
+        .join("; ");
+    Ok(format!(
+        "{done_n}/{total_n} steps done{}",
+        if open.is_empty() {
+            String::new()
+        } else {
+            format!("; open: {summary}")
+        }
+    ))
 }
 
 /// The checklist steps of a stored finding that are still open (ids).
@@ -1701,7 +3073,12 @@ pub fn stale_findings(pkg: &Path, skip: &std::collections::HashSet<String>) -> V
             let mut st = read_cfg(&p.join("status.cfg"));
             let meta = read_cfg(&p.join("repro.cfg"));
             steps::backfill(&mut st, &p);
-            let done = st.get("state").map(|s| s == "fixed" || s == "not-reproducing").unwrap_or(false) || meta.get("mode").map(|m| m == "miri").unwrap_or(false) || skip.contains(&name);
+            let done = st
+                .get("state")
+                .map(|s| s == "fixed" || s == "not-reproducing")
+                .unwrap_or(false)
+                || meta.get("mode").map(|m| m == "miri").unwrap_or(false)
+                || skip.contains(&name);
             if done || steps::has_failure(&st) {
                 return None;
             }
@@ -1713,7 +3090,10 @@ pub fn stale_findings(pkg: &Path, skip: &std::collections::HashSet<String>) -> V
             if only_min && st.get("triaged_at").map(|d| *d == today).unwrap_or(false) {
                 return None;
             }
-            let lines = st.get("reduced_lines").and_then(|v| v.parse::<usize>().ok()).unwrap_or(usize::MAX);
+            let lines = st
+                .get("reduced_lines")
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(usize::MAX);
             Some((open.len(), lines, name, p))
         })
         .collect();
@@ -1727,11 +3107,33 @@ mod sibling_tests {
 
     #[test]
     fn levels_that_behave_alike_share_one_command() {
-        let flags: Vec<String> = ["-C opt-level=2", "-C opt-level=3", "-C opt-level=s", "-C opt-level=3 -Zmir-opt-level=0", "-C opt-level=3 -Zmir-opt-level=1", "-C opt-level=3 -Zmir-opt-level=2"].iter().map(|s| s.to_string()).collect();
+        let flags: Vec<String> = [
+            "-C opt-level=2",
+            "-C opt-level=3",
+            "-C opt-level=s",
+            "-C opt-level=3 -Zmir-opt-level=0",
+            "-C opt-level=3 -Zmir-opt-level=1",
+            "-C opt-level=3 -Zmir-opt-level=2",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
         let out = compress_siblings(&flags);
         assert_eq!(out.len(), 2, "{out:?}");
-        assert_eq!(out[0], ("-C opt-level=3".to_string(), "Same with opt-level=2/s".to_string()));
-        assert_eq!(out[1], ("-C opt-level=3 -Zmir-opt-level=0".to_string(), "Same with mir-opt-level=1/2".to_string()));
+        assert_eq!(
+            out[0],
+            (
+                "-C opt-level=3".to_string(),
+                "Same with opt-level=2/s".to_string()
+            )
+        );
+        assert_eq!(
+            out[1],
+            (
+                "-C opt-level=3 -Zmir-opt-level=0".to_string(),
+                "Same with mir-opt-level=1/2".to_string()
+            )
+        );
         // a different opt-level only: nothing to merge
         let single: Vec<String> = vec!["-C opt-level=1".into(), "-C debuginfo=2".into()];
         assert_eq!(compress_siblings(&single).len(), 2);
@@ -1739,7 +3141,11 @@ mod sibling_tests {
 
     #[test]
     fn the_commit_is_named_once() {
-        let l: Vec<String> = vec!["- Regression in [f20a92e](u)".into(), "- searched commit range: [a...b](u)".into(), "- regressed commit: [f20a92e](u)".into()];
+        let l: Vec<String> = vec![
+            "- Regression in [f20a92e](u)".into(),
+            "- searched commit range: [a...b](u)".into(),
+            "- regressed commit: [f20a92e](u)".into(),
+        ];
         assert_eq!(crate::bisect::tidy_pr_lines(&l).len(), 2);
     }
 }
@@ -1751,13 +3157,19 @@ mod stage_tests {
     #[test]
     fn stages_end_at_the_cumulative_marks() {
         let b = stage_budgets(0, Duration::from_secs(10_000));
-        assert_eq!(b.iter().map(|x| x.1.as_secs()).collect::<Vec<_>>(), [600, 600, 1200, 1200]);
+        assert_eq!(
+            b.iter().map(|x| x.1.as_secs()).collect::<Vec<_>>(),
+            [600, 600, 1200, 1200]
+        );
     }
 
     #[test]
     fn finished_stages_are_skipped_and_the_budget_cuts() {
         let b = stage_budgets(1500, Duration::from_secs(1000));
-        assert_eq!(b, vec![(2, Duration::from_secs(900)), (3, Duration::from_secs(100))]);
+        assert_eq!(
+            b,
+            vec![(2, Duration::from_secs(900)), (3, Duration::from_secs(100))]
+        );
     }
 
     #[test]
