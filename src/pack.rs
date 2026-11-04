@@ -520,19 +520,17 @@ pub fn run(pkg: &Path, adds: &[PathBuf], toolchain: &str, contains: Option<&Path
     0
 }
 
-/// `rust-lang/rust#164603` -> markdown link; other text is kept.
-fn linkify(text: &str) -> String {
-    text.split_whitespace()
-        .map(|w| match w.split_once('#') {
-            Some((repo, n))
-                if repo.contains('/') && !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()) =>
-            {
-                format!("[{w}](https://github.com/{repo}/issues/{n})")
-            }
-            _ => w.to_string(),
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+/// `yes`/`no` from the note of the step `llvm_issue`; `N/A` when it does not apply (not an LLVM culprit, crash, cross target); `?` when not verified yet.
+fn fixed_on_llvm_trunk(st: &Cfg) -> &'static str {
+    let Some(s) = crate::steps::get(st, "llvm_issue") else {
+        return "?";
+    };
+    match s.status.as_str() {
+        "n/a" => "N/A",
+        "done" if s.note.contains("FIXED ON TRUNK") => "yes",
+        "done" if s.note.contains("STILL WRONG ON TRUNK") => "no",
+        _ => "?",
+    }
 }
 
 /// The optimisation pass that changes the result: from `culprit.txt`, or - when that file is not there - from the note of the step
@@ -602,7 +600,7 @@ pub fn write_index(pkg: &Path) {
     let table = |s: &mut String, set: &[(String, Cfg)]| {
         let _ = writeln!(
             s,
-            "| steps done | open steps | state | class | finding | target | kind | reduced lines | minimisation | seen | last seen | upstream |\n|---|---|---|---|---|---|---|---|---|---|---|---|"
+            "| steps done | open steps | state | class | finding | target | kind | reduced lines | fixed in llvm trunk | minimisation | seen | last seen |\n|---|---|---|---|---|---|---|---|---|---|---|---|"
         );
         for (k, c) in set {
             let mut c2 = c.clone();
@@ -617,22 +615,19 @@ pub fn write_index(pkg: &Path) {
                     ids.join(", ")
                 }
             };
-            let up = std::fs::read_to_string(root.join(k).join("known-issues.txt"))
-                .map(|t| linkify(&t))
-                .unwrap_or_else(|_| linkify(&g("upstream_search")));
             let _ = writeln!(
                 s,
-                "| {done}/{total} | {} | {} | {} | `{k}` | {} | {} | {} | {} | {}x | {} | {} |",
+                "| {done}/{total} | {} | {} | {} | `{k}` | {} | {} | {} | {} | {} | {}x | {} |",
                 next.replace('|', "/"),
                 g("state"),
                 g("class"),
                 target_of(c),
                 g("kind"),
                 g("reduced_lines"),
+                fixed_on_llvm_trunk(&c2),
                 g("min_status"),
                 g("times_seen"),
-                g("last_seen"),
-                up
+                g("last_seen")
             );
         }
     };

@@ -2112,7 +2112,7 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     } else if complete {
         "complete once - a confirmation run is pending".to_string()
     } else {
-        "in progress - a pass ran out of time".to_string()
+        "in progress - the time budget of this run ended mid-pass, it continues next run".to_string()
     };
     let converged = min_status.starts_with("converged");
 
@@ -2678,7 +2678,7 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     let _ = writeln!(md);
     if !reduce_log.0.is_empty() {
         let _ = writeln!(md, "### Reduction log\n");
-        for l in &reduce_log.0 {
+        for l in &compact_reduce_log(&reduce_log.0) {
             let _ = writeln!(md, "- {l}");
         }
         let _ = writeln!(md);
@@ -3147,6 +3147,58 @@ mod sibling_tests {
             "- regressed commit: [f20a92e](u)".into(),
         ];
         assert_eq!(crate::bisect::tidy_pr_lines(&l).len(), 2);
+    }
+}
+
+const LOG_KEEP_EDGE: usize = 150;
+
+/// Converged runs spin through hundreds of rounds that change nothing; their lines would make STATUS.md megabytes long.
+fn compact_reduce_log(log: &[String]) -> Vec<String> {
+    let mut keep_summary = true;
+    let kept: Vec<String> = log
+        .iter()
+        .filter(|l| {
+            if l.starts_with("RESULT [") && l.contains(": no change (") {
+                return false;
+            }
+            if l.starts_with("SUMMARY:") {
+                keep_summary = !l.contains("; 0 oracle calls");
+            }
+            keep_summary || !l.starts_with("SUMMARY")
+        })
+        .cloned()
+        .collect();
+    if kept.len() <= 2 * LOG_KEEP_EDGE {
+        return kept;
+    }
+    let omitted = kept.len() - 2 * LOG_KEEP_EDGE;
+    let mut out = kept[..LOG_KEEP_EDGE].to_vec();
+    out.push(format!("... {omitted} lines omitted ..."));
+    out.extend_from_slice(&kept[kept.len() - LOG_KEEP_EDGE..]);
+    out
+}
+
+#[cfg(test)]
+mod compact_log_tests {
+    use super::*;
+
+    #[test]
+    fn idle_rounds_are_dropped_and_long_logs_are_cut() {
+        let mut log = vec![
+            "RESULT [a]: 10 -> 5 lines (-5), 1 -> 1 bytes (0); cost: 1 oracle calls in 1.0s; 1s in total".to_string(),
+            "SUMMARY: 10 lines / 1 bytes -> 5 lines / 1 bytes (50.0% fewer lines) in 1s; 9 oracle calls (9.0/s)".to_string(),
+            "SUMMARY biggest contributions: a".to_string(),
+        ];
+        for _ in 0..1000 {
+            log.push("RESULT [a]: no change (5 lines, 1 bytes); cost: 0 oracle calls in 0.0s; 1s in total".to_string());
+            log.push("SUMMARY: 5 lines / 1 bytes -> 5 lines / 1 bytes (0.0% fewer lines) in 1s; 0 oracle calls (0.0/s)".to_string());
+            log.push("SUMMARY candidates that did not compile: 0".to_string());
+        }
+        assert_eq!(compact_reduce_log(&log).len(), 3);
+        let many: Vec<String> = (0..1000).map(|i| format!("line {i}")).collect();
+        let cut = compact_reduce_log(&many);
+        assert_eq!(cut.len(), 2 * LOG_KEEP_EDGE + 1);
+        assert!(cut[LOG_KEEP_EDGE].contains("700 lines omitted"));
     }
 }
 
