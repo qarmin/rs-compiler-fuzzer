@@ -75,9 +75,9 @@ jobs:
           import json, os
           e = os.environ
           quick = e["EVENT"] == "push"
-          # push (nightly only, free runner slots): finer groups = more parallel jobs; daily runs: 8 groups, nightly only
+          # push (nightly only, free runner slots): finer groups = more parallel jobs; daily runs: 9 groups, nightly only
           wide = "arith;select;loops;control;recursion;enums;traits;borrows,asyncs;memory,shapes;abi,simd;collections,floats;unwind,generics;stdlib"
-          narrow = "arith,select;loops;control,recursion;enums,traits;borrows,asyncs;memory,shapes,simd,abi;collections,floats,unwind,generics;stdlib"
+          narrow = "arith,select;loops;control,recursion;enums,traits;borrows,asyncs;memory,shapes,simd,abi;collections,floats;unwind,generics;stdlib"
           groups = e["IN_GROUPS"] or (wide if quick else narrow)
           toolchains = e["IN_TOOLCHAINS"] or "nightly"
           inc = [{"toolchain": t.strip(), "strategies": g.strip(), "name": g.strip().replace(",", "+"), "i686": ""}
@@ -151,6 +151,13 @@ jobs:
           printf 'fn main() { println!("ok"); }\n' > /tmp/small.rs
           rustc +${{ matrix.toolchain }} --target i686-unknown-linux-gnu -C opt-level=1 -C codegen-units=16 /tmp/small.rs -o /tmp/small && /tmp/small
 
+      - name: earlyoom (a compiler that eats all memory is killed instead of the runner)
+        run: |
+          sudo apt-get update && sudo apt-get install -y earlyoom
+          echo 'EARLYOOM_ARGS="-r 60 -m 5 -s 5 --prefer (^|/)(rustc|cc1|cc1plus|ld|lld|collect2|rs-compiler-fuzzer|rs-minimizer|opt|llc)$ --avoid (^|/)(Runner\.Listener|Runner\.Worker|runsvc|dotnet|sshd|systemd)$"' | sudo tee /etc/default/earlyoom
+          sudo systemctl restart earlyoom
+          systemctl is-active earlyoom
+
       - name: Canaries
         if: matrix.i686 != 'yes'
         continue-on-error: true
@@ -167,6 +174,8 @@ jobs:
           seed_arg=()
           if [ "$I686" = yes ]; then seed_arg+=(--i686); fi
           if [ -n "$SEED" ]; then seed_arg+=(--seed "$SEED"); fi
+          # exit code 2 = the fuzzer found something: that is its result, not a failure of the job
+          rc=0
           ./target/release/rs-compiler-fuzzer fuzz \
             --rustc "rustc +${{ matrix.toolchain }}" \
             --duration $((DURATION_MIN * 60)) \
@@ -176,7 +185,9 @@ jobs:
             --compile-timeout 600 \
             --max-findings 25 \
             --out fuzz-out \
-            "${seed_arg[@]}"
+            "${seed_arg[@]}" || rc=$?
+          [ "$rc" -eq 2 ] && rc=0
+          exit "$rc"
 
       # The raw findings are stored first: whatever happens to the runner during the long triage, they are not lost.
       - name: Store the findings in the single package (release asset findings.zip)

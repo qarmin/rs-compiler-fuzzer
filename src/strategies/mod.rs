@@ -100,7 +100,7 @@ pub const ALL: &[Strategy] = &[
     },
     Strategy {
         name: "floats",
-        lines: 3500,
+        lines: 8000,
         about: "IEEE arithmetic, saturating float<->int casts, fma, rounding, formatting/parsing",
         generate: floats::generate,
     },
@@ -216,8 +216,16 @@ pub fn small_ints(rng: &mut Rng, ty: &str) -> String {
     format!("{}{ty}", rng.below(10))
 }
 
+static POINTER_BITS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(64);
+
+/// Width of `usize`/`isize` of the target the programs are compiled for (32 for i686): literals must fit the type there too.
+pub fn set_pointer_bits(bits: u32) {
+    POINTER_BITS.store(bits, std::sync::atomic::Ordering::Relaxed);
+}
+
 pub fn bits(ty: &str) -> u32 {
     match ty {
+        "usize" | "isize" => POINTER_BITS.load(std::sync::atomic::Ordering::Relaxed),
         "u8" | "i8" => 8,
         "u16" | "i16" => 16,
         "u32" | "i32" => 32,
@@ -408,7 +416,7 @@ pub fn plit(rng: &mut Rng, ty: &str) -> String {
         1 => hi,
         2 => 0.clamp(lo, hi),
         3 => (rng.below(40) as i128 - 20).clamp(lo, hi),
-        _ => lo + ((rng.next_u64() as i128).unsigned_abs() as i128) % (hi - lo).max(1),
+        _ => lo + ((rng.next_u64() as i128).unsigned_abs() as i128) % hi.saturating_sub(lo).max(1),
     };
     pat_num(ty, v)
 }
@@ -417,7 +425,7 @@ pub fn plit(rng: &mut Rng, ty: &str) -> String {
 pub fn range_pat(rng: &mut Rng, ty: &str) -> String {
     let (min, max) = bounds(ty);
     let lo = {
-        let spread = (max - min).max(1);
+        let spread = max.saturating_sub(min).max(1);
         match rng.below(4) {
             0 => min,
             1 => (rng.below(40) as i128 - 20).clamp(min, max),

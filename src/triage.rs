@@ -1314,7 +1314,7 @@ fn search_from_text(t: &str) -> Search {
     s
 }
 
-/// A stored reduced program of up to this many lines is the start of the next run; a bigger one is a dead end.
+/// A reduced program longer than this does not fit an issue without an attachment.
 const STORED_LIMIT_LINES: usize = 100;
 
 pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
@@ -1420,7 +1420,7 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
                 };
                 // a finding that is triaged again continues from its earlier (already small) result when that still shows the bug
                 let start_src = match &prev_reduced {
-                    Some(prev) if prev.lines().count() <= STORED_LIMIT_LINES && it.check(prev) => {
+                    Some(prev) if it.check(prev) => {
                         reduce_log.push(format!(
                             "continuing from the previously reduced program ({} lines)",
                             prev.lines().count()
@@ -1429,9 +1429,7 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
                         prev.clone()
                     }
                     Some(prev) => {
-                        // a stored result that is still big is a dead end of an earlier, weaker run: start again from the original, the
-                        // stored one stays as the fallback
-                        reduce_log.push(format!("the stored reduced program has {} lines (more than {STORED_LIMIT_LINES}): starting again from the original ({} lines)", prev.lines().count(), case.lines().count()));
+                        reduce_log.push(format!("the stored reduced program ({} lines) no longer shows the bug under the reducer's limits: falling back to the original ({} lines)", prev.lines().count(), case.lines().count()));
                         case.clone()
                     }
                     _ => case.clone(),
@@ -1849,7 +1847,7 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
         still,
         culprit_kind,
         crate::reduce::INTERRUPTED.load(std::sync::atomic::Ordering::Relaxed),
-        left_secs(o) > 900,
+        steps::fits("pass_bisect", left_secs(o)),
     ) {
         Some(pass_bisect(
             k,
@@ -1988,7 +1986,7 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
                 "the culprit is not an LLVM pass".into()
             },
         ))
-    } else if !still || interrupted || left_secs(o) < 900 {
+    } else if !still || interrupted || !steps::fits("llvm_issue", left_secs(o)) {
         Some((
             "todo".into(),
             "not run yet (no time left or the program does not reproduce)".into(),
@@ -2049,8 +2047,11 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
         };
         if want.stable || want.nightly || want.pr {
             let left = left_secs(o);
-            // the stable / nightly searches get up to 60 % of what is left, cargo-bisect-rustc up to 35 %; with less than 5 minutes the steps stay open
-            if left > 300 {
+            // the stable / nightly searches get up to 60 % of what is left, cargo-bisect-rustc up to 35 %; a search that does not fit stays open
+            let fits_any = (want.stable && steps::fits("bisect_stable", left))
+                || (want.nightly && steps::fits("bisect_nightly", left))
+                || (want.pr && steps::fits("bisect_pr", left));
+            if fits_any {
                 let b1 = o.bisect.min(Duration::from_secs(left * 6 / 10));
                 let b2 = Duration::from_secs(crate::bisect::PR_SECONDS)
                     .min(Duration::from_secs(left * 35 / 100));
@@ -2112,7 +2113,8 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     } else if complete {
         "complete once - a confirmation run is pending".to_string()
     } else {
-        "in progress - the time budget of this run ended mid-pass, it continues next run".to_string()
+        "in progress - the time budget of this run ended mid-pass, it continues next run"
+            .to_string()
     };
     let converged = min_status.starts_with("converged");
 
@@ -2140,6 +2142,45 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
             Repro::NotApplicable => put(&mut st, &id, "n/a", &ctx, "the options only exist on nightly".to_string()),
             Repro::No if ch == "nightly" => put(&mut st, &id, "failed", &ctx, "does not reproduce on the newest nightly any more (the next verification moves it to old_findings/)".into()),
             Repro::No => put(&mut st, &id, "done", &ctx, format!("does not reproduce on {ch}")),
+        }
+    }
+    for (i, id) in [
+        "minimize_10m",
+        "minimize_20m",
+        "minimize_40m",
+        "minimize_60m",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mark = STAGE_MARKS[i];
+        if i == STAGES - 1 && lines_of(&reduced) <= SHORT_LINES {
+            put(
+                &mut st,
+                id,
+                "n/a",
+                "",
+                format!(
+                    "{rl} lines: {} minutes are enough",
+                    STAGE_MARKS[STAGES - 2] / 60
+                ),
+            );
+        } else if min_total >= mark {
+            put(
+                &mut st,
+                id,
+                "done",
+                "",
+                format!("{} of {} minutes spent", min_total / 60, mark / 60),
+            );
+        } else {
+            put(
+                &mut st,
+                id,
+                "todo",
+                "",
+                format!("{} of {} minutes spent", min_total / 60, mark / 60),
+            );
         }
     }
     if !converged {
@@ -2602,15 +2643,15 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
         },
     );
     if !bis.pr.lines.is_empty() {
-        st.insert(
-            "regression_pr".into(),
-            bis.pr
-                .lines
-                .iter()
-                .map(|l| l.trim_start_matches("- ").to_string())
-                .collect::<Vec<_>>()
-                .join(" | "),
-        );
+        let mut pr_text = bis
+            .pr
+            .lines
+            .iter()
+            .map(|l| l.trim_start_matches("- ").to_string())
+            .collect::<Vec<_>>()
+            .join(" | ");
+        crate::bisect::add_commit_dates(&mut pr_text);
+        st.insert("regression_pr".into(), pr_text);
     } else {
         st.remove("regression_pr");
     }
@@ -3059,7 +3100,11 @@ pub fn open_ids_of(dir: &Path) -> Vec<&'static str> {
 
 /// Stored findings (in an unpacked package) with open checklist steps, closest to completion first. `skip` = keys already handled by
 /// this job. A finding whose only open step is the (long) minimisation is not started again on the day it was last triaged.
-pub fn stale_findings(pkg: &Path, skip: &std::collections::HashSet<String>) -> Vec<PathBuf> {
+pub fn stale_findings(
+    pkg: &Path,
+    skip: &std::collections::HashSet<String>,
+    left_secs: Option<u64>,
+) -> Vec<PathBuf> {
     let root = pkg.join("findings");
     let today = today();
     let mut v: Vec<(usize, usize, String, PathBuf)> = std::fs::read_dir(&root)
@@ -3083,10 +3128,12 @@ pub fn stale_findings(pkg: &Path, skip: &std::collections::HashSet<String>) -> V
                 return None;
             }
             let open = steps::open_steps(&st, &today);
-            if open.is_empty() {
+            if open.is_empty() || left_secs.is_some_and(|l| !steps::any_open_fits(&st, &today, l)) {
                 return None;
             }
-            let only_min = open.len() == 1 && open[0].0 == steps::step("minimized").title;
+            let only_min = steps::open_ids(&st, &today)
+                .iter()
+                .all(|i| i.starts_with("minimize") && *i != "minimize_cases");
             if only_min && st.get("triaged_at").map(|d| *d == today).unwrap_or(false) {
                 return None;
             }

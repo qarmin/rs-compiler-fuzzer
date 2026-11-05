@@ -523,13 +523,16 @@ pub fn run(pkg: &Path, adds: &[PathBuf], toolchain: &str, contains: Option<&Path
 /// `yes`/`no` from the note of the step `llvm_issue`; `N/A` when it does not apply (not an LLVM culprit, crash, cross target); `?` when not verified yet.
 fn fixed_on_llvm_trunk(st: &Cfg) -> &'static str {
     let Some(s) = crate::steps::get(st, "llvm_issue") else {
-        return "?";
+        return "open";
     };
     match s.status.as_str() {
         "n/a" => "N/A",
         "done" if s.note.contains("FIXED ON TRUNK") => "yes",
         "done" if s.note.contains("STILL WRONG ON TRUNK") => "no",
-        _ => "?",
+        "done" if s.note.starts_with("not verified") => {
+            "N/A (the pass alone does not reproduce it)"
+        }
+        _ => "open",
     }
 }
 
@@ -586,8 +589,9 @@ pub fn write_index(pkg: &Path) {
         }
     };
     rows.sort_by(|a, b| rank(&a.1, &a.0).cmp(&rank(&b.1, &b.0)).then(a.0.cmp(&b.0)));
-    let mut s = String::from(
-        "# Stored findings\n\nOne row per distinct finding. The `target` column says what it is compiled for: `host` is plain `rustc file.rs`, anything else needs `rustc --target <triple> ... file.rs && ./file` (e.g. `i686-unknown-linux-gnu`, run natively on x86_64 with gcc-multilib). Every directory under `findings/` has `finding.json` (with the checklist), `STATUS.md` (checklist, reproduction per channel, minimisation, UB check, upstream search) and, once triaged, `reduced.rs` + `ISSUE.md`. The checklist says what was done and what is still open; steps are redone when the tool gets better at them or when the reduced program changes.\n\n",
+    let mut s = format!(
+        "# Stored findings\n\nOne row per distinct finding. The `target` column says what it is compiled for: `host` is plain `rustc file.rs`, anything else needs `rustc --target <triple> ... file.rs && ./file` (e.g. `i686-unknown-linux-gnu`, run natively on x86_64 with gcc-multilib). Every directory under `findings/` has `finding.json` (with the checklist), `STATUS.md` (checklist, reproduction per channel, minimisation, UB check, upstream search) and, once triaged, `reduced.rs` + `ISSUE.md`. The checklist says what was done and what is still open; steps are redone when the tool gets better at them or when the reduced program changes.\n\n## Steps of every finding\n\nEvery finding goes through exactly these steps, in this order; `steps done` below counts them, and every other column is the result of one of them.\n\n{}\n",
+        crate::steps::list_md(),
     );
     let finished = |k: &str, c: &Cfg| {
         let mut c2 = c.clone();
@@ -685,14 +689,14 @@ pub fn write_index(pkg: &Path) {
             })
             .collect::<Vec<_>>()
         {
-            let short = u
-                .rsplit('/')
-                .next()
-                .unwrap_or("")
-                .chars()
-                .take(10)
-                .collect::<String>();
-            let _ = writeln!(s, "- [{short}]({u}) ({}): {}", ks.len(), list(ks));
+            let sha = u.rsplit('/').next().unwrap_or("");
+            let pr = ks
+                .iter()
+                .find_map(|k| rows.iter().find(|r| &r.0 == k))
+                .and_then(|r| r.1.get("regression_pr").cloned())
+                .unwrap_or_default();
+            let label = crate::bisect::commit_label(&pr, sha);
+            let _ = writeln!(s, "- [{label}]({u}) ({}): {}", ks.len(), list(ks));
         }
         if !not_found.is_empty() {
             let _ = writeln!(
@@ -777,12 +781,7 @@ pub fn write_index(pkg: &Path) {
             match commit {
                 Some(u) => format!(
                     "[{}]({u})",
-                    u.rsplit('/')
-                        .next()
-                        .unwrap_or("")
-                        .chars()
-                        .take(10)
-                        .collect::<String>()
+                    crate::bisect::commit_label(&pr, u.rsplit('/').next().unwrap_or(""))
                 ),
                 None if reg.starts_with("long-standing") => {
                     "long-standing, not a regression".to_string()

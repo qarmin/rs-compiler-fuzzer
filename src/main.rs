@@ -625,13 +625,14 @@ fn main() {
                         .collect()
                 })
                 .unwrap_or_default();
-            let mut stale: Vec<PathBuf> = triage::stale_findings(&pkg, &skip)
-                .into_iter()
-                .filter(|p| {
-                    pack::name_hash(&p.file_name().unwrap().to_string_lossy()) % sn as u64
-                        == si as u64
-                })
-                .collect();
+            let mut stale: Vec<PathBuf> =
+                triage::stale_findings(&pkg, &skip, (deadline_secs > 0).then_some(deadline_secs))
+                    .into_iter()
+                    .filter(|p| {
+                        pack::name_hash(&p.file_name().unwrap().to_string_lossy()) % sn as u64
+                            == si as u64
+                    })
+                    .collect();
             if let Some(name) = &finding {
                 // one finding, whatever its checklist says, minimised again from where it stands
                 let dir = pkg.join("findings").join(name);
@@ -687,10 +688,7 @@ fn main() {
                 let (mut other, mut mins, mut weights) = (0u64, 0u64, 0.0f64);
                 for p in &stale {
                     let ids = triage::open_ids_of(p);
-                    if ids
-                        .iter()
-                        .any(|i| *i == "minimized" || *i == "minimize_cases")
-                    {
+                    if ids.iter().any(|i| i.starts_with("minimize")) {
                         mins += 1;
                         weights += weight(p);
                     }
@@ -706,7 +704,7 @@ fn main() {
                 }
                 let this_min = triage::open_ids_of(d)
                     .iter()
-                    .any(|i| *i == "minimized" || *i == "minimize_cases");
+                    .any(|i| i.starts_with("minimize"));
                 let b = if deadline_secs > 0 && this_min {
                     let share =
                         remaining.saturating_sub(other) as f64 * weight(d) / weights.max(1.0);
@@ -772,6 +770,9 @@ fn main() {
         "fuzz" | "canary" | "verify" | "miri" => {
             let version = fuzz::rustc_version(&rustc_argv);
             let nightly = fuzz::is_nightly(&version);
+            if i686 {
+                strategies::set_pointer_bits(32);
+            }
             let mut configs = if i686 {
                 fuzz::i686_configs(nightly)
             } else {

@@ -722,3 +722,73 @@ fn pr_search(
     part.lines = res;
     part.done = true;
 }
+
+/// Date (`YYYY-MM-DD`) of a rust-lang/rust commit, from the GitHub API (`None` without `gh` or network).
+fn commit_date(sha: &str) -> Option<String> {
+    let mut c = Command::new("gh");
+    c.args([
+        "api",
+        &format!("repos/rust-lang/rust/commits/{sha}"),
+        "--jq",
+        ".commit.committer.date",
+    ]);
+    let r = exec(c, Duration::from_secs(30))
+        .ok()
+        .filter(|r| r.code == Some(0))?;
+    let d = String::from_utf8_lossy(&r.stdout)
+        .trim()
+        .chars()
+        .take(10)
+        .collect::<String>();
+    (d.len() == 10 && d.as_bytes()[4] == b'-').then_some(d)
+}
+
+/// Appends ` | committed <sha10>=<date>` for every commit link of the text that has no date yet (the index shows `[sha - date]`).
+pub fn add_commit_dates(text: &mut String) {
+    let shas: Vec<String> = text
+        .split_whitespace()
+        .filter_map(|w| w.strip_prefix("https://github.com/rust-lang/rust/commit/"))
+        .map(|u| {
+            u.trim_end_matches(|c: char| !c.is_ascii_hexdigit())
+                .to_string()
+        })
+        .filter(|s| s.len() >= 10)
+        .collect();
+    for sha in shas {
+        let key = format!("committed {}=", &sha[..10]);
+        if !text.contains(&key)
+            && let Some(d) = commit_date(&sha)
+        {
+            text.push_str(&format!(" | {key}{d}"));
+        }
+    }
+}
+
+/// `1b29cfdbee - 2026-08-21` (just the hash when the date is unknown).
+pub fn commit_label(regression_pr: &str, sha: &str) -> String {
+    let short: String = sha.chars().take(10).collect();
+    let key = format!("committed {short}=");
+    match regression_pr
+        .split(key.as_str())
+        .nth(1)
+        .map(|r| r.chars().take(10).collect::<String>())
+    {
+        Some(d) if d.len() == 10 => format!("{short} - {d}"),
+        _ => short,
+    }
+}
+
+#[cfg(test)]
+mod commit_label_tests {
+    use super::commit_label;
+
+    #[test]
+    fn the_label_carries_the_commit_date() {
+        let t = "Regression in https://github.com/rust-lang/rust/commit/1b29cfdbee8ee37333f4b24afb936350eb57e705 | committed 1b29cfdbee=2026-08-21";
+        assert_eq!(
+            commit_label(t, "1b29cfdbee8ee37333f4b24afb936350eb57e705"),
+            "1b29cfdbee - 2026-08-21"
+        );
+        assert_eq!(commit_label("x", "1b29cfdbee8e"), "1b29cfdbee");
+    }
+}

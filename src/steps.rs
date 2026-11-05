@@ -18,12 +18,14 @@ pub struct Step {
     pub code: bool,
     /// repeat after this many days (0 = never)
     pub max_age_days: u32,
+    /// worst-case time of the step: it is only started when at least this much of the job's time is left, otherwise it stays open
+    pub max_secs: u64,
 }
 
 /// Version of the minimiser: bump it when a pass is added or improved. The step `minimized` is then open again and the
 /// convergence count starts from zero (the next runs continue from the previous result).
-/// 2: `print!` is turned back into `println!` at the end
-pub const REDUCE_VERSION: u32 = 6;
+/// 2: `print!` is turned back into `println!` at the end; 7: the minimisation is split into one step per time mark
+pub const REDUCE_VERSION: u32 = 7;
 
 /// Every step is one atomic result: done, not applicable, or still to do (no partial results are recorded).
 /// 5: the steps were split up (one result per channel, per kind of flag, per kind of level, per search) and every version raised.
@@ -34,6 +36,7 @@ pub const STEPS: &[Step] = &[
         version: 2,
         code: true,
         max_age_days: 0,
+        max_secs: 600,
     },
     Step {
         id: "reproduced_beta",
@@ -41,6 +44,7 @@ pub const STEPS: &[Step] = &[
         version: 2,
         code: true,
         max_age_days: 0,
+        max_secs: 600,
     },
     Step {
         id: "reproduced_nightly",
@@ -48,6 +52,7 @@ pub const STEPS: &[Step] = &[
         version: 2,
         code: true,
         max_age_days: 0,
+        max_secs: 600,
     },
     Step {
         id: "minimize_cases",
@@ -55,13 +60,47 @@ pub const STEPS: &[Step] = &[
         version: 2,
         code: false,
         max_age_days: 0,
+        max_secs: 900,
     },
     Step {
-        id: "minimized",
-        title: "Code minimised (at least 60 minutes in total, every pass finished, a second run changed nothing)",
+        id: "minimize_10m",
+        title: "Code minimisation: 10 cumulative minutes spent (continuing from reduced.rs)",
         version: REDUCE_VERSION,
         code: false,
         max_age_days: 0,
+        max_secs: 600,
+    },
+    Step {
+        id: "minimize_20m",
+        title: "Code minimisation: 20 cumulative minutes spent",
+        version: REDUCE_VERSION,
+        code: false,
+        max_age_days: 0,
+        max_secs: 600,
+    },
+    Step {
+        id: "minimize_40m",
+        title: "Code minimisation: 40 cumulative minutes spent",
+        version: REDUCE_VERSION,
+        code: false,
+        max_age_days: 0,
+        max_secs: 1200,
+    },
+    Step {
+        id: "minimize_60m",
+        title: "Code minimisation: 60 cumulative minutes spent (n/a for a program of 20 lines or fewer)",
+        version: REDUCE_VERSION,
+        code: false,
+        max_age_days: 0,
+        max_secs: 1200,
+    },
+    Step {
+        id: "minimized",
+        title: "Code minimisation converged (every pass finished, the next run started from that result changed nothing)",
+        version: REDUCE_VERSION,
+        code: false,
+        max_age_days: 0,
+        max_secs: 1800,
     },
     Step {
         id: "flags_common",
@@ -69,6 +108,7 @@ pub const STEPS: &[Step] = &[
         version: 2,
         code: true,
         max_age_days: 0,
+        max_secs: 900,
     },
     Step {
         id: "flags_reference",
@@ -76,6 +116,7 @@ pub const STEPS: &[Step] = &[
         version: 2,
         code: true,
         max_age_days: 0,
+        max_secs: 900,
     },
     Step {
         id: "flags_failing",
@@ -83,6 +124,7 @@ pub const STEPS: &[Step] = &[
         version: 2,
         code: true,
         max_age_days: 0,
+        max_secs: 900,
     },
     Step {
         id: "opt_levels",
@@ -90,6 +132,7 @@ pub const STEPS: &[Step] = &[
         version: 4,
         code: true,
         max_age_days: 0,
+        max_secs: 900,
     },
     Step {
         id: "mir_levels",
@@ -97,6 +140,7 @@ pub const STEPS: &[Step] = &[
         version: 2,
         code: true,
         max_age_days: 0,
+        max_secs: 600,
     },
     Step {
         id: "ub_check",
@@ -104,6 +148,7 @@ pub const STEPS: &[Step] = &[
         version: 3,
         code: true,
         max_age_days: 0,
+        max_secs: 900,
     },
     Step {
         id: "mir_llvm",
@@ -111,6 +156,7 @@ pub const STEPS: &[Step] = &[
         version: 2,
         code: true,
         max_age_days: 0,
+        max_secs: 300,
     },
     Step {
         id: "pass_bisect",
@@ -118,6 +164,7 @@ pub const STEPS: &[Step] = &[
         version: 2,
         code: true,
         max_age_days: 0,
+        max_secs: 1800,
     },
     Step {
         id: "regression",
@@ -125,6 +172,7 @@ pub const STEPS: &[Step] = &[
         version: 2,
         code: true,
         max_age_days: 0,
+        max_secs: 600,
     },
     Step {
         id: "bisect_stable",
@@ -132,6 +180,7 @@ pub const STEPS: &[Step] = &[
         version: 3,
         code: true,
         max_age_days: 0,
+        max_secs: 3600,
     },
     Step {
         id: "bisect_nightly",
@@ -139,6 +188,7 @@ pub const STEPS: &[Step] = &[
         version: 3,
         code: true,
         max_age_days: 0,
+        max_secs: 3600,
     },
     Step {
         id: "bisect_pr",
@@ -146,6 +196,7 @@ pub const STEPS: &[Step] = &[
         version: 3,
         code: true,
         max_age_days: 0,
+        max_secs: 4200,
     },
     Step {
         id: "upstream_rust",
@@ -153,6 +204,7 @@ pub const STEPS: &[Step] = &[
         version: 2,
         code: true,
         max_age_days: 14,
+        max_secs: 300,
     },
     Step {
         id: "upstream_llvm",
@@ -160,13 +212,15 @@ pub const STEPS: &[Step] = &[
         version: 1,
         code: true,
         max_age_days: 14,
+        max_secs: 300,
     },
     Step {
         id: "llvm_issue",
-        title: "LLVM_ISSUE.md: the culprit LLVM pass verified with the apt.llvm.org release and trunk binaries (LLVM culprits only; repeated after 14 days)",
-        version: 1,
+        title: "LLVM_ISSUE.md: the culprit LLVM pass verified with the apt.llvm.org release and trunk binaries, verdict FIXED ON TRUNK / STILL WRONG ON TRUNK (LLVM culprits only; repeated after 14 days)",
+        version: 2,
         code: true,
         max_age_days: 14,
+        max_secs: 1500,
     },
     Step {
         id: "issue_draft",
@@ -174,8 +228,44 @@ pub const STEPS: &[Step] = &[
         version: 2,
         code: true,
         max_age_days: 0,
+        max_secs: 60,
     },
 ];
+
+/// The numbered list of every step a finding goes through, in order (written into `INDEX.md`).
+pub fn list_md() -> String {
+    let total = STEPS.len();
+    let mut s = String::new();
+    for (i, d) in STEPS.iter().enumerate() {
+        let mut rules = vec![format!("v{}", d.version)];
+        if d.code {
+            rules.push("redone when the reduced program changes".into());
+        }
+        if d.max_age_days > 0 {
+            rules.push(format!("repeated after {} days", d.max_age_days));
+        }
+        s.push_str(&format!(
+            "- {}/{} - {} ({})\n",
+            i + 1,
+            total,
+            d.title,
+            rules.join(", ")
+        ));
+    }
+    s
+}
+
+/// Does the step fit into the time left?
+pub fn fits(id: &str, left_secs: u64) -> bool {
+    left_secs >= step(id).max_secs
+}
+
+/// Is any open step small enough to be started with `left_secs` left?
+pub fn any_open_fits(st: &Cfg, today: &str, left_secs: u64) -> bool {
+    open_ids(st, today)
+        .into_iter()
+        .any(|id| fits(id, left_secs))
+}
 
 pub fn step(id: &str) -> &'static Step {
     STEPS.iter().find(|s| s.id == id).expect("unknown step")
@@ -580,6 +670,14 @@ mod tests {
     fn minimisation_itself_does_not_depend_on_the_program_hash() {
         let st = cfg_with("minimized", "done", "", "2026-10-01");
         assert!(current(&st, "minimized", "whatever", "2026-10-02").is_some());
+    }
+
+    #[test]
+    fn a_step_is_started_only_when_it_fits_into_the_time_left() {
+        assert!(fits("issue_draft", 60) && !fits("bisect_pr", 3600) && fits("bisect_pr", 4200));
+        let st = Cfg::new();
+        assert!(any_open_fits(&st, "2026-10-02", 60));
+        assert!(!any_open_fits(&st, "2026-10-02", 30));
     }
 
     #[test]

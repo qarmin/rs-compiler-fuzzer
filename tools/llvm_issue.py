@@ -341,7 +341,7 @@ Problem was found by rust fuzzer(created by llm) - https://github.com/qarmin/rs-
 """
     open(out_md, "w").write(md)
     shutil.rmtree(work, ignore_errors=True)
-    result("done", f"{pass_name}: " + status_line)
+    result("todo" if status_line == "trunk was not checked" else "done", f"{pass_name}: " + status_line)
 
 
 if __name__ == "__main__":

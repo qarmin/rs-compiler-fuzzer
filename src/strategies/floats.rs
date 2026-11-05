@@ -218,7 +218,7 @@ pub fn generate(rng: &mut Rng) -> String {
         let sg = if ty == "f64" { "sg64" } else { "sg32" };
         w!(
             body,
-            "        h.put(&{cv}(arr.iter().copied().sum::<{ty}>())); arr.sort_by(|a, b| {sg}(*a).total_cmp(&{sg}(*b))); h.put(&arr.iter().map(|x| {cv}(*x) as u64).fold(0u64, |a, b| a.rotate_left(5) ^ b));"
+            "        h.put(&{cv}(arr.iter().copied().sum::<{ty}>())); arr.sort_by({{ let f: fn(&{ty}, &{ty}) -> std::cmp::Ordering = |a, b| {sg}(*a).total_cmp(&{sg}(*b)); f }}); h.put(&arr.iter().map(|x| {cv}(*x) as u64).fold(0u64, |a, b| a.rotate_left(5) ^ b));"
         );
         // int -> float conversions of edge values
         let it = *rng.pick(&all_ints());

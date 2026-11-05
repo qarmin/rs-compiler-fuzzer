@@ -156,7 +156,7 @@ by hand. The `*-checks` configs and `PANIC` lines can also point at a generator 
   - **22:00 UTC daily**: nightly only, `full` profile, 230 minutes of fuzzing + up to 60 minutes of triage per job (GitHub limits a job to 6 h, the workflow budgets 340 min);
   - **manual dispatch**: duration, profile, scale, strategy groups, toolchains, seed are inputs.
   Extra **i686 jobs** (`i686-<groups>`, `--i686`): the same fuzzing with `--target i686-unknown-linux-gnu` (needs `rustup target add` + `gcc-multilib`), the builds compared among themselves (baseline `i686-O0`; configs such as `-C opt-level=1 -C codegen-units=16`). The `target` column of `INDEX.md` shows which findings need `--target`; the `i686_strategies` dispatch input picks the groups.
-  One job per strategy group (only nightly is fuzzed; stable/beta are used by triage to reproduce): 8 jobs. Each job runs the canaries,
+  One job per strategy group (only nightly is fuzzed; stable/beta are used by triage to reproduce): 9 jobs. Each job runs the canaries,
   fuzzes, then **triages** the new findings (`triage`: reproduces on stable/beta/nightly, reduces with the built-in passes after flattening the harness into a plain `fn main`, checks the reduced
   program with Miri, searches rust-lang/rust issues with `gh`) and prints the result into the log, the step
   summary and an artifact. Every finding gets a `STATUS.md` with a **checklist** (what is done, what is open - see below) and an `ISSUE.md` draft (plus `ISSUE_TITLE.txt`) in the rust-lang format: the reduced program only, the shortest
@@ -178,9 +178,9 @@ by hand. The `*-checks` configs and `PANIC` lines can also point at a generator 
   search), storing each result as soon as it is ready. `retriage.yml` (when a fuzz/miri run ends, and daily at 01:30 UTC, 4
   shards) continues with everything that has no result yet, an older `fuzzer_id`, or an unsettled minimisation; the first shard also
   verifies the stored reproducers. Schedule: fuzz ~00:00 Warsaw time (22:00 UTC), retriage 01:30 UTC, Miri 03:00 UTC.
-- **Checklist instead of a verdict** (`src/steps.rs`): every stored finding says which steps are done and which are open. The 21 steps
+- **Checklist instead of a verdict** (`src/steps.rs`): every stored finding says which steps are done and which are open. The steps (the numbered list is printed at the top of `INDEX.md`, rules in `CLAUDE.md`)
   are atomic - one result each, nothing is recorded half way: reproduced on stable / beta / nightly (three steps), batch reduced to
-  the cases that matter, **fully minimised**, shortest command line (shared flags / reference build / failing build: three steps),
+  the cases that matter, minimisation marks at 10 / 20 / 40 / 60 cumulative minutes (one step each), **converged**, shortest command line (shared flags / reference build / failing build: three steps),
   `-C opt-level` values, `-Zmir-opt-level` values, Miri (UB) check, MIR-vs-LLVM, culprit pass, regression or long-standing, first
   stable, first nightly, offending commit (cargo-bisect-rustc), upstream search in rust-lang/rust and in llvm/llvm-project (two steps),
   issue draft, `LLVM_ISSUE.md` (see below) and (manual) reported. A step is `done`, `n/a`, `failed` (a negative verdict that needs a human, e.g. Miri finds UB) or
@@ -188,7 +188,7 @@ by hand. The `*-checks` configs and `PANIC` lines can also point at a generator 
   search in which one query failed is not a finished search. `STATUS.md` shows `- [x]` / `- [ ]` / `- [!]`, `INDEX.md` has "steps
   done" and the next open step, `finding.json` (schema 2) has the same as `steps`.
   - *Fully minimised* means: one run finished every pass before its deadlines (`complete once`) and the next run, started from that
-    result, changed nothing (`converged`); at most 6 runs. On top of that a finding needs reduction time before it can be `converged`: 60 minutes in total (40 when the program has 20 lines or fewer), summed over runs (`min_total_seconds` in `status.cfg`). A run works in stages that end at 10, 20, 40 and 60 cumulative minutes (`STAGE_MARKS`; the last one is skipped for a program of 20 lines or fewer), every finished stage stores its program and the time spent, so an interrupted job loses at most one stage. A round that changes nothing does not end the run while the time is not spent: the next round shuffles the candidates differently (`control::set_salt`).
+    result, changed nothing (`converged`); at most 6 runs. On top of that a finding needs reduction time before it can be `converged`: 60 minutes in total (40 when the program has 20 lines or fewer), summed over runs (`min_total_seconds` in `status.cfg`). After a reset (a new `REDUCE_VERSION`) the counters restart but the next run starts from the stored `reduced.rs`; the original is only the fallback when it no longer shows the bug. A run works in stages that end at 10, 20, 40 and 60 cumulative minutes (`STAGE_MARKS`; the last one is skipped for a program of 20 lines or fewer), every finished stage stores its program and the time spent, so an interrupted job loses at most one stage. A round that changes nothing does not end the run while the time is not spent: the next round shuffles the candidates differently (`control::set_salt`).
   - **Memory**: every compiler and test process is killed when its resident memory passes `RS_MEM_MB` (default 4096), for the fuzzer's own oracle and for `rs-minimizer`'s.
   - `tools/handmin.py FILE CHECK` is a manual complement: random multi-range deletions on many threads (also under `ulimit -v`); it found nothing the built-in passes miss on the findings tried.
   - **Steps are reset when they should be**: every step has a version. When the tool gets better at it (a new reduction pass:
@@ -200,6 +200,7 @@ by hand. The `*-checks` configs and `PANIC` lines can also point at a generator 
     completion first, each at most once per job - and only runs what is open (a converged minimisation is not repeated, a known regression
     range is kept, `bisect.txt`/`search.txt` hold the details). Findings stored before the checklist existed get it derived from the fields
     they have.
+- **Time budget**: every step has `max_secs` (`src/steps.rs`). `retriage` (the CI job has about 335 minutes) only picks a finding when one of its open steps fits into the time left, and inside a finding a step is started only when it fits; the rest stays open for the next run. Commits in `INDEX.md` are shown as `[<sha10> - <commit date>]`.
 - **`finding.json`**: the standard machine readable description of a stored finding (strategy, kind, minimal flags, reduced program hash,
   regression edges, reproduction per channel, checklist ...), rewritten whenever `status.cfg` changes. When two jobs triaged the same
   finding concurrently, the result with more finished steps wins; the same reduced program found twice is merged (`reduced_hash`).

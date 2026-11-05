@@ -76,6 +76,14 @@ jobs:
           for c in stable beta nightly; do rustup toolchain install $c --profile minimal; done
           rustup component add miri rust-src --toolchain nightly || echo "miri unavailable on this nightly"
           [ -x "$HOME/.cargo/bin/cargo-bisect-rustc" ] || cargo +stable install cargo-bisect-rustc --locked || echo "cargo-bisect-rustc unavailable"
+
+      - name: earlyoom (a compiler that eats all memory is killed instead of the runner)
+        run: |
+          sudo apt-get update && sudo apt-get install -y earlyoom
+          echo 'EARLYOOM_ARGS="-r 60 -m 5 -s 5 --prefer (^|/)(rustc|cc1|cc1plus|ld|lld|collect2|rs-compiler-fuzzer|rs-minimizer|opt|llc)$ --avoid (^|/)(Runner\.Listener|Runner\.Worker|runsvc|dotnet|sshd|systemd)$"' | sudo tee /etc/default/earlyoom
+          sudo systemctl restart earlyoom
+          systemctl is-active earlyoom
+
       - run: cargo +stable build --release
 
       # The newest nightly is the reference: a bug that no longer reproduces there (two checks in a row) is removed from the
@@ -115,11 +123,11 @@ jobs:
           # nearly the whole 6 hours a job may run (GitHub's limit): setup ~7 minutes, the last 20 minutes are left for storing the result
           end=$((SECONDS + 335 * 60)); n=0; : > retriaged-keys.txt
           for i in $(seq 1 "$LIMIT"); do
-            # not enough time for another finding (reduction + regression range + reproduction matrix)
-            [ $((end - SECONDS)) -lt 900 ] && { echo "no time left for another finding"; break; }
+            # retriage picks a finding only when one of its open steps fits into the time left (`max_secs` of each step in src/steps.rs)
+            [ $((end - SECONDS)) -lt 60 ] && { echo "no time left"; break; }
             "$BIN" retriage --pkg pkg --shard "${{ matrix.shard }}" --limit 1 --skip retriaged-keys.txt --budget "$REDUCE" --budget-max "$REDUCE_MAX" --deadline $((end - SECONDS)) --bisect "$BISECT" --out retriage-out | tee one.txt
             k=$(sed -n 's/^RETRIAGED //p' one.txt | head -n1)
-            [ -z "$k" ] && { echo "nothing (more) to re-triage in this shard"; break; }
+            [ -z "$k" ] && { echo "nothing (more) that fits into the time left in this shard"; break; }
             rm -rf upd && mkdir -p "upd/$k" && cp -r "pkg/findings/$k/." "upd/$k/"
             ADD_DIRS="upd" tools/release_sync.sh tools/store_mutator.sh
             echo "$k" >> retriaged-keys.txt; n=$((n + 1))
@@ -170,8 +178,12 @@ jobs:
             echo "- not fully tested: $open, triaged by this run: $done_now, chain position $CHAIN of 8"
           } >> "$GITHUB_STEP_SUMMARY"
           if [ "$open" -gt 0 ] && [ "$done_now" -gt 0 ] && [ "$CHAIN" -lt 8 ]; then
-            gh workflow run retriage.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" -f limit="$LIMIT" -f reduce_seconds="$REDUCE" -f reduce_max_seconds="$REDUCE_MAX" -f bisect_seconds="$BISECT" -f chain="$((CHAIN + 1))"
-            echo "- started the next run" >> "$GITHUB_STEP_SUMMARY"
+            started=no
+            for attempt in 1 2 3 4 5; do
+              if gh workflow run retriage.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" -f limit="$LIMIT" -f reduce_seconds="$REDUCE" -f reduce_max_seconds="$REDUCE_MAX" -f bisect_seconds="$BISECT" -f chain="$((CHAIN + 1))"; then started=yes; break; fi
+              sleep $((attempt * 20))
+            done
+            echo "- started the next run: $started" >> "$GITHUB_STEP_SUMMARY"
           else
             echo "- chain ends here" >> "$GITHUB_STEP_SUMMARY"
           fi
