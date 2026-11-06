@@ -139,6 +139,16 @@ pub fn default_configs(nightly: bool) -> Vec<Config> {
             .slow(),
         );
         v.push(Config::new("O3-lto-fat", "-C opt-level=3 -C lto=fat -C codegen-units=1").slow());
+        // rust-lang/rust#165551: instruction selection failed only with fat LTO and AVX-512 together
+        if level >= 4 {
+            v.push(
+                Config::new(
+                    "O3-lto-fat-v4",
+                    "-C opt-level=3 -C lto=fat -C target-cpu=x86-64-v4",
+                )
+                .slow(),
+            );
+        }
     }
     if nightly {
         v.push(Config::new("O3-mir0", "-C opt-level=3 -Z mir-opt-level=0"));

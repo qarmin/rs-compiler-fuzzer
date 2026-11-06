@@ -530,7 +530,7 @@ fn fixed_on_llvm_trunk(st: &Cfg) -> &'static str {
         "done" if s.note.contains("FIXED ON TRUNK") => "yes",
         "done" if s.note.contains("STILL WRONG ON TRUNK") => "no",
         "done" if s.note.starts_with("not verified") => {
-            "N/A (the pass alone does not reproduce it)"
+            "N/A (neither the pass nor the whole opt + llc pipeline reproduces it)"
         }
         _ => "open",
     }

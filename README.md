@@ -219,6 +219,8 @@ When the culprit pass of a wrong-code finding is an LLVM pass, the step `llvm_is
 2. For LLVM M-1 (release branch), M (the version rustc uses, release branch) and M+1 (**trunk**): `opt -passes=<pass>`, then `llc` of the module with and without the pass, both linked into the program by rustc (a linker wrapper swaps the object file) and run. A different output = that LLVM is wrong.
 3. The file has the IR of the function, the table of the three versions and a banner comment on the first line: `FIXED ON TRUNK` (do not file, maybe ask for a backport), `STILL WRONG ON TRUNK` (worth filing) or `trunk was not checked`.
 
+When the pass cannot be run alone (a codegen pass such as `stack-coloring`) or does not reproduce in isolation, the unoptimised module (`-C no-prepopulate-passes --emit=llvm-bc`) is run through the whole `opt -passes='default<On>'` + `llc -On` pipeline of every LLVM version (previous release, the one rustc uses, trunk) and compared with the same module built by `llc -O0`: that gives the FIXED ON TRUNK / STILL WRONG ON TRUNK verdict for every LLVM culprit.
+
 Run by hand: `python3 tools/llvm_issue.py findings/<finding> --src findings/<finding>/reduced.rs --flags "-C opt-level=2"` (needs `culprit.txt` from the triage). The IR is not reduced: before filing run `llvm-reduce` on it and check the transformation on <https://alive2.llvm.org/ce/>.
 
 ## Reports
@@ -298,10 +300,10 @@ The result is not uploaded: copy the directory into the release package (or open
   side panics with an overflow (or an `unsafe` precondition / `debug_assert`) message: `i8::MAX + 1` is `0` without the checks and a
   panic with them, by definition. The reducer used to produce such "findings" by itself. (`runner::differs`, used by the fuzzer, the
   reducer's oracle, triage and verify.)
-- Strategy `shapes` follows specific recent reports: shadowed 128-bit `let` chains through `black_box` (#164667) and chains of
-  `static mut` raw pointers (#164137). At the end of a run the fuzzer prints per strategy how many cases were dropped as invalid
+- Strategy `shapes` follows specific recent reports: shadowed 128-bit `let` chains through `black_box` (#164667) chains of
+  `static mut` raw pointers (#164137), interval enums compared through a tuple `match` of two `Ordering`s (DFAJumpThreading, #165528) and `(lo..lo + n).zip(hi - n..hi)` over narrow signed indices (#165551) and a boolean folded while the same loop rewrites the elements (#165544, needs `x86-64-v3`). At the end of a run the fuzzer prints per strategy how many cases were dropped as invalid
   (compile errors of the generator) and flags strategies above 5 %; the table also goes to the job summary.
-- LTO configurations (`O3-lto-thin`, `O3-lto-thin-checks`, `O3-lto-fat`) exist only with `--lto` (too heavy for the CI jobs).
+- LTO configurations (`O3-lto-thin`, `O3-lto-thin-checks`, `O3-lto-fat`, `O3-lto-fat-v4` on AVX-512 machines) exist only with `--lto` (too heavy for the CI jobs).
 
 ### Local fuzzing with `just` (LTO and other heavy runs)
 

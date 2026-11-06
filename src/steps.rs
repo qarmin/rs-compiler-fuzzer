@@ -216,8 +216,8 @@ pub const STEPS: &[Step] = &[
     },
     Step {
         id: "llvm_issue",
-        title: "LLVM_ISSUE.md: the culprit LLVM pass verified with the apt.llvm.org release and trunk binaries, verdict FIXED ON TRUNK / STILL WRONG ON TRUNK (LLVM culprits only; repeated after 14 days)",
-        version: 2,
+        title: "LLVM_ISSUE.md: the culprit LLVM pass verified with the apt.llvm.org release and trunk binaries, verdict FIXED ON TRUNK / STILL WRONG ON TRUNK, also for codegen passes that `opt` cannot run alone (then the whole opt + llc pipeline is compared; LLVM culprits only; repeated after 14 days)",
+        version: 3,
         code: true,
         max_age_days: 14,
         max_secs: 1500,

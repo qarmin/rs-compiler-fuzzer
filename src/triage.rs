@@ -1393,6 +1393,7 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
         0
     };
     let mut reduction_kept = false;
+    let mut credited_secs = 0u64;
     match (&prev_reduced, min_done) {
         (Some(prev), true) => {
             reduced = prev.clone();
@@ -1472,6 +1473,8 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
                         || crate::reduce::INTERRUPTED.load(std::sync::atomic::Ordering::Relaxed);
                     'stages: for (si, stage_budget) in stage_budgets(prev_total, o.budget) {
                         let stage_t0 = std::time::Instant::now();
+                        let reaches_mark = prev_total.max(credited_secs) + stage_budget.as_secs() + 5
+                            >= STAGE_MARKS[si];
                         if si == STAGES - 1
                             && round_src.lines().count() <= SHORT_LINES
                             && prev_total + t0.elapsed().as_secs()
@@ -1582,7 +1585,16 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
                                 it.b.flags.join(" ")
                             ));
                         }
-                        store_min_progress(dir, prev_total + t0.elapsed().as_secs(), si + 1);
+                        // a stage that used its time up to the mark counts as reaching it (otherwise each run would only cover part
+                        // of the gap and the mark would never be reached)
+                        if reaches_mark {
+                            credited_secs = credited_secs.max(STAGE_MARKS[si]);
+                        }
+                        store_min_progress(
+                            dir,
+                            (prev_total + t0.elapsed().as_secs()).max(credited_secs),
+                            si + 1,
+                        );
                     }
                     rs_minimizer::control::set_effort(0);
                     rs_minimizer::control::set_salt(0);
@@ -2088,7 +2100,7 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     let min_total = if reduction_kept {
         prev_total
     } else if did_reduce {
-        prev_total + reduce_started.elapsed().as_secs()
+        (prev_total + reduce_started.elapsed().as_secs()).max(credited_secs)
     } else {
         prev_total
     };
@@ -3099,7 +3111,7 @@ pub fn open_ids_of(dir: &Path) -> Vec<&'static str> {
 }
 
 /// Stored findings (in an unpacked package) with open checklist steps, closest to completion first. `skip` = keys already handled by
-/// this job. A finding whose only open step is the (long) minimisation is not started again on the day it was last triaged.
+/// this job.
 pub fn stale_findings(
     pkg: &Path,
     skip: &std::collections::HashSet<String>,
@@ -3129,12 +3141,6 @@ pub fn stale_findings(
             }
             let open = steps::open_steps(&st, &today);
             if open.is_empty() || left_secs.is_some_and(|l| !steps::any_open_fits(&st, &today, l)) {
-                return None;
-            }
-            let only_min = steps::open_ids(&st, &today)
-                .iter()
-                .all(|i| i.starts_with("minimize") && *i != "minimize_cases");
-            if only_min && st.get("triaged_at").map(|d| *d == today).unwrap_or(false) {
                 return None;
             }
             let lines = st

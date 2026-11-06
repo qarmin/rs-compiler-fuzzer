@@ -171,6 +171,122 @@ def build_and_run(rustc_flags, src, work, tag, obj):
     return code, out.strip()
 
 
+def pipeline_mode(a, cul, flags, src, work, tools, ref, pass_name, rustc_version, out_md, first_note):
+    """The pass cannot be run alone (a codegen pass such as stack-coloring, or it does not reproduce in isolation): the module
+    right out of rustc without optimisations is run through the whole `opt` + `llc` pipeline of every LLVM version instead.
+    The output is compared with the same module built without optimisations by the same LLVM."""
+    level = re.search(r"opt-level=(\w)", a.flags)
+    lv = level.group(1) if level else "0"
+    if lv == "0":
+        result("done", f"not verified: {first_note}; opt-level=0 has no pipeline to compare")
+    opt_pipeline = f"default<O{lv.upper() if lv in 'sz' else lv}>"
+    llc_opt = "-O" + {"1": "1", "2": "2", "3": "3", "s": "2", "z": "2"}.get(lv, "2")
+    cpu = re.search(r"target-cpu=(\S+)", a.flags)
+    llc_cpu = [f"-mcpu={cpu.group(1)}"] if cpu else []
+    unopt = os.path.join(work, "unopt.bc")
+    base = ["rustc", "+nightly", src, *flags, "-C", "codegen-units=1", "-A", "warnings"]
+    code, _, err = sh(base + ["-C", "no-prepopulate-passes", "--emit=llvm-bc", "-o", unopt])
+    if code != 0 or not os.path.exists(unopt):
+        result("todo", "rustc could not emit the unoptimised bitcode: " + err.strip()[-150:])
+
+    def build(t, tag, optimise):
+        bc = unopt
+        if optimise:
+            bc = os.path.join(work, f"{tag}.bc")
+            c, _, e = t.run("opt", f"-passes={opt_pipeline}", unopt, "-o", bc)
+            if c != 0:
+                return None, "opt: " + (e.strip().splitlines() or ["failed"])[-1][:160]
+        obj = os.path.join(work, f"{tag}.o")
+        c, _, e = t.run("llc", llc_opt if optimise else "-O0", *llc_cpu, "-relocation-model=pic", "-filetype=obj", bc, "-o", obj)
+        if c != 0:
+            return None, "llc: " + (e.strip().splitlines() or ["failed"])[-1][:160]
+        return build_and_run(flags, src, work, tag, obj)
+
+    rows = []
+    for t in tools:
+        v = re.sub(r"\W", "", t.label.split()[1])
+        good, bad = build(t, v + "_O0", False), build(t, v + "_opt", True)
+        row = {"llvm": t, "pre": good, "post": bad, "note": ""}
+        if good[0] is None or bad[0] is None:
+            row["verdict"], row["note"] = "n/a", (good[1] if good[0] is None else bad[1])
+        else:
+            row["verdict"] = "WRONG CODE" if good != bad else "same output"
+        rows.append(row)
+    row_ref = next(r for r in rows if r["llvm"] is ref)
+    row_trunk = rows[-1] if tools[-1].label.endswith("(trunk)") else None
+    if row_ref["verdict"] != "WRONG CODE":
+        result("done", f"not verified: {first_note}; the whole `opt -passes='{opt_pipeline}'` + `llc {llc_opt}` pipeline of {ref.label} ({ref.version}) gives: {row_ref['verdict']} {row_ref['note']}".strip())
+
+    ll = os.path.join(work, "unopt.ll")
+    c, _, _ = ref.run("llvm-dis", unopt, "-o", ll)
+    ir = re.sub(r"^; ModuleID = .*\n", "", open(ll).read(), flags=re.M) if c == 0 else ""
+    ir_lines = ir.count("\n")
+    ir_block = ir if ir_lines <= IR_INLINE_LINES else f"; {ir_lines} lines, too long to paste: attach the file produced with the command above\n" + "\n".join(ir.splitlines()[:40]) + "\n; ..."
+
+    rel = ref.label.split(" (")[0]
+    if row_trunk and row_trunk["verdict"] == "same output":
+        status_line = f"FIXED ON TRUNK ({row_trunk['llvm'].version}): do not file, maybe ask for a backport to the release branch"
+        intro = "It works on trunk, so this is only interesting as a backport request."
+    elif row_trunk and row_trunk["verdict"] == "WRONG CODE":
+        status_line = f"STILL WRONG ON TRUNK ({row_trunk['llvm'].version}): worth filing"
+        intro = f"Present on trunk ({row_trunk['llvm'].version}) too."
+    else:
+        status_line = "trunk was not checked"
+        intro = "Trunk was not tested."
+    title = f"[{pass_name}] miscompilation of the -{lv.upper() if lv in 'sz' else 'O' + lv} pipeline: wrong output ({rel})"
+    table = [f"| LLVM | version | program built with `llc -O0` | program built with `opt -passes='{opt_pipeline}'` + `llc {llc_opt}` | verdict |", "|---|---|---|---|---|"]
+    for r in rows:
+        show = lambda x: "-" if not x or x[0] is None else f"`{x[1][:60]!r}`" + ("" if x[0] == 0 else f" (exit {x[0]})")
+        table.append(f"| {r['llvm'].label} | {r['llvm'].version} | {show(r['pre'])} | {show(r['post'])} | {r['verdict']}{(' - ' + r['note']) if r['note'] else ''} |")
+    rust_src = open(a.src).read().rstrip()
+    md = f"""<!-- {status_line} -->
+<!-- title: {title} -->
+# {title}
+
+The unoptimised IR below, optimised with `opt -passes='{opt_pipeline}'` and compiled with `llc {llc_opt}`, gives a program with a different behaviour than the same IR compiled with `llc -O0`. {intro}
+
+Found as a miscompilation of rustc (it uses {rel}); bisected with `-C llvm-args=-opt-bisect-limit`: pass {cul.get('n')} of {cul.get('total', '?')}, `{pass_name}` on `{cul.get('target', '?')}`. That pass cannot be run on its own with `opt` ({first_note}), so the whole pipeline is compared.
+
+### Reproducer
+
+The IR as it comes out of rustc (`rustc {' '.join(flags)} -C no-prepopulate-passes --emit=llvm-bc`, then `llvm-dis`):
+
+```llvm
+{ir_block}
+```
+
+```
+opt -passes='{opt_pipeline}' unopt.bc -o opt.bc
+llc {llc_opt} {' '.join(llc_cpu)} -relocation-model=pic -filetype=obj opt.bc -o opt.o     # compare with: llc -O0 unopt.bc
+```
+
+The whole program:
+
+```rust
+{rust_src}
+```
+
+### Results
+
+{chr(10).join(table)}
+
+{status_line}.
+
+### Meta
+
+`rustc +nightly --version --verbose`:
+```
+{rustc_version.strip()}
+```
+Binaries: LLVM snapshots from https://apt.llvm.org (the version column is `opt --version`).
+
+Problem was found by rust fuzzer(created by llm) - https://github.com/qarmin/rs-compiler-fuzzer. The IR was not reduced further: run `llvm-reduce` on it before filing if it is long. Check it by hand on https://alive2.llvm.org/ce/ where the pass is an IR pass.
+"""
+    open(out_md, "w").write(md)
+    shutil.rmtree(work, ignore_errors=True)
+    result("todo" if status_line == "trunk was not checked" else "done", f"{pass_name} (whole pipeline): " + status_line)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("dir")
@@ -256,7 +372,8 @@ def main():
     row_ref = next(r for r in rows if r["llvm"] is ref)
     row_trunk = rows[-1] if tools[-1].label.endswith("(trunk)") else None
     if row_ref["verdict"] != "WRONG CODE":
-        result("done", f"not verified: with {ref.label} ({ref.version}) the pass `{pass_name}` gives: {row_ref['verdict']} {row_ref['note']}".strip())
+        first_note = f"the pass `{pass_name}` alone gives with {ref.label} ({ref.version}): {row_ref['verdict']} {row_ref['note']}".strip()
+        pipeline_mode(a, cul, flags, src, work, tools, ref, pass_name, rustc_version, out_md, first_note)
 
     # the IR of the function (or of the module when the pass works on more than a function)
     ir_note = "the whole module"
@@ -287,7 +404,7 @@ def main():
     table = ["| LLVM | version | program with the IR before the pass | with `opt -passes=" + pass_name + "` | verdict |", "|---|---|---|---|---|"]
     for r in rows:
         t = r["llvm"]
-        show = lambda x: "-" if not x or x[0] is None else f"`{x[1][:60]}`" + ("" if x[0] == 0 else f" (exit {x[0]})")
+        show = lambda x: "-" if not x or x[0] is None else f"`{x[1][:60]!r}`" + ("" if x[0] == 0 else f" (exit {x[0]})")
         table.append(f"| {t.label} | {t.version} | {show(r['pre'])} | {show(r['post'])} | {r['verdict']}{(' - ' + r['note']) if r['note'] else ''} |")
 
     rust_src = open(a.src).read().rstrip()
