@@ -32,10 +32,10 @@ USAGE:
   rs-compiler-fuzzer canary [options]   check the detector against a known miscompilation
   rs-compiler-fuzzer verify --dir DIR   re-run stored findings (case.rs + repro.cfg); writes fixed.txt/still.txt to --out
   rs-compiler-fuzzer miri               run generated programs under Miri (UB reports = generator/Miri/std bugs; Miri-vs-native differences); same options as fuzz
-  rs-compiler-fuzzer triage --dir DIR   reproduce on all channels, reduce, Miri-check, search GitHub, write STATUS.md/ISSUE.md/verdict
-                            (--bisect SECS: find the first stable release / nightly that has the bug; --dirs ROOT: every finding below ROOT; --budget SECS reduction time per finding; --no-search; --no-reduce; --limit N)
+  rs-compiler-fuzzer triage --dir DIR   reproduce on all channels, reduce, Miri-check, write STATUS.md/ISSUE.md/verdict
+                            (--bisect SECS: find the first stable release / nightly that has the bug; --dirs ROOT: every finding below ROOT; --budget SECS reduction time per finding; --no-reduce; --limit N)
   rs-compiler-fuzzer minimize DIR       local, long minimisation of one stored finding on all cores (--jobs N, --budget SECS per run, --deadline SECS overall,
-                            --bisect SECS, --search, --no-force = skip a finding that already converged, --ui auto|tui|basic: dashboard with a size graph and the last diff in a terminal, plain log otherwise); Ctrl+C keeps the best program and rewrites ISSUE.md/STATUS.md/finding.json; run it again to continue
+                            --bisect SECS, --no-force = skip a finding that already converged, --ui auto|tui|basic: dashboard with a size graph and the last diff in a terminal, plain log otherwise); Ctrl+C keeps the best program and rewrites ISSUE.md/STATUS.md/finding.json; run it again to continue
   rs-compiler-fuzzer import --todo DIR   findings from NAME.rs + NAME.txt pairs (the rustc command line that fails; `ref:` line = reference) become normal findings and are triaged
                             (--out DIR gets <key>/ per finding; --skip FILE stems already handled; --pkg DIR skips keys already stored; --limit, --budget, --deadline, --bisect as for retriage)
   rs-compiler-fuzzer retriage --pkg DIR  triage again (in place) every stored finding with an older fuzzer_id (--shard I/N, --limit N, --deadline SECS, --budget, --bisect; --finding NAME: just that one, minimised again)
@@ -160,7 +160,6 @@ fn main() {
     let mut batch_seed: Option<u64> = None;
     let mut profile = "full".to_string();
     let mut budget = 900u64;
-    let mut no_search = false;
     let mut no_reduce = false;
     let mut limit = 8usize;
     let mut bisect_secs = 0u64;
@@ -228,8 +227,7 @@ fn main() {
             "--budget" => budget = num(val()),
             "--lto" => fuzz::set_lto(true),
             "--todo" => todo_dir = Some(PathBuf::from(val())),
-            "--no-search" => no_search = true,
-            "--search" | "--no-force" if cmd == "minimize" => {}
+            "--no-force" if cmd == "minimize" => {}
             "--no-reduce" => no_reduce = true,
             "--bisect" => bisect_secs = num(val()),
             "--shard" => shard = val(),
@@ -336,7 +334,6 @@ fn main() {
             }
             let o = triage::TriageOpts {
                 budget: Duration::from_secs(budget),
-                search: !no_search,
                 work: out.join("work"),
                 no_reduce,
                 bisect: Duration::from_secs(bisect_secs),
@@ -391,7 +388,6 @@ fn main() {
             };
             let o = triage::TriageOpts {
                 budget: Duration::from_secs(per_run),
-                search: !no_search && flag_given("--search"),
                 work: out.join("work"),
                 no_reduce,
                 bisect: Duration::from_secs(bisect_secs),
@@ -576,7 +572,6 @@ fn main() {
                         };
                         let o = triage::TriageOpts {
                             budget: Duration::from_secs(b),
-                            search: !no_search,
                             work: work.clone(),
                             no_reduce,
                             bisect: Duration::from_secs(bisect_secs),
@@ -650,7 +645,6 @@ fn main() {
             );
             let mut o = triage::TriageOpts {
                 budget: Duration::from_secs(budget),
-                search: !no_search,
                 work: out.join("work"),
                 no_reduce,
                 bisect: Duration::from_secs(bisect_secs),

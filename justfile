@@ -91,7 +91,7 @@ download:
 list:
     @grep -E '^\|' INDEX.md | head -80
 
-# minimise one finding with all cores for hours; extra options: --jobs N, --budget SECS, --deadline SECS, --bisect SECS, --search
+# minimise one finding with all cores for hours; extra options: --jobs N, --budget SECS, --deadline SECS, --bisect SECS
 [group('findings')]
 minimize dir *args: doctor-quick build
     {{bin}} minimize {{dir}} --jobs {{jobs}} {{args}}
@@ -105,7 +105,7 @@ minimize-all *dirs: doctor-quick build
         {{bin}} minimize "$d" --jobs {{jobs}} || break
     done
 
-# run the whole checklist again for one finding (reduce for a short time, flags, opt levels, Miri, regression bisection, upstream search)
+# run the whole checklist again for one finding (reduce for a short time, flags, opt levels, Miri, regression bisection)
 [group('findings')]
 triage dir *args: build
     {{bin}} triage --dir {{dir}} --bisect 3000 --budget 1800 {{args}}
@@ -113,7 +113,7 @@ triage dir *args: build
 # regression search only (stable / nightly / cargo-bisect-rustc), no minimisation
 [group('findings')]
 bisect dir secs="3000": build
-    {{bin}} triage --dir {{dir}} --no-reduce --no-search --bisect {{secs}}
+    {{bin}} triage --dir {{dir}} --no-reduce --bisect {{secs}}
 
 # import hand-made reproducers: DIR holds NAME.rs + NAME.txt pairs (any depth; the txt is the failing rustc command line); results in ./import-out/imported/<key>/
 [group('findings')]

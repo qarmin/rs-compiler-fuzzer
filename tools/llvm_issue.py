@@ -28,6 +28,12 @@ ARCHIVE = "https://apt.llvm.org"
 UBUNTU = "http://archive.ubuntu.com/ubuntu"
 RUN_TIMEOUT = 30
 IR_INLINE_LINES = 300
+# machine passes that `opt` cannot run: llc can switch them off, which isolates exactly that pass
+CODEGEN_PASS_OFF = {"stack-coloring": "-no-stack-coloring"}
+
+
+def pipeline_name(lv):
+    return {"s": "default<Os>", "z": "default<Oz>"}.get(lv, f"default<O{lv}>")
 
 
 def sh(cmd, timeout=600, env=None, cwd=None):
@@ -179,7 +185,7 @@ def pipeline_mode(a, cul, flags, src, work, tools, ref, pass_name, rustc_version
     lv = level.group(1) if level else "0"
     if lv == "0":
         result("done", f"not verified: {first_note}; opt-level=0 has no pipeline to compare")
-    opt_pipeline = f"default<O{lv.upper() if lv in 'sz' else lv}>"
+    opt_pipeline = pipeline_name(lv)
     llc_opt = "-O" + {"1": "1", "2": "2", "3": "3", "s": "2", "z": "2"}.get(lv, "2")
     cpu = re.search(r"target-cpu=(\S+)", a.flags)
     llc_cpu = [f"-mcpu={cpu.group(1)}"] if cpu else []
@@ -215,7 +221,8 @@ def pipeline_mode(a, cul, flags, src, work, tools, ref, pass_name, rustc_version
     row_ref = next(r for r in rows if r["llvm"] is ref)
     row_trunk = rows[-1] if tools[-1].label.endswith("(trunk)") else None
     if row_ref["verdict"] != "WRONG CODE":
-        result("done", f"not verified: {first_note}; the whole `opt -passes='{opt_pipeline}'` + `llc {llc_opt}` pipeline of {ref.label} ({ref.version}) gives: {row_ref['verdict']} {row_ref['note']}".strip())
+        msg = f"not verified: {first_note}; the whole `opt -passes='{opt_pipeline}'` + `llc {llc_opt}` pipeline of {ref.label} ({ref.version}) gives: {row_ref['verdict']} {row_ref['note']}".strip()
+        result("todo" if row_ref["verdict"] == "n/a" else "done", msg)
 
     ll = os.path.join(work, "unopt.ll")
     c, _, _ = ref.run("llvm-dis", unopt, "-o", ll)
@@ -233,7 +240,7 @@ def pipeline_mode(a, cul, flags, src, work, tools, ref, pass_name, rustc_version
     else:
         status_line = "trunk was not checked"
         intro = "Trunk was not tested."
-    title = f"[{pass_name}] miscompilation of the -{lv.upper() if lv in 'sz' else 'O' + lv} pipeline: wrong output ({rel})"
+    title = f"[{pass_name}] miscompilation of the -{lv if lv in 'sz' else 'O' + lv} pipeline: wrong output ({rel})"
     table = [f"| LLVM | version | program built with `llc -O0` | program built with `opt -passes='{opt_pipeline}'` + `llc {llc_opt}` | verdict |", "|---|---|---|---|---|"]
     for r in rows:
         show = lambda x: "-" if not x or x[0] is None else f"`{x[1][:60]!r}`" + ("" if x[0] == 0 else f" (exit {x[0]})")
@@ -347,17 +354,24 @@ def main():
 
     level = re.search(r"opt-level=(\w)", a.flags)
     llc_opt = "-O" + {"0": "0", "1": "1", "2": "2", "3": "3", "s": "2", "z": "2"}.get(level.group(1) if level else "0", "2")
+    off_flag = CODEGEN_PASS_OFF.get(pass_name)
     rows = []
     for t in tools:
         row = {"llvm": t, "pre": None, "post": None, "verdict": "", "note": ""}
         rows.append(row)
         pre_obj, post_obj, post_bc = (os.path.join(work, f"{t.label.split()[1]}_{x}") for x in ("pre.o", "post.o", "post.bc"))
-        c, _, e = t.run("opt", "-passes=" + pass_name, stem + ".bc", "-o", post_bc)
-        if c != 0:
-            row["verdict"], row["note"] = "n/a", "opt: " + (e.strip().splitlines() or ["failed"])[-1][:160]
-            continue
-        c1, _, e1 = t.run("llc", llc_opt, "-relocation-model=pic", "-filetype=obj", stem + ".bc", "-o", pre_obj)
-        c2, _, e2 = t.run("llc", llc_opt, "-relocation-model=pic", "-filetype=obj", post_bc, "-o", post_obj)
+        if off_flag:
+            post_bc = stem + ".bc"
+            c1, _, e1 = t.run("llc", llc_opt, off_flag, "-relocation-model=pic", "-filetype=obj", stem + ".bc", "-o", pre_obj)
+            c2, _, e2 = t.run("llc", llc_opt, "-relocation-model=pic", "-filetype=obj", post_bc, "-o", post_obj)
+        else:
+            c, _, e = t.run("opt", "-passes=" + pass_name, stem + ".bc", "-o", post_bc)
+            if c != 0:
+                row["verdict"], row["note"] = "n/a", "opt: " + (e.strip().splitlines() or ["failed"])[-1][:160]
+                row["failed"] = True
+                continue
+            c1, _, e1 = t.run("llc", llc_opt, "-relocation-model=pic", "-filetype=obj", stem + ".bc", "-o", pre_obj)
+            c2, _, e2 = t.run("llc", llc_opt, "-relocation-model=pic", "-filetype=obj", post_bc, "-o", post_obj)
         if c1 or c2:
             row["verdict"], row["note"] = "n/a", "llc: " + ((e1 or e2).strip().splitlines() or ["failed"])[-1][:160]
             continue
@@ -401,19 +415,26 @@ def main():
         intro = "Trunk was not tested."
     title = f"[{pass_name}] miscompilation: wrong output after `{pass_name}` ({rel})"
 
-    table = ["| LLVM | version | program with the IR before the pass | with `opt -passes=" + pass_name + "` | verdict |", "|---|---|---|---|---|"]
+    with_pass = f"with `llc {llc_opt}` (stack-coloring on)" if off_flag else "with `opt -passes=" + pass_name + "`"
+    table = ["| LLVM | version | program with the IR before the pass | " + with_pass + " | verdict |", "|---|---|---|---|---|"]
     for r in rows:
         t = r["llvm"]
         show = lambda x: "-" if not x or x[0] is None else f"`{x[1][:60]!r}`" + ("" if x[0] == 0 else f" (exit {x[0]})")
         table.append(f"| {t.label} | {t.version} | {show(r['pre'])} | {show(r['post'])} | {r['verdict']}{(' - ' + r['note']) if r['note'] else ''} |")
 
+    if off_flag:
+        how_intro = f"`llc {llc_opt}` with `{pass_name}` (compared with `{off_flag}`)"
+        how_cmd = f"llc {llc_opt} pre.bc -o with.o   # wrong\nllc {llc_opt} {off_flag} pre.bc -o without.o   # right"
+    else:
+        how_intro = f"`opt -passes={pass_name}`"
+        how_cmd = f"opt -passes={pass_name} pre.bc -S -o post.ll"
     rust_src = open(a.src).read().rstrip()
     bad_cmd = "rustc +nightly " + " ".join(flags) + " reduced.rs"
     md = f"""<!-- {status_line} -->
 <!-- title: {title} -->
 # {title}
 
-`opt -passes={pass_name}` ({ref.label.split(' (')[0]}) changes the behaviour of the program below. The program is compiled with `llc` in both cases, only the pass differs. {intro}
+{how_intro} ({ref.label.split(' (')[0]}) changes the behaviour of the program below. The program is compiled with `llc` in both cases, only the pass differs. {intro}
 
 Found as a miscompilation of rustc (it uses {ref.label.split(' (')[0]}); bisected with `-C llvm-args=-opt-bisect-limit`: pass {n} of {cul.get('total', '?')}, `{pass_name}` on `{cul.get('target', raw_target)}`.
 
@@ -426,7 +447,7 @@ The IR is {ir_note}, as it is right before the pass (`rustc` with `-C llvm-args=
 ```
 
 ```
-opt -passes={pass_name} pre.bc -S -o post.ll
+{how_cmd}
 ```
 
 The whole program (it prints a different value after the pass):

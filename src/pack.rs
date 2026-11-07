@@ -136,7 +136,6 @@ pub fn write_finding_json(dir: &Path) {
     field("times_seen", num(&st, "times_seen").to_string());
     field("seen_on", list(&g(&st, "seen_on")));
     field("miri", json_str(&g(&st, "miri")));
-    field("upstream_search", json_str(&g(&st, "upstream_search")));
     field("regression", json_str(&g(&st, "regression")));
     field("regression_edges", json_str(&g(&st, "regression_edges")));
     s.push_str(&format!("  \"repro\": {{\n{}\n  }},\n", repro.join(",\n")));
@@ -590,9 +589,12 @@ pub fn write_index(pkg: &Path) {
     };
     rows.sort_by(|a, b| rank(&a.1, &a.0).cmp(&rank(&b.1, &b.0)).then(a.0.cmp(&b.0)));
     let mut s = format!(
-        "# Stored findings\n\nOne row per distinct finding. The `target` column says what it is compiled for: `host` is plain `rustc file.rs`, anything else needs `rustc --target <triple> ... file.rs && ./file` (e.g. `i686-unknown-linux-gnu`, run natively on x86_64 with gcc-multilib). Every directory under `findings/` has `finding.json` (with the checklist), `STATUS.md` (checklist, reproduction per channel, minimisation, UB check, upstream search) and, once triaged, `reduced.rs` + `ISSUE.md`. The checklist says what was done and what is still open; steps are redone when the tool gets better at them or when the reduced program changes.\n\n## Steps of every finding\n\nEvery finding goes through exactly these steps, in this order; `steps done` below counts them, and every other column is the result of one of them.\n\n{}\n",
+        "# Stored findings\n\nOne row per distinct finding. The `target` column says what it is compiled for: `host` is plain `rustc file.rs`, anything else needs `rustc --target <triple> ... file.rs && ./file` (e.g. `i686-unknown-linux-gnu`, run natively on x86_64 with gcc-multilib). Every directory under `findings/` has `finding.json` (with the checklist), `STATUS.md` (checklist, reproduction per channel, minimisation, UB check) and, once triaged, `reduced.rs` + `ISSUE.md`. The checklist says what was done and what is still open; steps are redone when the tool gets better at them or when the reduced program changes.\n\n## Steps of every finding\n\nEvery finding goes through exactly these steps, in this order; `steps done` below counts them, and every other column is the result of one of them.\n\n{}\n",
         crate::steps::list_md(),
     );
+    let groups = same_bug_groups(&root, &rows, &today);
+    let folded: std::collections::HashSet<&str> = groups.iter().flat_map(|(_, m)| m.iter().map(String::as_str)).collect();
+    rows.retain(|(k, _)| !folded.contains(k.as_str()));
     let finished = |k: &str, c: &Cfg| {
         let mut c2 = c.clone();
         crate::steps::backfill(&mut c2, &root.join(k));
@@ -604,7 +606,7 @@ pub fn write_index(pkg: &Path) {
     let table = |s: &mut String, set: &[(String, Cfg)]| {
         let _ = writeln!(
             s,
-            "| steps done | open steps | state | class | finding | target | kind | reduced lines | fixed in llvm trunk | minimisation | seen | last seen |\n|---|---|---|---|---|---|---|---|---|---|---|---|"
+            "| steps done | open steps | finding | same bug | target | kind | reduced lines | fixed in llvm trunk | minimisation | seen | last seen |\n|---|---|---|---|---|---|---|---|---|---|---|"
         );
         for (k, c) in set {
             let mut c2 = c.clone();
@@ -614,17 +616,16 @@ pub fn write_index(pkg: &Path) {
             let next = {
                 let ids = crate::steps::open_ids(&c2, &today);
                 if ids.is_empty() {
-                    "none - ready for a human to review and report".to_string()
+                    "none".to_string()
                 } else {
                     ids.join(", ")
                 }
             };
             let _ = writeln!(
                 s,
-                "| {done}/{total} | {} | {} | {} | `{k}` | {} | {} | {} | {} | {} | {}x | {} |",
+                "| {done}/{total} | {} | `{k}` | {} | {} | {} | {} | {} | {} | {}x | {} |",
                 next.replace('|', "/"),
-                g("state"),
-                g("class"),
+                groups.iter().find(|(r, _)| r == k).map_or("-".to_string(), |(_, m)| format!("+{}", m.len())),
                 target_of(c),
                 g("kind"),
                 g("reduced_lines"),
@@ -640,190 +641,38 @@ pub fn write_index(pkg: &Path) {
     }
     let _ = writeln!(
         s,
-        "## Fully tested ({} finding(s), every step done)\n\nThese are the ones to review and report. Everything below this table (the groupings by commit and by pass) is about them only.\n",
+        "## Fully tested ({} finding(s), every step done)\n\nEvery step is done for these. Findings that are very likely the same bug are folded into one row (see below).\n",
         full.len()
     );
     table(&mut s, &full);
-    // what follows is only about the findings with every step done
-    let rows = full.clone();
-    // what to report together: findings grouped by the commit that regressed them
-    {
-        let mut by_commit: std::collections::BTreeMap<String, Vec<String>> = Default::default();
-        let (mut not_found, mut old_bug, mut todo) = (Vec::new(), Vec::new(), Vec::new());
-        for (k, c) in &rows {
-            let mut c2 = c.clone();
-            crate::steps::backfill(&mut c2, &root.join(k));
-            let pr = c.get("regression_pr").cloned().unwrap_or_default();
-            let commit = pr
-                .split_whitespace()
-                .find(|w| w.starts_with("https://github.com/rust-lang/rust/commit/"))
-                .map(|u| {
-                    u.trim_end_matches(|c: char| !c.is_ascii_hexdigit())
-                        .to_string()
-                });
-            let reg = crate::steps::get(&c2, "regression")
-                .map(|x| x.note)
-                .unwrap_or_default();
-            match commit {
-                Some(u) => by_commit.entry(u).or_default().push(k.clone()),
-                None if reg.starts_with("long-standing") => old_bug.push(k.clone()),
-                None if pr.contains("not found") => not_found.push(k.clone()),
-                None => todo.push(k.clone()),
-            }
-        }
-        let list = |v: &[String]| {
-            v.iter()
-                .map(|k| format!("`{k}`"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
+    if !groups.is_empty() {
         let _ = writeln!(
             s,
-            "\n## Grouped by the commit that caused the regression\n\nFindings with the same commit are most likely one bug: report them together.\n"
+            "\n## Folded duplicates ({} finding(s) in {} group(s))\n\nFindings with the same kind, target, culprit pass and regressing commit are most likely one bug. Only the best of each group is in the tables (`same bug` shows how many are folded into it); the others are still in `findings/`.\n",
+            groups.iter().map(|(_, m)| m.len()).sum::<usize>(),
+            groups.len()
         );
-        for (u, ks) in by_commit
-            .iter_mut()
-            .map(|(u, ks)| {
-                ks.sort();
-                (u, &*ks)
-            })
-            .collect::<Vec<_>>()
-        {
-            let sha = u.rsplit('/').next().unwrap_or("");
-            let pr = ks
+        for (rep, members) in &groups {
+            let label = rows
                 .iter()
-                .find_map(|k| rows.iter().find(|r| &r.0 == k))
-                .and_then(|r| r.1.get("regression_pr").cloned())
+                .find(|(k, _)| k == rep)
+                .map(|(k, c)| {
+                    let pass = pass_of(&root.join(k), c).map(|(_, p)| p).unwrap_or_default();
+                    let pr = c.get("regression_pr").cloned().unwrap_or_default();
+                    let sha = pr
+                        .split("/commit/")
+                        .nth(1)
+                        .map(|r| r.chars().take_while(char::is_ascii_hexdigit).collect::<String>())
+                        .unwrap_or_default();
+                    let commit = crate::bisect::commit_label(&pr, &sha);
+                    if commit.is_empty() { pass } else { format!("{pass}, {commit}") }
+                })
                 .unwrap_or_default();
-            let label = crate::bisect::commit_label(&pr, sha);
-            let _ = writeln!(s, "- [{label}]({u}) ({}): {}", ks.len(), list(ks));
-        }
-        if !not_found.is_empty() {
             let _ = writeln!(
                 s,
-                "- regressed commit not found ({}): {}",
-                not_found.len(),
-                list(&not_found)
+                "- `{rep}` ({label}) also: {}",
+                members.iter().map(|k| format!("`{k}`")).collect::<Vec<_>>().join(", ")
             );
-        }
-        if !old_bug.is_empty() {
-            let _ = writeln!(
-                s,
-                "- long-standing, not a regression ({}): {}",
-                old_bug.len(),
-                list(&old_bug)
-            );
-        }
-        if !todo.is_empty() {
-            let _ = writeln!(s, "- not bisected yet ({}): {}", todo.len(), list(&todo));
-        }
-    }
-    // the optimisation pass that makes the difference (opt-bisect), for searching by pass: gvn, instcombine, loop-vectorize, ...
-    {
-        let mut by_pass: std::collections::BTreeMap<String, Vec<String>> = Default::default();
-        let mut none: Vec<String> = Vec::new();
-        for (k, c) in &rows {
-            match pass_of(&root.join(k), c) {
-                Some((kind, name)) => by_pass
-                    .entry(format!(
-                        "{} `{}`",
-                        if kind == "mir" { "MIR" } else { "LLVM" },
-                        name
-                    ))
-                    .or_default()
-                    .push(k.clone()),
-                None => none.push(k.clone()),
-            }
-        }
-        if !by_pass.is_empty() || !none.is_empty() {
-            let list = |v: &[String]| {
-                v.iter()
-                    .map(|k| format!("`{k}`"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            };
-            let _ = writeln!(
-                s,
-                "\n## Grouped by the optimisation pass that causes it\n\nThe first pass whose execution changes the result (`-C llvm-args=-opt-bisect-limit` / `-Zmir-opt-bisect-limit`).\n"
-            );
-            let mut groups: Vec<(&String, &mut Vec<String>)> = by_pass.iter_mut().collect();
-            groups.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then(a.0.cmp(b.0)));
-            for (pass, ks) in groups {
-                ks.sort();
-                let _ = writeln!(s, "- {pass} ({}): {}", ks.len(), list(ks));
-            }
-            if !none.is_empty() {
-                let _ = writeln!(
-                    s,
-                    "- no pass found yet / not applicable ({}): {}",
-                    none.len(),
-                    list(&none)
-                );
-            }
-        }
-    }
-    // both at once: findings with the same commit AND the same pass are the likeliest to be one bug
-    {
-        let label_commit = |k: &str, c: &Cfg| -> String {
-            let mut c2 = c.clone();
-            crate::steps::backfill(&mut c2, &root.join(k));
-            let pr = c.get("regression_pr").cloned().unwrap_or_default();
-            let commit = pr
-                .split_whitespace()
-                .find(|w| w.starts_with("https://github.com/rust-lang/rust/commit/"))
-                .map(|u| {
-                    u.trim_end_matches(|c: char| !c.is_ascii_hexdigit())
-                        .to_string()
-                });
-            let reg = crate::steps::get(&c2, "regression")
-                .map(|x| x.note)
-                .unwrap_or_default();
-            match commit {
-                Some(u) => format!(
-                    "[{}]({u})",
-                    crate::bisect::commit_label(&pr, u.rsplit('/').next().unwrap_or(""))
-                ),
-                None if reg.starts_with("long-standing") => {
-                    "long-standing, not a regression".to_string()
-                }
-                None if pr.contains("not found") => "regressed commit not found".to_string(),
-                None => "not bisected yet".to_string(),
-            }
-        };
-        let label_pass = |k: &str, c: &Cfg| -> String {
-            match pass_of(&root.join(k), c) {
-                Some((kind, name)) => {
-                    format!("{} `{}`", if kind == "mir" { "MIR" } else { "LLVM" }, name)
-                }
-                None => "no pass found".to_string(),
-            }
-        };
-        let mut both: std::collections::BTreeMap<(String, String), Vec<String>> =
-            Default::default();
-        for (k, c) in &rows {
-            both.entry((label_commit(k, c), label_pass(k, c)))
-                .or_default()
-                .push(k.clone());
-        }
-        if !both.is_empty() {
-            let _ = writeln!(
-                s,
-                "\n## Grouped by the commit and the optimisation pass together\n\nThe tightest grouping: the same regressing commit and the same first pass that changes the result.\n"
-            );
-            let mut groups: Vec<_> = both.into_iter().collect();
-            groups.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then(a.0.cmp(&b.0)));
-            for ((commit, pass), mut ks) in groups {
-                ks.sort();
-                let _ = writeln!(
-                    s,
-                    "- {commit} + {pass} ({}): {}",
-                    ks.len(),
-                    ks.iter()
-                        .map(|k| format!("`{k}`"))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                );
-            }
         }
     }
     let _ = writeln!(
@@ -834,6 +683,47 @@ pub fn write_index(pkg: &Path) {
     table(&mut s, &partial);
     std::fs::write(pkg.join("INDEX.md"), s).unwrap();
     write_old_index(pkg);
+}
+
+/// Findings that are very likely one bug: the same kind, target, culprit pass and regressing commit. Returns `(representative, folded members)`
+/// per group of two or more; the representative is the one with the most steps done, then the shortest reduced program. A finding without
+/// a culprit pass is never folded (nothing says it is the same bug).
+fn same_bug_groups(root: &Path, rows: &[(String, Cfg)], today: &str) -> Vec<(String, Vec<String>)> {
+    type Member = (String, (usize, usize));
+    let mut by_key: std::collections::BTreeMap<String, Vec<Member>> = Default::default();
+    for (k, c) in rows {
+        let mut c2 = c.clone();
+        crate::steps::backfill(&mut c2, &root.join(k));
+        if c2.get("state").map(String::as_str) == Some("fixed") {
+            continue;
+        }
+        let Some((pass_kind, pass)) = pass_of(&root.join(k), c) else {
+            continue;
+        };
+        let commit = c
+            .get("regression_pr")
+            .and_then(|pr| pr.split_whitespace().find(|w| w.starts_with("https://github.com/rust-lang/rust/commit/")))
+            .unwrap_or("");
+        let key = format!(
+            "{}|{}|{pass_kind}:{pass}|{commit}",
+            c.get("kind").map_or("", String::as_str),
+            target_of(c)
+        );
+        let lines = c.get("reduced_lines").and_then(|l| l.parse().ok()).unwrap_or(usize::MAX);
+        let done = crate::steps::progress(&c2, today).0;
+        by_key.entry(key).or_default().push((k.clone(), (usize::MAX - done, lines)));
+    }
+    let mut out: Vec<(String, Vec<String>)> = Vec::new();
+    for (_, mut members) in by_key {
+        if members.len() < 2 {
+            continue;
+        }
+        members.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
+        let rep = members.remove(0).0;
+        out.push((rep, members.into_iter().map(|m| m.0).collect()));
+    }
+    out.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then(a.0.cmp(&b.0)));
+    out
 }
 
 /// The compilation target a finding needs: from `--target` in any of its flag sets, else the host.

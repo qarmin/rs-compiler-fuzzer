@@ -21,7 +21,6 @@ use std::time::Duration;
 #[derive(Clone)]
 pub struct TriageOpts {
     pub budget: Duration,
-    pub search: bool,
     pub work: PathBuf,
     pub no_reduce: bool,
     /// time for the regression-range search (0 = off)
@@ -297,306 +296,6 @@ fn miri(src: &str, work: &Path) -> MiriResult {
             report: String::new(),
         },
     }
-}
-
-#[derive(Default)]
-struct Search {
-    performed: bool,
-    lines: Vec<String>,    // human readable, one per query
-    possible: Vec<String>, // "#N title (state) url"
-    note: String,
-}
-
-fn gh_issues(args: &[&str]) -> Result<Vec<(String, String, String, String)>, String> {
-    let mut c = Command::new("gh");
-    c.args(["search", "issues"]).args(args).args([
-        "--json",
-        "number,title,state,url",
-        "--jq",
-        r#".[] | "\(.number)\t\(.state)\t\(.title)\t\(.url)""#,
-    ]);
-    let r = exec(c, Duration::from_secs(60)).map_err(|e| e.to_string())?;
-    if r.code != Some(0) {
-        return Err(r.stderr.lines().next().unwrap_or("gh failed").to_string());
-    }
-    Ok(String::from_utf8_lossy(&r.stdout)
-        .lines()
-        .filter_map(|l| {
-            let mut p = l.splitn(4, '\t');
-            Some((
-                p.next()?.to_string(),
-                p.next()?.to_string(),
-                p.next()?.to_string(),
-                p.next()?.to_string(),
-            ))
-        })
-        .collect())
-}
-
-/// Method names (`.foo(`) in the program, rarest-looking first.
-fn distinctive_methods(src: &str) -> Vec<String> {
-    const INTERESTING: &[&str] = &[
-        "abs_diff",
-        "isqrt",
-        "midpoint",
-        "ilog2",
-        "ilog10",
-        "rem_euclid",
-        "div_euclid",
-        "wrapping_rem_euclid",
-        "wrapping_div_euclid",
-        "is_power_of_two",
-        "leading_ones",
-        "trailing_ones",
-        "count_zeros",
-        "saturating_pow",
-        "checked_pow",
-        "overflowing_pow",
-        "swap_bytes",
-        "reverse_bits",
-        "copysign",
-        "mul_add",
-        "sqrt",
-        "round_ties_even",
-        "signum",
-        "recip",
-        "fract",
-        "select_nth_unstable",
-        "binary_search",
-        "partition_point",
-        "sort_unstable_by_key",
-        "rotate_left",
-        "rotate_right",
-        "checked_next_power_of_two",
-        "unsigned_abs",
-        "wrapping_abs",
-        "saturating_mul",
-        "checked_shl",
-        "overflowing_shl",
-        "catch_unwind",
-        "read_unaligned",
-        "write_unaligned",
-        "expose_provenance",
-        "wrapping_pow",
-        "wrapping_neg",
-        "checked_neg",
-        "saturating_sub",
-        "saturating_add",
-        "wrapping_shl",
-        "wrapping_shr",
-        "wrapping_mul",
-        "wrapping_add",
-    ];
-    let mut found = Vec::new();
-    for m in INTERESTING {
-        if src.contains(&format!(".{m}(")) {
-            found.push(m.to_string());
-        }
-    }
-    found
-}
-
-/// One repository (`rust-lang/rust` or `llvm/llvm-project`). A query that fails keeps the whole search "not performed": a search with holes is no search.
-fn upstream_search(
-    repo_scope: &str,
-    reduced: &str,
-    bad: &Config,
-    sig: &Option<String>,
-    llvm_pass: &Option<String>,
-) -> Search {
-    let mut s = Search::default();
-    // is gh usable at all?
-    if let Err(e) = gh_issues(&["--repo", "rust-lang/rust", "--limit", "1", "miscompile"]) {
-        s.note = format!(
-            "NOT PERFORMED: `gh search` is unavailable ({e}). Search rust-lang/rust and llvm/llvm-project by hand."
-        );
-        return s;
-    }
-    s.performed = true;
-    let failed = std::cell::RefCell::new(Vec::<String>::new());
-    let run =
-        |s: &mut Search, repo: &str, label: &str, extra: &[&str], q: &str, state_filter: bool| {
-            let mut args: Vec<&str> = vec!["--repo", repo, "--limit", "10"];
-            args.extend_from_slice(extra);
-            args.push(q);
-            match gh_issues(&args) {
-                Err(e) => {
-                    failed
-                        .borrow_mut()
-                        .push(format!("`{repo}` {label} `{q}`: {e}"));
-                    s.lines
-                        .push(format!("- `{repo}` {label} `{q}`: search failed ({e})"));
-                }
-                Ok(hits) if hits.is_empty() => s
-                    .lines
-                    .push(format!("- `{repo}` {label} `{q}`: **no issues found**")),
-                Ok(hits) => {
-                    s.lines.push(format!(
-                        "- `{repo}` {label} `{q}`: {} result(s)",
-                        hits.len()
-                    ));
-                    for (n, st, title, url) in hits {
-                        s.lines.push(format!("    - #{n} [{st}] {title} - {url}"));
-                        if state_filter {
-                            s.possible.push(format!("{repo}#{n}"));
-                        }
-                    }
-                }
-            }
-        };
-    if let Some(sig) = sig {
-        let text: String = sig
-            .replace("rustc-LLVM ERROR: ", "")
-            .replace("error: ", "")
-            .replace('#', "");
-        let text = text.trim().chars().take(70).collect::<String>();
-        let text = text
-            .trim_end_matches(|c: char| !c.is_alphanumeric())
-            .to_string();
-        let q = format!("\"{text}\"");
-        run(&mut s, repo_scope, "crash text", &[], &q, true);
-    } else if repo_scope == "llvm/llvm-project" {
-        if let Some(pass) = llvm_pass {
-            run(
-                &mut s,
-                repo_scope,
-                "pass + miscompilation",
-                &["--label", "miscompilation"],
-                &format!("\"{pass}\""),
-                true,
-            );
-            run(
-                &mut s,
-                repo_scope,
-                "pass",
-                &[],
-                &format!("\"{pass}\" miscompile"),
-                true,
-            );
-        }
-    } else {
-        let flag = bad
-            .flags
-            .iter()
-            .find(|f| {
-                f.contains("opt-level")
-                    || f.contains("lto")
-                    || f.contains("target-cpu")
-                    || f.contains("mir")
-            })
-            .cloned()
-            .unwrap_or_default();
-        let methods = distinctive_methods(reduced);
-        if !flag.is_empty() {
-            run(
-                &mut s,
-                "rust-lang/rust",
-                "miscompile + flag",
-                &["--label", "I-miscompile"],
-                &format!("\"{flag}\""),
-                false,
-            );
-        }
-        if methods.len() >= 2 {
-            let q = format!("{} {}", methods[0], methods[1]);
-            run(&mut s, "rust-lang/rust", "methods", &[], &q, true);
-        }
-        if let Some(m) = methods.first() {
-            run(
-                &mut s,
-                "rust-lang/rust",
-                "method + miscompile",
-                &["--label", "I-miscompile"],
-                m,
-                true,
-            );
-        }
-        // title scan of every I-miscompile issue for words that appear in the reduced program
-        match gh_issues(&[
-            "--repo",
-            "rust-lang/rust",
-            "--label",
-            "I-miscompile",
-            "--limit",
-            "100",
-            "",
-        ]) {
-            Ok(all) => {
-                let mut words: Vec<String> = [
-                    "i128",
-                    "u128",
-                    "i64",
-                    "u64",
-                    "i32",
-                    "u32",
-                    "i16",
-                    "u16",
-                    "i8",
-                    "u8",
-                    "f64",
-                    "f32",
-                    "union",
-                    "packed",
-                    "MaybeUninit",
-                    "NonZero",
-                    "async",
-                    "closure",
-                    "dyn",
-                    "drop",
-                    "loop",
-                    "match",
-                    "enum",
-                    "slice",
-                    "LTO",
-                    "vector",
-                    "select",
-                    "unwind",
-                    "panic",
-                    "simd",
-                    "avx",
-                ]
-                .iter()
-                .filter(|w| reduced.contains(&w.to_lowercase()) || reduced.contains(**w))
-                .map(|w| w.to_string())
-                .collect();
-                if !flag.is_empty() {
-                    words.push(flag.rsplit('=').next().unwrap_or("").to_string());
-                }
-                words.retain(|w| !w.is_empty());
-                let related: Vec<_> = all
-                    .iter()
-                    .filter(|(_, _, t, _)| {
-                        words
-                            .iter()
-                            .any(|w| t.to_lowercase().contains(&w.to_lowercase()))
-                    })
-                    .take(12)
-                    .collect();
-                s.lines.push(format!("- scanned titles of {} `I-miscompile` issues in rust-lang/rust for {:?}: {} possibly related (by keyword only - read them)", all.len(), words, related.len()));
-                for (n, st, title, url) in related {
-                    s.lines.push(format!("    - #{n} [{st}] {title} - {url}"));
-                }
-            }
-            Err(e) => {
-                failed
-                    .borrow_mut()
-                    .push(format!("title scan of I-miscompile issues: {e}"));
-                s.lines
-                    .push(format!("- title scan of I-miscompile issues failed ({e})"));
-            }
-        }
-    }
-    let failed = failed.into_inner();
-    if !failed.is_empty() {
-        s.performed = false;
-        s.note = format!(
-            "NOT COMPLETE: {} quer{} failed ({}); the next run repeats the search",
-            failed.len(),
-            if failed.len() == 1 { "y" } else { "ies" },
-            failed.join("; ").chars().take(300).collect::<String>()
-        );
-    }
-    s
 }
 
 fn show_flags(f: &str) -> String {
@@ -1039,25 +738,23 @@ fn compress_siblings(all: &[String]) -> Vec<(String, String)> {
     items
 }
 
-/// Runs `tools/llvm_issue.py`: verifies the culprit LLVM pass against the apt.llvm.org release and trunk binaries and writes
-/// `LLVM_ISSUE.md`. Returns `(status, note)` for the checklist.
-fn llvm_issue(dir: &Path, reduced: &Path, flags: &str, work: &Path) -> (String, String) {
+/// Runs one of the `tools/llvm_*.py` scripts (`llvm_issue.py`: verifies the culprit LLVM pass against the apt.llvm.org release and
+/// trunk binaries and writes `LLVM_ISSUE.md`; `llvm_reduce.py` and `llvm_fix_search.py` extend that file). Returns `(status, note)`.
+fn llvm_tool(script: &str, dir: &Path, reduced: &Path, flags: &str, work: &Path, secs: u64) -> (String, String) {
+    let rel = format!("tools/{script}");
     let tool = std::env::var("LLVM_ISSUE_TOOL")
         .ok()
-        .map(PathBuf::from)
+        .map(|d| PathBuf::from(d).with_file_name(script))
         .into_iter()
-        .chain([PathBuf::from("tools/llvm_issue.py")])
+        .chain([PathBuf::from(&rel)])
         .chain(
             std::env::current_exe()
                 .ok()
-                .and_then(|e| e.ancestors().nth(3).map(|r| r.join("tools/llvm_issue.py"))),
+                .and_then(|e| e.ancestors().nth(3).map(|r| r.join(&rel))),
         )
         .find(|p| p.exists());
     let Some(tool) = tool else {
-        return (
-            "todo".into(),
-            "tools/llvm_issue.py not found (set LLVM_ISSUE_TOOL)".into(),
-        );
+        return ("todo".into(), format!("{rel} not found (set LLVM_ISSUE_TOOL)"));
     };
     let mut c = Command::new("python3");
     c.arg("-I")
@@ -1068,22 +765,19 @@ fn llvm_issue(dir: &Path, reduced: &Path, flags: &str, work: &Path) -> (String, 
         .arg("--flags")
         .arg(flags)
         .arg("--work")
-        .arg(work.join(format!("llvm_issue_{}", std::process::id())));
-    match exec(c, Duration::from_secs(1500)) {
+        .arg(work.join(format!("{script}_{}", std::process::id())));
+    match exec(c, Duration::from_secs(secs)) {
         Ok(r) => {
             let out = String::from_utf8_lossy(&r.stdout).to_string();
             match out.lines().last().and_then(|l| l.split_once('|')) {
                 Some((s @ ("done" | "n/a" | "todo"), note)) => (s.to_string(), note.to_string()),
                 _ => (
                     "todo".into(),
-                    format!(
-                        "llvm_issue.py failed: {}",
-                        r.stderr.lines().last().unwrap_or("")
-                    ),
+                    format!("{script} failed: {}", r.stderr.lines().last().unwrap_or("")),
                 ),
             }
         }
-        Err(e) => ("todo".into(), format!("llvm_issue.py could not run: {e}")),
+        Err(e) => ("todo".into(), format!("{script} could not run: {e}")),
     }
 }
 
@@ -1283,35 +977,6 @@ fn pass_bisect(
     res.good = v_lo;
     res.bad = v_hi;
     res
-}
-
-fn search_to_text(s: &Search) -> String {
-    let mut t = format!(
-        "performed={}\nnote={}\npossible={}\n",
-        s.performed,
-        s.note,
-        s.possible.join(" ")
-    );
-    for l in &s.lines {
-        t += &format!("line={l}\n");
-    }
-    t
-}
-
-fn search_from_text(t: &str) -> Search {
-    let mut s = Search::default();
-    for l in t.lines() {
-        if let Some(x) = l.strip_prefix("performed=") {
-            s.performed = x == "true";
-        } else if let Some(x) = l.strip_prefix("note=") {
-            s.note = x.to_string();
-        } else if let Some(x) = l.strip_prefix("possible=") {
-            s.possible = x.split_whitespace().map(String::from).collect();
-        } else if let Some(x) = l.strip_prefix("line=") {
-            s.lines.push(x.to_string());
-        }
-    }
-    s
 }
 
 /// A reduced program longer than this does not fit an issue without an attachment.
@@ -1948,41 +1613,11 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
         (m, agrees)
     };
 
-    info!("step 6: upstream search");
-    // 6. upstream search (repeated after two weeks)
     let llvm_pass = culprit
         .as_ref()
         .filter(|c| c.kind == "llvm" && c.n > 0)
         .map(|c| c.name.clone());
-    let rust_reused = cur("upstream_rust") && dir.join("search.txt").exists();
-    let llvm_reused = cur("upstream_llvm") && dir.join("search_llvm.txt").exists();
     let interrupted = crate::reduce::INTERRUPTED.load(std::sync::atomic::Ordering::Relaxed);
-    let search_rust = if rust_reused {
-        search_from_text(&std::fs::read_to_string(dir.join("search.txt")).unwrap_or_default())
-    } else if o.search && !interrupted {
-        upstream_search("rust-lang/rust", &reduced, &bad, &sig, &None)
-    } else {
-        Search {
-            note: "NOT PERFORMED (disabled)".into(),
-            ..Default::default()
-        }
-    };
-    let llvm_applicable = crash || llvm_pass.is_some();
-    let search_llvm = if llvm_reused {
-        search_from_text(&std::fs::read_to_string(dir.join("search_llvm.txt")).unwrap_or_default())
-    } else if !llvm_applicable {
-        Search {
-            note: "not applicable: no LLVM pass was found to be involved".into(),
-            ..Default::default()
-        }
-    } else if o.search && !interrupted {
-        upstream_search("llvm/llvm-project", &reduced, &bad, &sig, &llvm_pass)
-    } else {
-        Search {
-            note: "NOT PERFORMED (disabled)".into(),
-            ..Default::default()
-        }
-    };
     // 6b. LLVM_ISSUE.md: only when an LLVM pass is the culprit of a wrong-code finding
     let llvm_issue_reused =
         cur("llvm_issue") && (dir.join("LLVM_ISSUE.md").exists() || llvm_pass.is_none());
@@ -2010,30 +1645,34 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
             crate::runner::common_flags().join(" "),
             bad.flags.join(" ")
         );
-        Some(llvm_issue(dir, &reduced_path, flags.trim(), &o.work))
+        Some(llvm_tool("llvm_issue.py", dir, &reduced_path, flags.trim(), &o.work, 1500))
     };
-    // both searches, as one for the status files
-    let search = Search {
-        performed: search_rust.performed && (search_llvm.performed || !llvm_applicable),
-        lines: search_rust
-            .lines
-            .iter()
-            .chain(search_llvm.lines.iter())
-            .cloned()
-            .collect(),
-        possible: search_rust
-            .possible
-            .iter()
-            .chain(search_llvm.possible.iter())
-            .cloned()
-            .collect(),
-        note: [search_rust.note.clone(), search_llvm.note.clone()]
-            .iter()
-            .filter(|n| !n.is_empty())
-            .cloned()
-            .collect::<Vec<_>>()
-            .join(" / "),
+    // 6c/6d. what LLVM_ISSUE.md says decides whether its IR is reduced and whether a fix on trunk is looked for
+    let verdict_note = match &llvm_issue_result {
+        Some((status, note)) if status == "done" => Some(note.clone()),
+        Some(_) => None,
+        None => steps::get(&old, "llvm_issue").filter(|s| s.status == "done").map(|s| s.note),
     };
+    let llvm_issue_failed = matches!(&llvm_issue_result, Some((status, _)) if status == "todo");
+    let llvm_follow = |id: &str, marker: &str, script: &str, secs: u64, why_not: &str| -> Option<(String, String)> {
+        let applicable = verdict_note.as_deref().is_some_and(|n| n.contains(marker));
+        if cur(id) && llvm_issue_result.is_none() {
+            return None;
+        }
+        if llvm_issue_failed {
+            Some(("todo".into(), "waiting for the step llvm_issue".into()))
+        } else if !applicable {
+            Some(("n/a".into(), why_not.into()))
+        } else if !still || interrupted || !steps::fits(id, left_secs(o)) {
+            Some(("todo".into(), "not run yet (no time left or the program does not reproduce)".into()))
+        } else {
+            info!("step {id}");
+            let flags = format!("{} {}", crate::runner::common_flags().join(" "), bad.flags.join(" "));
+            Some(llvm_tool(script, dir, &reduced_path, flags.trim(), &o.work, secs))
+        }
+    };
+    let llvm_reduce_result = llvm_follow("llvm_reduce", "TRUNK", "llvm_reduce.py", 1500, "no verified LLVM bug whose IR could be reduced");
+    let trunk_fix_result = llvm_follow("trunk_fix", "FIXED ON TRUNK", "llvm_fix_search.py", 300, "the bug is not fixed on trunk (or not an LLVM bug)");
 
     info!(
         "step 7: regression range (bisect budget {}s)",
@@ -2544,41 +2183,15 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
             );
         }
     }
-    for (id, reused, sr, applicable) in [
-        ("upstream_rust", rust_reused, &search_rust, true),
-        ("upstream_llvm", llvm_reused, &search_llvm, llvm_applicable),
-    ] {
-        if reused {
-            keep(&mut st, id);
-        } else if !applicable {
-            put(&mut st, id, "n/a", &ctx, sr.note.clone());
-        } else if sr.performed {
-            let note = if sr.possible.is_empty() {
-                "no matching issue found".to_string()
-            } else {
-                format!(
-                    "possible duplicates: {} - read them before reporting",
-                    sr.possible.join(" ")
-                )
-            };
-            put(&mut st, id, "done", &ctx, note);
-        } else {
-            put(
-                &mut st,
-                id,
-                "todo",
-                &ctx,
-                if sr.note.is_empty() {
-                    "not performed".into()
-                } else {
-                    sr.note.clone()
-                },
-            );
-        }
-    }
     match llvm_issue_result {
         None => keep(&mut st, "llvm_issue"),
         Some((status, note)) => put(&mut st, "llvm_issue", &status, &ctx, note),
+    }
+    for (id, result) in [("llvm_reduce", llvm_reduce_result), ("trunk_fix", trunk_fix_result)] {
+        match result {
+            None => keep(&mut st, id),
+            Some((status, note)) => put(&mut st, id, &status, &ctx, note),
+        }
     }
     put(
         &mut st,
@@ -2603,18 +2216,6 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     st.insert("miri".into(), format!("{}: {}", m.verdict, m.detail));
     st.insert("miri_agrees".into(), miri_agrees.clone());
     st.insert("mir_opt".into(), mir_opt.clone());
-    st.insert(
-        "upstream_search".into(),
-        if search.performed {
-            if search.possible.is_empty() {
-                "no matching issue found".into()
-            } else {
-                format!("possible duplicates: {}", search.possible.join(" "))
-            }
-        } else {
-            "not performed".into()
-        },
-    );
     st.insert(
         "kind".into(),
         if crash {
@@ -2688,12 +2289,6 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     let (done_n, total_n) = steps::progress(&st, &date);
     st.insert("progress".into(), format!("{done_n}/{total_n}"));
     write_cfg(&dir.join("status.cfg"), &st);
-    if search_rust.performed {
-        let _ = std::fs::write(dir.join("search.txt"), search_to_text(&search_rust));
-    }
-    if search_llvm.performed {
-        let _ = std::fs::write(dir.join("search_llvm.txt"), search_to_text(&search_llvm));
-    }
     crate::pack::write_finding_json(dir);
 
     let mut md = String::new();
@@ -2773,26 +2368,6 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     );
     if !miri_agrees.is_empty() {
         let _ = writeln!(md, "- {miri_agrees}");
-    }
-    let _ = writeln!(md, "\n### Already reported upstream? (searched {date})\n");
-    if search.performed {
-        if search.possible.is_empty() {
-            let _ = writeln!(
-                md,
-                "**No matching issue found on GitHub** by any of the queries below (this does not prove it was never reported - skim the keyword scan too):\n"
-            );
-        } else {
-            let _ = writeln!(
-                md,
-                "**Possible duplicates found - review them:** {}\n",
-                search.possible.join(", ")
-            );
-        }
-        for l in &search.lines {
-            let _ = writeln!(md, "{l}");
-        }
-    } else {
-        let _ = writeln!(md, "{}", search.note);
     }
     std::fs::write(dir.join("STATUS.md"), &md).unwrap();
 

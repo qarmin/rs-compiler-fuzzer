@@ -142,6 +142,7 @@ fn rss_mb(pid: u32) -> Option<u64> {
 
 unsafe extern "C" {
     fn prctl(option: i32, arg2: u64, arg3: u64, arg4: u64, arg5: u64) -> i32;
+    fn setrlimit(resource: i32, rlim: *const [u64; 2]) -> i32;
 }
 
 pub fn exec(mut cmd: Command, timeout: Duration) -> std::io::Result<Exec> {
@@ -150,12 +151,13 @@ pub fn exec(mut cmd: Command, timeout: Duration) -> std::io::Result<Exec> {
         .stderr(Stdio::piped())
         .process_group(0);
     // a test binary must not outlive the process that started it (a killed reducer left them spinning for the rest of the job):
-    // PR_SET_PDEATHSIG = 1, SIGKILL = 9
+    // PR_SET_PDEATHSIG = 1, SIGKILL = 9; RLIMIT_CORE = 4: crashing compilers must not leave core.* files behind
     #[cfg(target_os = "linux")]
     unsafe {
         use std::os::unix::process::CommandExt;
         cmd.pre_exec(|| {
             prctl(1, 9, 0, 0, 0);
+            setrlimit(4, &[0, 0]);
             Ok(())
         });
     }

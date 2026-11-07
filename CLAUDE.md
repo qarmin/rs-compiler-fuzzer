@@ -24,6 +24,7 @@ The whole application is organised around one ordered list of unique steps that 
 - `src/triage.rs`: runs the steps for one finding and stores each result into `status.cfg` through `steps::set`.
 - `src/pack.rs`: merges findings into the package and writes `INDEX.md`, `finding.json`.
 - `src/steps.rs`: the step list, versions, completion rules, checklist.
-- `tools/llvm_issue.py`: the `llvm_issue` step (culprit LLVM pass verified on release and trunk, prints `<status>|<note>`).
+- `tools/llvm_issue.py`: the `llvm_issue` step (culprit LLVM pass verified on release and trunk, prints `<status>|<note>`); `tools/llvm_reduce.py` (`llvm_reduce`) and `tools/llvm_fix_search.py` (`trunk_fix`) extend its `LLVM_ISSUE.md`.
+- Crashing children never leave `core.*` files behind (`runner::exec` sets `RLIMIT_CORE=0`).
 - `rs-minimizer/`: the reducer used by the `minimize_*` steps.
 - `README.md`: user-facing description of the pipeline, CI and storage.

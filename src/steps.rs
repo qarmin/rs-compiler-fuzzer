@@ -28,7 +28,7 @@ pub struct Step {
 pub const REDUCE_VERSION: u32 = 7;
 
 /// Every step is one atomic result: done, not applicable, or still to do (no partial results are recorded).
-/// 5: the steps were split up (one result per channel, per kind of flag, per kind of level, per search) and every version raised.
+/// 5: the steps were split up (one result per channel, per kind of flag, per kind of level) and every version raised.
 pub const STEPS: &[Step] = &[
     Step {
         id: "reproduced_stable",
@@ -199,28 +199,28 @@ pub const STEPS: &[Step] = &[
         max_secs: 4200,
     },
     Step {
-        id: "upstream_rust",
-        title: "Searched rust-lang/rust for duplicates",
-        version: 2,
+        id: "llvm_issue",
+        title: "LLVM_ISSUE.md: the culprit LLVM pass verified with the apt.llvm.org release and trunk binaries, verdict FIXED ON TRUNK / STILL WRONG ON TRUNK, also for codegen passes that `opt` cannot run alone (`llc` with the pass switched off, else the whole opt + llc pipeline is compared; LLVM culprits only; repeated after 14 days)",
+        version: 4,
         code: true,
         max_age_days: 14,
-        max_secs: 300,
+        max_secs: 1500,
     },
     Step {
-        id: "upstream_llvm",
-        title: "Searched llvm/llvm-project for duplicates",
+        id: "llvm_reduce",
+        title: "LLVM IR of the verified LLVM bug reduced with llvm-reduce (the correct build keeps its output, the wrong one differs; added to LLVM_ISSUE.md; verified LLVM bugs only)",
+        version: 1,
+        code: true,
+        max_age_days: 14,
+        max_secs: 1500,
+    },
+    Step {
+        id: "trunk_fix",
+        title: "Merged llvm-project pull requests that could have fixed it listed (only for FIXED ON TRUNK, to ask for a backport)",
         version: 1,
         code: true,
         max_age_days: 14,
         max_secs: 300,
-    },
-    Step {
-        id: "llvm_issue",
-        title: "LLVM_ISSUE.md: the culprit LLVM pass verified with the apt.llvm.org release and trunk binaries, verdict FIXED ON TRUNK / STILL WRONG ON TRUNK, also for codegen passes that `opt` cannot run alone (then the whole opt + llc pipeline is compared; LLVM culprits only; repeated after 14 days)",
-        version: 3,
-        code: true,
-        max_age_days: 14,
-        max_secs: 1500,
     },
     Step {
         id: "issue_draft",
@@ -637,10 +637,6 @@ pub fn backfill(st: &mut Cfg, dir: &Path) {
     if st.contains_key("regression_pr") {
         put(st, "bisect_pr", "done", g(st, "regression_pr"));
     }
-    let up = g(st, "upstream_search");
-    if !up.is_empty() && up != "not performed" {
-        put(st, "upstream_rust", "done", up);
-    }
     if dir.join("ISSUE.md").exists() {
         put(st, "issue_draft", "done", String::new());
     }
@@ -694,16 +690,16 @@ mod tests {
     }
 
     #[test]
-    fn partial_and_failed_steps_are_not_complete_and_the_search_expires() {
+    fn partial_and_failed_steps_are_not_complete_and_the_verification_expires() {
         let st = cfg_with("minimized", "todo", "", "2026-10-01");
         assert!(!is_complete("minimized", &st, "", "2026-10-02"));
         let failed = cfg_with("ub_check", "failed", "aaa", "2026-10-01");
         assert!(has_failure(&failed) && !is_complete("ub_check", &failed, "aaa", "2026-10-02"));
-        let up = cfg_with("upstream_rust", "done", "aaa", "2026-10-01");
-        assert!(is_complete("upstream_rust", &up, "aaa", "2026-10-10"));
+        let up = cfg_with("llvm_issue", "done", "aaa", "2026-10-01");
+        assert!(is_complete("llvm_issue", &up, "aaa", "2026-10-10"));
         assert!(
-            !is_complete("upstream_rust", &up, "aaa", "2026-11-01"),
-            "the search is repeated after 14 days"
+            !is_complete("llvm_issue", &up, "aaa", "2026-11-01"),
+            "the verification is repeated after 14 days"
         );
     }
 
