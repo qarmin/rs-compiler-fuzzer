@@ -9,13 +9,146 @@
 use crate::batch::{Case, assemble};
 use crate::fuzz::{Opts, blamed_cases, generate_batch};
 use crate::rng::Rng;
-use crate::runner::{Outcome, build_and_run, exec};
+use crate::runner::{Config, Limits, Outcome, build_and_run, exec};
 use log::{info, warn};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+/// `Outcome::CompileFail` text of a Miri run on a channel that has no Miri; `triage::reproduces` reads it as "not applicable".
+pub const NIGHTLY_ONLY: &str = "Miri is only accepted on the nightly toolchain";
+
+/// How to run a file under Miri with `cargo` (what the issue drafts show): the profile matches the flags the native build is given.
+pub fn cargo_command(file: &str) -> String {
+    format!(
+        "cargo new --edition 2021 miri_case && cp {file} miri_case/src/main.rs && cd miri_case\nRUSTFLAGS=\"--cap-lints allow\" MIRIFLAGS=\"{}\" CARGO_PROFILE_RELEASE_OPT_LEVEL=0 CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS=false \\\nCARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=false cargo +nightly miri run --release",
+        DRIVER_FLAGS.join(" ")
+    )
+}
+
+/// Flags of the `miri` driver that make it behave like the fuzzing runs (`cargo miri run`) do.
+const DRIVER_FLAGS: [&str; 2] = ["-Zmiri-disable-isolation", "-Zmiri-ignore-leaks"];
+
+/// First line of a Miri report that names the problem.
+const REPORT_MARKERS: [&str; 7] = [
+    "Undefined Behavior",
+    "unsupported operation",
+    "deadlock",
+    "abnormal termination",
+    "resource exhaustion",
+    "the evaluated program",
+    "memory leaked",
+];
+
+/// The `miri` driver of a toolchain and the sysroot it interprets against. Calling the driver directly (what `cargo miri` does in the
+/// end) takes a fraction of a second per program and needs no Cargo project, so the reducer can run it by the thousand in parallel.
+struct Driver {
+    miri: PathBuf,
+    sysroot: PathBuf,
+}
+
+static DRIVERS: Mutex<Vec<(String, Option<Arc<Driver>>)>> = Mutex::new(Vec::new());
+
+fn last_stdout_line(c: Command, secs: u64) -> Option<String> {
+    let r = exec(c, Duration::from_secs(secs)).ok().filter(|r| r.code == Some(0))?;
+    String::from_utf8_lossy(&r.stdout).lines().last().map(|l| l.trim().to_string())
+}
+
+fn find_driver(toolchain: &str) -> Option<Driver> {
+    let mut c = Command::new("rustc");
+    c.arg(format!("+{toolchain}")).args(["--print", "sysroot"]);
+    let miri = PathBuf::from(last_stdout_line(c, 60)?).join("bin/miri");
+    if !miri.exists() {
+        return None;
+    }
+    // builds the Miri sysroot when it is missing or belongs to another nightly
+    let mut c = Command::new("cargo");
+    c.arg(format!("+{toolchain}")).args(["miri", "setup", "--print-sysroot"]);
+    let sysroot = PathBuf::from(last_stdout_line(c, 1200)?);
+    Some(Driver { miri, sysroot })
+}
+
+/// The driver of `+toolchain`, found (and its sysroot built) once per process.
+fn driver(toolchain: &str) -> Option<Arc<Driver>> {
+    let mut known = DRIVERS.lock().unwrap();
+    if let Some((_, d)) = known.iter().find(|(t, _)| t == toolchain) {
+        return d.clone();
+    }
+    let d = find_driver(toolchain).map(Arc::new);
+    known.push((toolchain.to_string(), d.clone()));
+    d
+}
+
+/// Is Miri usable on the nightly toolchain of this machine?
+pub fn available() -> bool {
+    driver("nightly").is_some()
+}
+
+/// The part of a Miri report that names the problem: its first `error` line.
+pub fn headline(report: &str) -> String {
+    report
+        .lines()
+        .find(|l| l.starts_with("error"))
+        .or_else(|| report.lines().next())
+        .unwrap_or("")
+        .trim()
+        .chars()
+        .take(160)
+        .collect()
+}
+
+fn is_interpreter_error(report: &str) -> bool {
+    let first = report.lines().find(|l| l.starts_with("error")).unwrap_or("");
+    REPORT_MARKERS.iter().any(|m| first.contains(m))
+}
+
+/// Run a program under Miri, the way `build_and_run` runs a compiled one: `rustc` is `["rustc", "+nightly"]`, `cfg.flags` and the
+/// common flags are given to the driver like to rustc (edition, lints, checks). A program that Miri refuses to run (undefined
+/// behaviour, an unsupported operation) is `MiriError`, one that does not compile is `CompileFail`.
+pub fn run_program(rustc: &[String], src: &Path, cfg: &Config, lim: &Limits) -> Outcome {
+    let toolchain = rustc.iter().find_map(|a| a.strip_prefix('+')).unwrap_or("");
+    if toolchain != "nightly" && !toolchain.starts_with("nightly-") {
+        return Outcome::CompileFail(NIGHTLY_ONLY.into());
+    }
+    let Some(d) = driver(toolchain) else {
+        return Outcome::CompileFail(format!(
+            "Miri is not installed for +{toolchain} (rustup component add miri rust-src --toolchain {toolchain})"
+        ));
+    };
+    let mut c = Command::new(&d.miri);
+    c.arg("--sysroot")
+        .arg(&d.sysroot)
+        .arg(src)
+        .args(crate::runner::common_flags())
+        .args(&cfg.flags)
+        .args(DRIVER_FLAGS);
+    let r = match exec(c, lim.compile) {
+        Ok(r) => r,
+        Err(e) => return Outcome::CompileFail(format!("cannot spawn miri: {e}")),
+    };
+    if r.timed_out {
+        return Outcome::RunTimeout;
+    }
+    if crate::runner::casts_function_address(&r.stderr) {
+        return Outcome::CompileFail(crate::runner::FN_ADDRESS_MESSAGE.into());
+    }
+    if r.code != Some(0) && r.stderr.contains("aborting due to") {
+        return if is_interpreter_error(&r.stderr) {
+            Outcome::MiriError(r.stderr)
+        } else {
+            Outcome::CompileFail(r.stderr)
+        };
+    }
+    Outcome::Ran {
+        code: r.code,
+        signal: r.signal,
+        stdout: String::from_utf8_lossy(&r.stdout).into_owned(),
+        stderr: r.stderr,
+    }
+}
 
 const MIRI_TIMEOUT: Duration = Duration::from_secs(7 * 60);
 
@@ -92,7 +225,7 @@ fn parse_lines(stdout: &str) -> BTreeMap<usize, String> {
 }
 
 /// The UB headline with addresses/numbers normalised, used to de-duplicate.
-fn signature(stderr: &str) -> String {
+pub fn signature(stderr: &str) -> String {
     let l = stderr
         .lines()
         .find(|l| {
@@ -169,9 +302,7 @@ impl State<'_> {
             crate::runner::compiler_for(&native_line)
         )
         .replace("  ", " ");
-        let miri_cmd = "cargo new miri_case && cp case.rs miri_case/src/main.rs && cd miri_case\n\
-            MIRIFLAGS=\"-Zmiri-disable-isolation -Zmiri-ignore-leaks\" CARGO_PROFILE_RELEASE_OPT_LEVEL=0 CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS=false \\\n\
-            CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=false cargo +nightly miri run --release";
+        let miri_cmd = cargo_command("case.rs");
         let what = match kind {
             "ub" => "Miri reports undefined behavior in a program that is meant to be UB-free",
             "mismatch" => "Miri's output differs from the natively compiled program",
@@ -468,4 +599,62 @@ pub fn run(o: &Opts) -> i32 {
     let _ = std::fs::remove_dir_all(&work);
     // unsupported operations are expected for a few constructs; UB and mismatches are the interesting ones
     if st.ub + st.mismatch > 0 { 2 } else { 0 }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run(src: &str, toolchain: &str) -> Option<Outcome> {
+        if toolchain == "nightly" && !available() {
+            eprintln!("skipped: Miri is not installed");
+            return None;
+        }
+        let dir = std::env::temp_dir().join(format!("rsfuzz-miri-test-{}-{}", std::process::id(), src.len()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("main.rs");
+        std::fs::write(&file, src).unwrap();
+        let lim = Limits { compile: Duration::from_secs(120), run: Duration::from_secs(10) };
+        let out = run_program(&["rustc".into(), format!("+{toolchain}")], &file, &Config::new("miri-mismatch", ""), &lim);
+        let _ = std::fs::remove_dir_all(&dir);
+        Some(out)
+    }
+
+    #[test]
+    fn the_name_of_a_configuration_decides_whether_miri_runs_it() {
+        assert!(Config::new("miri-mismatch", "").miri && Config::new("miri-ub", "").miri);
+        assert!(!Config::new("native", "").miri && !Config::new("O3", "-C opt-level=3").miri);
+    }
+
+    #[test]
+    fn a_program_runs_under_miri_like_a_compiled_one() {
+        let Some(o) = run("fn main() { println!(\"{}\", 6 * 7); std::process::exit(3) }", "nightly") else { return };
+        assert!(matches!(&o, Outcome::Ran { code: Some(3), stdout, .. } if stdout == "42\n"), "{o:?}");
+    }
+
+    #[test]
+    fn undefined_behaviour_is_a_report_of_miri_and_a_type_error_is_not() {
+        let Some(ub) = run("fn main() { let v = vec![1u8]; let p = v.as_ptr(); println!(\"{}\", unsafe { *p.add(1) }); }", "nightly") else {
+            return;
+        };
+        assert!(matches!(&ub, Outcome::MiriError(e) if e.contains("Undefined Behavior")), "{ub:?}");
+        let sig = crate::runner::crash_signature(&ub).unwrap();
+        assert!(sig.starts_with("error: Undefined Behavior"), "{sig}");
+        let err = run("fn main() { let x: i32 = \"a\"; }", "nightly").unwrap();
+        assert!(matches!(err, Outcome::CompileFail(_)), "{err:?}");
+    }
+
+    #[test]
+    fn miri_exists_on_nightly_only() {
+        let Some(o) = run("fn main() {}", "stable") else { return };
+        assert!(matches!(&o, Outcome::CompileFail(e) if e.contains(NIGHTLY_ONLY)), "{o:?}");
+    }
+
+    #[test]
+    fn the_headline_names_the_problem() {
+        let report = "warning: unused\n\nerror: Undefined Behavior: oops\n --> x.rs:1:1\n";
+        assert_eq!(headline(report), "error: Undefined Behavior: oops");
+        assert!(is_interpreter_error(report));
+        assert!(!is_interpreter_error("error[E0308]: mismatched types\n"));
+    }
 }

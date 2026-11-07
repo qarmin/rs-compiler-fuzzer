@@ -160,6 +160,19 @@ impl Repro {
     }
 }
 
+/// The crash signature of a stored finding (`signature.txt`). A Miri finding stores `<kind>: <headline of Miri's report>`; a difference
+/// between the output of the native build and of Miri has no signature.
+fn stored_signature(dir: &Path, bad: &Config) -> Option<String> {
+    let text = std::fs::read_to_string(dir.join("signature.txt"))
+        .ok()
+        .filter(|s| !s.trim().is_empty())?;
+    if !bad.miri {
+        return Some(text);
+    }
+    let (kind, headline) = text.trim().split_once(": ")?;
+    (kind != "mismatch").then(|| headline.to_string())
+}
+
 pub fn reproduces(
     rustc: &[String],
     src: &Path,
@@ -979,6 +992,99 @@ fn pass_bisect(
     res
 }
 
+/// `ISSUE.md` and `ISSUE_TITLE.txt` of a Miri finding: the native build against Miri (or what Miri reports about the program).
+fn write_miri_issue(
+    dir: &Path,
+    reduced: &str,
+    base: &Config,
+    outputs: &Option<(Outcome, Outcome)>,
+    variants: &[Variant],
+) {
+    let shown_common = crate::runner::shown_flags(&crate::runner::common_flags());
+    let native_cmd = |flags: &str| {
+        let line = format!("{shown_common} {flags}");
+        format!("{} reduced.rs {line}; ./reduced", crate::runner::compiler_for(&line))
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let miri_text = |o: &Outcome| match o {
+        Outcome::MiriError(e) => e.lines().take(40).collect::<Vec<_>>().join("\n"),
+        other => show_out(other),
+    };
+    let report = matches!(outputs, Some((_, Outcome::MiriError(_))));
+    let title = match outputs {
+        Some((_, Outcome::MiriError(e))) => format!("Miri reports `{}`", crate::miri::headline(e)),
+        _ => "Output of the native build differs from Miri".to_string(),
+    };
+    let _ = std::fs::write(dir.join("ISSUE_TITLE.txt"), format!("{title}\n"));
+    let mut is = String::new();
+    let _ = writeln!(is, "I tried this code:\n\n```rust\n{}\n```\n", reduced.trim_end());
+    match outputs {
+        Some((native, miri)) => {
+            let _ = writeln!(
+                is,
+                "Compiled natively:\n```\n{}\n```\n{}\n```\n{}\n```\n",
+                native_cmd(&base.flags.join(" ")),
+                if report { "runs and prints" } else { "prints" },
+                show_out(native)
+            );
+            let _ = writeln!(
+                is,
+                "{} Miri:\n```\n{}\n```\n{}\n```\n{}\n```\n",
+                if report { "Under" } else { "but under" },
+                crate::miri::cargo_command("reduced.rs"),
+                if report { "reports" } else { "prints" },
+                miri_text(miri)
+            );
+        }
+        None => {
+            let _ = writeln!(
+                is,
+                "Commands:\n```\n{}\n{}\n```\n(did not reproduce when this draft was written)\n",
+                native_cmd(&base.flags.join(" ")),
+                crate::miri::cargo_command("reduced.rs")
+            );
+        }
+    }
+    if !variants.is_empty() {
+        let list = |bug: bool| {
+            variants
+                .iter()
+                .filter(|v| v.bug == bug)
+                .map(|v| format!("`{}`", v.flags))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let (differs, agrees) = (list(true), list(false));
+        let _ = match (differs.is_empty(), agrees.is_empty()) {
+            (false, true) => writeln!(is, "The native build prints something else than Miri with every other optimisation level tried too: {differs}.\n"),
+            (true, _) => writeln!(is, "The native build prints what Miri prints with {agrees}.\n"),
+            _ => writeln!(is, "The native build prints something else than Miri with {differs}; it prints what Miri prints with {agrees}.\n"),
+        };
+    }
+    let tool = |program: &str, args: &[&str]| {
+        let mut c = Command::new(program);
+        c.args(args);
+        exec(c, Duration::from_secs(60))
+            .map(|r| String::from_utf8_lossy(&r.stdout).trim().to_string())
+            .unwrap_or_default()
+    };
+    let _ = writeln!(
+        is,
+        "### Meta\n\n```\n{}\ncargo miri {}\n```\n",
+        tool("rustc", &["+nightly", "-vV"]),
+        tool("cargo", &["+nightly", "miri", "--version"])
+    );
+    let _ = writeln!(
+        is,
+        "\nProblem was found by and minimized by rust fuzzer(created by llm) - https://github.com/qarmin/rs-compiler-fuzzer (the latest findings of the fuzzer can be checked by hand in https://github.com/qarmin/rs-compiler-fuzzer/releases/download/Nightly/findings.zip)"
+    );
+    let _ = std::fs::write(dir.join("ISSUE.md"), is);
+}
+
+const MIRI_NO_BISECTION: &str = "a regression search would need Miri on every searched nightly (not supported)";
+
 /// A reduced program longer than this does not fit an issue without an attachment.
 const STORED_LIMIT_LINES: usize = 100;
 
@@ -990,10 +1096,12 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     crate::runner::set_common_flags(None);
     let mut base = Config::new(&get("base_name"), &get("base_flags"));
     let mut bad = Config::new(&get("bad_name"), &get("bad_flags"));
-    let sig = std::fs::read_to_string(dir.join("signature.txt"))
-        .ok()
-        .filter(|s| !s.trim().is_empty());
-    let crash = sig.is_some();
+    let miri_finding = bad.miri;
+    let sig = stored_signature(dir, &bad);
+    let crash = sig.is_some() && !miri_finding;
+    if miri_finding && !crate::miri::available() {
+        return Err("Miri is not available on this machine (rustup component add miri rust-src --toolchain nightly)".into());
+    }
     std::fs::create_dir_all(&o.work).unwrap();
     let lim = Limits {
         compile: Duration::from_secs(300),
@@ -1451,11 +1559,14 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     ));
     let cur = |id: &str| steps::current(&old, id, &ctx, &date).is_some();
 
+    let miri_report = miri_finding && sig.is_some();
     info!("step 4: MIR vs LLVM, optimisation levels, pass bisection");
     // 4. MIR optimisations or LLVM? (-Zmir-opt-level=0 on nightly: if the difference stays, MIR opts are not the cause)
     let mir_reused = cur("mir_llvm") && old.contains_key("mir_opt");
     let mir_opt = if mir_reused {
         old.get("mir_opt").cloned().unwrap_or_default()
+    } else if miri_report {
+        "unknown: a report of Miri does not depend on the compiler's optimisations".to_string()
     } else if still
         && matrix2
             .iter()
@@ -1463,7 +1574,9 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     {
         let with0 = |c: &Config| {
             let mut c = c.clone();
-            c.flags.push("-Zmir-opt-level=0".into());
+            if !c.miri {
+                c.flags.push("-Zmir-opt-level=0".into());
+            }
             c
         };
         let rustc = vec!["rustc".to_string(), "+nightly".to_string()];
@@ -1476,13 +1589,26 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
         "unknown: not reproduced on nightly".to_string()
     };
 
+    // A Miri finding compares the native build with Miri: the steps that vary compiler options vary the native build and take Miri's
+    // output as the reference. A report of Miri itself (undefined behaviour ...) does not depend on compiler options at all.
+    let (reference_cfg, built_cfg) = if miri_finding {
+        (bad.clone(), base.clone())
+    } else {
+        (base.clone(), bad.clone())
+    };
+    let reference_out = outputs
+        .as_ref()
+        .map(|(a, b)| if miri_finding { b.clone() } else { a.clone() });
+
     // 4b. the same program at the other optimisation levels (on the channel the issue shows)
     let var_chan = matrix2
         .iter()
         .find(|m| m.2 == Repro::Yes)
         .map(|m| m.0.clone());
     let var_reused = cur("opt_levels") && cur("mir_levels") && dir.join("variants.txt").exists();
-    let variants: Vec<Variant> = if var_reused {
+    let variants: Vec<Variant> = if miri_report {
+        Vec::new()
+    } else if var_reused {
         variants_from_text(&std::fs::read_to_string(dir.join("variants.txt")).unwrap_or_default())
     } else if let (true, Some(ch), false) = (
         still,
@@ -1493,10 +1619,10 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
         opt_variants(
             &rustc,
             &reduced_path,
-            &base,
-            &bad,
+            &reference_cfg,
+            &built_cfg,
             &sig,
-            &outputs.as_ref().map(|o| o.0.clone()),
+            &reference_out,
             &lim,
             &o.work,
         )
@@ -1508,7 +1634,9 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     }
 
     // 4c. which optimisation pass? (opt-bisect: LLVM when MIR is cleared, MIR otherwise)
-    let culprit_kind = if mir_opt.starts_with("llvm") {
+    let culprit_kind = if miri_report {
+        None
+    } else if mir_opt.starts_with("llvm") {
         Some("llvm")
     } else if mir_opt.starts_with("mir") {
         Some("mir")
@@ -1529,8 +1657,8 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
         Some(pass_bisect(
             k,
             &reduced_path,
-            &base,
-            &bad,
+            &reference_cfg,
+            &built_cfg,
             &sig,
             &lim,
             &o.work,
@@ -1579,6 +1707,7 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     } else {
         let m = miri(&reduced, &o.work);
         let agrees = match (&outputs, m.verdict.as_str()) {
+            _ if miri_finding => String::new(),
             (Some((a, b)), "ok") => {
                 let norm = |s: &str| s.trim().to_string();
                 let (sa, sb) = (
@@ -1643,7 +1772,7 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
         let flags = format!(
             "{} {}",
             crate::runner::common_flags().join(" "),
-            bad.flags.join(" ")
+            built_cfg.flags.join(" ")
         );
         Some(llvm_tool("llvm_issue.py", dir, &reduced_path, flags.trim(), &o.work, 1500))
     };
@@ -1667,7 +1796,7 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
             Some(("todo".into(), "not run yet (no time left or the program does not reproduce)".into()))
         } else {
             info!("step {id}");
-            let flags = format!("{} {}", crate::runner::common_flags().join(" "), bad.flags.join(" "));
+            let flags = format!("{} {}", crate::runner::common_flags().join(" "), built_cfg.flags.join(" "));
             Some(llvm_tool(script, dir, &reduced_path, flags.trim(), &o.work, secs))
         }
     };
@@ -1687,6 +1816,7 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     let mut bis = prior.unwrap_or_default();
     if !o.bisect.is_zero()
         && still
+        && !miri_finding
         && m.verdict != "ub"
         && !crate::reduce::INTERRUPTED.load(std::sync::atomic::Ordering::Relaxed)
     {
@@ -1790,7 +1920,13 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
         }
         match r {
             Repro::Yes => put(&mut st, &id, "done", &ctx, format!("reproduces on {ch}")),
-            Repro::NotApplicable => put(&mut st, &id, "n/a", &ctx, "the options only exist on nightly".to_string()),
+            Repro::NotApplicable => put(
+                &mut st,
+                &id,
+                "n/a",
+                &ctx,
+                if miri_finding { "Miri only exists on nightly" } else { "the options only exist on nightly" }.to_string(),
+            ),
             Repro::No if ch == "nightly" => put(&mut st, &id, "failed", &ctx, "does not reproduce on the newest nightly any more (the next verification moves it to old_findings/)".into()),
             Repro::No => put(&mut st, &id, "done", &ctx, format!("does not reproduce on {ch}")),
         }
@@ -1902,7 +2038,11 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
             );
         }
     }
-    if var_reused {
+    if miri_report {
+        for id in ["opt_levels", "mir_levels"] {
+            put(&mut st, id, "n/a", &ctx, "the report comes from Miri, not from a compiled program".into());
+        }
+    } else if var_reused {
         keep(&mut st, "opt_levels");
         keep(&mut st, "mir_levels");
     } else if variants.is_empty() {
@@ -2038,6 +2178,13 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
                     c.kind, c.note
                 ),
             ),
+            None if miri_report => put(
+                &mut st,
+                "pass_bisect",
+                "n/a",
+                &ctx,
+                "the report comes from Miri, not from a compiled program".into(),
+            ),
             None if still => put(
                 &mut st,
                 "pass_bisect",
@@ -2058,13 +2205,18 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
         keep(&mut st, "mir_llvm");
     } else if mir_opt.starts_with("llvm") || mir_opt.starts_with("mir") {
         put(&mut st, "mir_llvm", "done", &ctx, mir_opt.clone());
-    } else if mir_opt.starts_with("unknown: not reproduced") {
+    } else if mir_opt.starts_with("unknown: not reproduced") || miri_report {
         put(
             &mut st,
             "mir_llvm",
             "n/a",
             &ctx,
-            "does not reproduce on nightly".into(),
+            if miri_report {
+                "the report comes from Miri, not from a compiled program"
+            } else {
+                "does not reproduce on nightly"
+            }
+            .into(),
         );
     } else {
         put(&mut st, "mir_llvm", "todo", &ctx, mir_opt.clone());
@@ -2102,7 +2254,9 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
         ("bisect_pr", &bis.pr),
     ] {
         let ran_here = !o.bisect.is_zero() && still && m.verdict != "ub";
-        if cur(id) && prior_known && !ran_here {
+        if miri_finding {
+            put(&mut st, id, "n/a", &ctx, MIRI_NO_BISECTION.into());
+        } else if cur(id) && prior_known && !ran_here {
             keep(&mut st, id);
         } else if !ran_here {
             // the search did not run in this pass (disabled, interrupted, or the finding is not eligible): the stored state of the step
@@ -2141,7 +2295,9 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     }
     // regression or long-standing? decides whether the bisection applies at all
     // only from stable/nightly results of this version of the tool (never from stored data that is open again)
-    if ["bisect_stable", "bisect_nightly"]
+    if miri_finding {
+        put(&mut st, "regression", "n/a", &ctx, MIRI_NO_BISECTION.into());
+    } else if ["bisect_stable", "bisect_nightly"]
         .iter()
         .all(|id| steps::is_complete(id, &st, &ctx, &date))
     {
@@ -2218,7 +2374,9 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     st.insert("mir_opt".into(), mir_opt.clone());
     st.insert(
         "kind".into(),
-        if crash {
+        if miri_finding {
+            bad.name.clone()
+        } else if crash {
             "compiler-crash".into()
         } else {
             "wrong-code".into()
@@ -2305,7 +2463,9 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     let _ = writeln!(
         md,
         "Kind: {}\n",
-        if crash {
+        if miri_finding {
+            "Miri (the output of the native build differs from Miri's, or Miri reports an error)"
+        } else if crash {
             "compiler crash / compile failure"
         } else {
             "wrong code (different output between two configurations)"
@@ -2372,284 +2532,288 @@ pub fn triage(o: &TriageOpts, dir: &Path) -> Result<String, String> {
     std::fs::write(dir.join("STATUS.md"), &md).unwrap();
 
     // issue draft: only the reduced program, the shortest commands, the output and a version table
-    let mut is = String::new();
-    let shown_common = crate::runner::shown_flags(&crate::runner::common_flags());
-    let vcmd = |flags: &str| {
-        let line = format!("{shown_common} {flags}");
-        format!("{} reduced.rs {line}", crate::runner::compiler_for(&line))
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ")
-    };
-    let cmd = |c: &Config| vcmd(&c.flags.join(" "));
-    let first_yes = matrix2
-        .iter()
-        .find(|m| m.2 == Repro::Yes)
-        .map(|m| m.0.clone());
-    let vv = first_yes
-        .as_ref()
-        .and_then(|ch| {
-            let mut c = Command::new("rustc");
-            c.arg(format!("+{ch}")).arg("-vV");
-            exec(c, Duration::from_secs(30))
-                .ok()
-                .map(|r| String::from_utf8_lossy(&r.stdout).trim().to_string())
-        })
-        .unwrap_or_default();
-    let title = if crash {
-        let s = sig.clone().unwrap_or_default().replace('#', "N");
-        if bad.flags.is_empty() {
-            s
-        } else {
-            format!("{s} with `{}`", bad.flags.join(" "))
-        }
+    if miri_finding {
+        write_miri_issue(dir, &reduced, &base, &outputs, &variants);
     } else {
-        if base.flags.is_empty() {
-            format!(
-                "Miscompilation with `{}`: different output than the default build",
-                bad.flags.join(" ")
-            )
-        } else {
-            format!(
-                "Miscompilation: `{}` and `{}` produce different output",
-                base.flags.join(" "),
-                bad.flags.join(" ")
-            )
-        }
-    };
-    let _ = std::fs::write(dir.join("ISSUE_TITLE.txt"), format!("{title}\n"));
-    let _ = writeln!(
-        is,
-        "I tried this code:\n\n```rust\n{}\n```\n",
-        reduced.trim_end()
-    );
-    // every command with what it printed: the reference build, the failing build and the sibling optimisation levels
-    struct Entry {
-        flags: String,
-        text: String,
-        fails: bool,
-    }
-    let mut entries: Vec<Entry> = Vec::new();
-    let mut crash_err = String::new();
-    if let Some((a, b)) = &outputs {
-        entries.push(Entry {
-            flags: base.flags.join(" "),
-            text: show_out(a),
-            fails: false,
-        });
-        crash_err = match b {
-            Outcome::CompileFail(e) => crate::demangle::demangle_text(e.trim())
-                .chars()
-                .take(20000)
-                .collect::<String>(),
-            other => other.describe(),
+        let mut is = String::new();
+        let shown_common = crate::runner::shown_flags(&crate::runner::common_flags());
+        let vcmd = |flags: &str| {
+            let line = format!("{shown_common} {flags}");
+            format!("{} reduced.rs {line}", crate::runner::compiler_for(&line))
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
         };
-        entries.push(Entry {
-            flags: bad.flags.join(" "),
-            text: if crash {
-                crash_err.clone()
-            } else {
-                show_out(b)
-            },
-            fails: true,
-        });
-    }
-    // the opt-bisect runs only tell us which pass is to blame (the sentence below); their commands are not part of the issue
-    for v in variants.iter() {
-        if entries.iter().any(|e| e.flags == v.flags) {
-            continue;
-        }
-        entries.push(Entry {
-            flags: v.flags.clone(),
-            text: if crash && v.bug {
-                crash_err.clone()
-            } else {
-                v.out.clone()
-            },
-            fails: v.bug,
-        });
-    }
-    if entries.is_empty() {
-        let _ = writeln!(
-            is,
-            "Commands:\n```\n{}\n{}\n```\n(did not reproduce when this draft was written)\n",
-            cmd(&base),
-            cmd(&bad)
-        );
-    } else {
-        // group by result; the group of the reference build comes first
-        let mut groups: Vec<(String, bool, Vec<String>)> = Vec::new();
-        for e in &entries {
-            let key = if crash && e.fails {
-                "\u{0}fail".to_string()
-            } else {
-                e.text.clone()
-            };
-            match groups.iter_mut().find(|g| g.0 == key) {
-                Some(g) => g.2.push(e.flags.clone()),
-                None => groups.push((key, crash && e.fails, vec![e.flags.clone()])),
-            }
-        }
-        for (i, (key, is_fail, all_flags)) in groups.iter().enumerate() {
-            let lead = match i {
-                0 => "Rust compiled with",
-                1 => "but compiled with",
-                _ => "and compiled with",
-            };
-            let text = if *is_fail {
-                crash_err.as_str()
-            } else {
-                key.as_str()
-            };
-            let verb = if *is_fail {
-                "fails with"
-            } else if crash {
-                "compiles and prints"
-            } else {
-                "prints"
-            };
-            // siblings that differ in one optimisation level only share one command and a comment
-            let shown: Vec<(String, String)> = compress_siblings(all_flags)
-                .into_iter()
-                .map(|(f, c)| {
-                    (
-                        if crash && *is_fail {
-                            vcmd(&f)
-                        } else {
-                            format!("{}; ./reduced", vcmd(&f))
-                        },
-                        c,
-                    )
-                })
-                .collect();
-            let width = shown
-                .iter()
-                .filter(|(_, c)| !c.is_empty())
-                .map(|(cmd, _)| cmd.len())
-                .max()
-                .unwrap_or(0);
-            let cmds: Vec<String> = shown
-                .iter()
-                .map(|(cmd, c)| {
-                    if c.is_empty() {
-                        cmd.clone()
-                    } else {
-                        format!("{cmd:<width$} # {c}")
-                    }
-                })
-                .collect();
-            if crash && !*is_fail && text == "(no output)" {
-                let _ = writeln!(
-                    is,
-                    "{lead}\n```\n{}\n```\nthe program builds and runs without errors.\n",
-                    cmds.join("\n")
-                );
-            } else {
-                let _ = writeln!(
-                    is,
-                    "{lead}\n```\n{}\n```\n{verb}\n```\n{text}\n```\n",
-                    cmds.join("\n")
-                );
-            }
-        }
-    }
-    if let (
-        false,
-        Some((
-            _,
-            Outcome::Ran {
-                signal: Some(_), ..
-            },
-        )),
-    ) = (crash, &outputs)
-    {
-        let chan = matrix2
+        let cmd = |c: &Config| vcmd(&c.flags.join(" "));
+        let first_yes = matrix2
             .iter()
             .find(|m| m.2 == Repro::Yes)
             .map(|m| m.0.clone());
-        let bt = chan.and_then(|ch| {
-            crash_backtrace(
-                &["rustc".to_string(), format!("+{ch}")],
-                &reduced_path,
-                &bad,
-                &o.work,
-            )
-        });
-        if let Some(bt) = bt {
+        let vv = first_yes
+            .as_ref()
+            .and_then(|ch| {
+                let mut c = Command::new("rustc");
+                c.arg(format!("+{ch}")).arg("-vV");
+                exec(c, Duration::from_secs(30))
+                    .ok()
+                    .map(|r| String::from_utf8_lossy(&r.stdout).trim().to_string())
+            })
+            .unwrap_or_default();
+        let title = if crash {
+            let s = sig.clone().unwrap_or_default().replace('#', "N");
+            if bad.flags.is_empty() {
+                s
+            } else {
+                format!("{s} with `{}`", bad.flags.join(" "))
+            }
+        } else {
+            if base.flags.is_empty() {
+                format!(
+                    "Miscompilation with `{}`: different output than the default build",
+                    bad.flags.join(" ")
+                )
+            } else {
+                format!(
+                    "Miscompilation: `{}` and `{}` produce different output",
+                    base.flags.join(" "),
+                    bad.flags.join(" ")
+                )
+            }
+        };
+        let _ = std::fs::write(dir.join("ISSUE_TITLE.txt"), format!("{title}\n"));
+        let _ = writeln!(
+            is,
+            "I tried this code:\n\n```rust\n{}\n```\n",
+            reduced.trim_end()
+        );
+        // every command with what it printed: the reference build, the failing build and the sibling optimisation levels
+        struct Entry {
+            flags: String,
+            text: String,
+            fails: bool,
+        }
+        let mut entries: Vec<Entry> = Vec::new();
+        let mut crash_err = String::new();
+        if let Some((a, b)) = &outputs {
+            entries.push(Entry {
+                flags: base.flags.join(" "),
+                text: show_out(a),
+                fails: false,
+            });
+            crash_err = match b {
+                Outcome::CompileFail(e) => crate::demangle::demangle_text(e.trim())
+                    .chars()
+                    .take(20000)
+                    .collect::<String>(),
+                other => other.describe(),
+            };
+            entries.push(Entry {
+                flags: bad.flags.join(" "),
+                text: if crash {
+                    crash_err.clone()
+                } else {
+                    show_out(b)
+                },
+                fails: true,
+            });
+        }
+        // the opt-bisect runs only tell us which pass is to blame (the sentence below); their commands are not part of the issue
+        for v in variants.iter() {
+            if entries.iter().any(|e| e.flags == v.flags) {
+                continue;
+            }
+            entries.push(Entry {
+                flags: v.flags.clone(),
+                text: if crash && v.bug {
+                    crash_err.clone()
+                } else {
+                    v.out.clone()
+                },
+                fails: v.bug,
+            });
+        }
+        if entries.is_empty() {
             let _ = writeln!(
                 is,
-                "Where the failing build crashes (`gdb -batch -ex run -ex bt`):\n```\n{bt}\n```\n"
+                "Commands:\n```\n{}\n{}\n```\n(did not reproduce when this draft was written)\n",
+                cmd(&base),
+                cmd(&bad)
+            );
+        } else {
+            // group by result; the group of the reference build comes first
+            let mut groups: Vec<(String, bool, Vec<String>)> = Vec::new();
+            for e in &entries {
+                let key = if crash && e.fails {
+                    "\u{0}fail".to_string()
+                } else {
+                    e.text.clone()
+                };
+                match groups.iter_mut().find(|g| g.0 == key) {
+                    Some(g) => g.2.push(e.flags.clone()),
+                    None => groups.push((key, crash && e.fails, vec![e.flags.clone()])),
+                }
+            }
+            for (i, (key, is_fail, all_flags)) in groups.iter().enumerate() {
+                let lead = match i {
+                    0 => "Rust compiled with",
+                    1 => "but compiled with",
+                    _ => "and compiled with",
+                };
+                let text = if *is_fail {
+                    crash_err.as_str()
+                } else {
+                    key.as_str()
+                };
+                let verb = if *is_fail {
+                    "fails with"
+                } else if crash {
+                    "compiles and prints"
+                } else {
+                    "prints"
+                };
+                // siblings that differ in one optimisation level only share one command and a comment
+                let shown: Vec<(String, String)> = compress_siblings(all_flags)
+                    .into_iter()
+                    .map(|(f, c)| {
+                        (
+                            if crash && *is_fail {
+                                vcmd(&f)
+                            } else {
+                                format!("{}; ./reduced", vcmd(&f))
+                            },
+                            c,
+                        )
+                    })
+                    .collect();
+                let width = shown
+                    .iter()
+                    .filter(|(_, c)| !c.is_empty())
+                    .map(|(cmd, _)| cmd.len())
+                    .max()
+                    .unwrap_or(0);
+                let cmds: Vec<String> = shown
+                    .iter()
+                    .map(|(cmd, c)| {
+                        if c.is_empty() {
+                            cmd.clone()
+                        } else {
+                            format!("{cmd:<width$} # {c}")
+                        }
+                    })
+                    .collect();
+                if crash && !*is_fail && text == "(no output)" {
+                    let _ = writeln!(
+                        is,
+                        "{lead}\n```\n{}\n```\nthe program builds and runs without errors.\n",
+                        cmds.join("\n")
+                    );
+                } else {
+                    let _ = writeln!(
+                        is,
+                        "{lead}\n```\n{}\n```\n{verb}\n```\n{text}\n```\n",
+                        cmds.join("\n")
+                    );
+                }
+            }
+        }
+        if let (
+            false,
+            Some((
+                _,
+                Outcome::Ran {
+                    signal: Some(_), ..
+                },
+            )),
+        ) = (crash, &outputs)
+        {
+            let chan = matrix2
+                .iter()
+                .find(|m| m.2 == Repro::Yes)
+                .map(|m| m.0.clone());
+            let bt = chan.and_then(|ch| {
+                crash_backtrace(
+                    &["rustc".to_string(), format!("+{ch}")],
+                    &reduced_path,
+                    &bad,
+                    &o.work,
+                )
+            });
+            if let Some(bt) = bt {
+                let _ = writeln!(
+                    is,
+                    "Where the failing build crashes (`gdb -batch -ex run -ex bt`):\n```\n{bt}\n```\n"
+                );
+            }
+        }
+        if let Some(c) = culprit.as_ref().filter(|c| c.n > 0) {
+            let what = if c.kind == "llvm" {
+                "LLVM pass"
+            } else {
+                "MIR pass"
+            };
+            let limit = if c.kind == "llvm" {
+                "-C llvm-args=-opt-bisect-limit"
+            } else {
+                "-Zmir-opt-bisect-limit"
+            };
+            let _ = writeln!(
+                is,
+                "Bisecting the optimization passes with `{limit}`: the first {what} that changes the result is pass {} of {}, `{}` on `{}`.\n",
+                c.n, c.total, c.name, c.target
             );
         }
-    }
-    if let Some(c) = culprit.as_ref().filter(|c| c.n > 0) {
-        let what = if c.kind == "llvm" {
-            "LLVM pass"
-        } else {
-            "MIR pass"
-        };
-        let limit = if c.kind == "llvm" {
-            "-C llvm-args=-opt-bisect-limit"
-        } else {
-            "-Zmir-opt-bisect-limit"
-        };
-        let _ = writeln!(
-            is,
-            "Bisecting the optimization passes with `{limit}`: the first {what} that changes the result is pass {} of {}, `{}` on `{}`.\n",
-            c.n, c.total, c.name, c.target
-        );
-    }
-    // Miri is a required step of every finding; its output only belongs here when the program has no `unsafe` and Miri still complains
-    if !m.report.is_empty() && !reduced.contains("unsafe") {
-        let _ = writeln!(
-            is,
-            "Miri reports for this program (it contains no `unsafe`):\n```\n{}\n```\n",
-            m.report.trim()
-        );
-    }
-    let _ = writeln!(
-        is,
-        "### Meta\n\n`rustc --version --verbose`:\n```\n{vv}\n```\n"
-    );
-    let _ = writeln!(is, "| channel | reproducible |\n|---|---|");
-    for (ch, ver, r) in &matrix2 {
-        let _ = writeln!(is, "| {ch} ({ver}) | {} |", r.word());
-    }
-    for (label, yes) in bis.edges() {
-        let _ = writeln!(is, "| {label} | {} |", if yes { "yes" } else { "no" });
-    }
-    // cargo-bisect-rustc always leaves a trace here: the commit, "not found" (a result), or why there is nothing yet
-    if bis.pr.lines.iter().any(|l| l.contains("rust-lang/rust")) || bis.pr.done {
-        let _ = writeln!(is, "\nBisected with `cargo bisect-rustc`:\n");
-        for l in &crate::bisect::tidy_pr_lines(&bis.pr.lines) {
-            let _ = writeln!(is, "{l}");
+        // Miri is a required step of every finding; its output only belongs here when the program has no `unsafe` and Miri still complains
+        if !m.report.is_empty() && !reduced.contains("unsafe") {
+            let _ = writeln!(
+                is,
+                "Miri reports for this program (it contains no `unsafe`):\n```\n{}\n```\n",
+                m.report.trim()
+            );
         }
-    } else if !bis.pr.na && !bis.nightly.na {
-        // not part of the report (an HTML comment): tells whoever reads the draft whether the search still has to be done by hand
-        let why = if bis.nightly.range.is_none() {
-            format!(
-                "needs the one-day nightly range first ({})",
-                if bis.nightly.note.is_empty() {
-                    bis.nightly.summary.clone()
-                } else {
-                    bis.nightly.note.clone()
-                }
-            )
-        } else if bis.pr.note.is_empty() {
-            "not run yet".to_string()
-        } else {
-            bis.pr.note.clone()
-        };
         let _ = writeln!(
             is,
-            "\n<!-- cargo-bisect-rustc: NOT DONE ({why}). The next retriage run tries again; the command is `cargo bisect-rustc --regress success --start <good nightly> --end <bad nightly> --script <script that exits 0 while the bug shows>`. -->"
+            "### Meta\n\n`rustc --version --verbose`:\n```\n{vv}\n```\n"
         );
+        let _ = writeln!(is, "| channel | reproducible |\n|---|---|");
+        for (ch, ver, r) in &matrix2 {
+            let _ = writeln!(is, "| {ch} ({ver}) | {} |", r.word());
+        }
+        for (label, yes) in bis.edges() {
+            let _ = writeln!(is, "| {label} | {} |", if yes { "yes" } else { "no" });
+        }
+        // cargo-bisect-rustc always leaves a trace here: the commit, "not found" (a result), or why there is nothing yet
+        if bis.pr.lines.iter().any(|l| l.contains("rust-lang/rust")) || bis.pr.done {
+            let _ = writeln!(is, "\nBisected with `cargo bisect-rustc`:\n");
+            for l in &crate::bisect::tidy_pr_lines(&bis.pr.lines) {
+                let _ = writeln!(is, "{l}");
+            }
+        } else if !bis.pr.na && !bis.nightly.na {
+            // not part of the report (an HTML comment): tells whoever reads the draft whether the search still has to be done by hand
+            let why = if bis.nightly.range.is_none() {
+                format!(
+                    "needs the one-day nightly range first ({})",
+                    if bis.nightly.note.is_empty() {
+                        bis.nightly.summary.clone()
+                    } else {
+                        bis.nightly.note.clone()
+                    }
+                )
+            } else if bis.pr.note.is_empty() {
+                "not run yet".to_string()
+            } else {
+                bis.pr.note.clone()
+            };
+            let _ = writeln!(
+                is,
+                "\n<!-- cargo-bisect-rustc: NOT DONE ({why}). The next retriage run tries again; the command is `cargo bisect-rustc --regress success --start <good nightly> --end <bad nightly> --script <script that exits 0 while the bug shows>`. -->"
+            );
+        }
+        let _ = writeln!(
+            is,
+            "\nProblem was found by and minimized by rust fuzzer(created by llm) - https://github.com/qarmin/rs-compiler-fuzzer (the latest findings of the fuzzer can be checked by hand in https://github.com/qarmin/rs-compiler-fuzzer/releases/download/Nightly/findings.zip)"
+        );
+        std::fs::write(dir.join("ISSUE.md"), is).unwrap();
     }
-    let _ = writeln!(
-        is,
-        "\nProblem was found by and minimized by rust fuzzer(created by llm) - https://github.com/qarmin/rs-compiler-fuzzer (the latest findings of the fuzzer can be checked by hand in https://github.com/qarmin/rs-compiler-fuzzer/releases/download/Nightly/findings.zip)"
-    );
-    std::fs::write(dir.join("ISSUE.md"), is).unwrap();
 
     // put the status at the top of report.md (replace an older block)
     let rep_path = dir.join("report.md");
@@ -2705,11 +2869,12 @@ pub fn stale_findings(
             let mut st = read_cfg(&p.join("status.cfg"));
             let meta = read_cfg(&p.join("repro.cfg"));
             steps::backfill(&mut st, &p);
+            let needs_miri = meta.get("bad_name").is_some_and(|n| n.starts_with("miri"));
             let done = st
                 .get("state")
                 .map(|s| s == "fixed" || s == "not-reproducing")
                 .unwrap_or(false)
-                || meta.get("mode").map(|m| m == "miri").unwrap_or(false)
+                || (needs_miri && !crate::miri::available())
                 || skip.contains(&name);
             if done || steps::has_failure(&st) {
                 return None;
@@ -2732,6 +2897,23 @@ pub fn stale_findings(
 #[cfg(test)]
 mod sibling_tests {
     use super::*;
+
+    #[test]
+    fn a_miri_finding_has_a_signature_only_when_miri_reports_an_error() {
+        let dir = std::env::temp_dir().join(format!("rsfuzz-sig-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sig = |text: &str, bad: &str| {
+            std::fs::write(dir.join("signature.txt"), text).unwrap();
+            stored_signature(&dir, &Config::new(bad, ""))
+        };
+        assert_eq!(sig("mismatch: shapes case differs", "miri-mismatch"), None);
+        assert_eq!(
+            sig("ub: error: Undefined Behavior: x", "miri-ub").as_deref(),
+            Some("error: Undefined Behavior: x")
+        );
+        assert_eq!(sig("rustc-LLVM ERROR: x", "O3").as_deref(), Some("rustc-LLVM ERROR: x"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn levels_that_behave_alike_share_one_command() {

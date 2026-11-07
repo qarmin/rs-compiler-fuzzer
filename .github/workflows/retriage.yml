@@ -154,7 +154,7 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
-      - uses: actions/download-artifact@v6
+      - uses: actions/download-artifact@v8
         continue-on-error: true
         with:
           pattern: retriage-*

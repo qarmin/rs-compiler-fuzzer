@@ -16,7 +16,8 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       # nightly: the reducer tests use `-Z treat-err-as-bug` (a missing toolchain would be installed by rustup in the middle of the parallel tests)
-      - run: rustup toolchain install stable nightly --profile minimal && rustup default stable
+      - run: rustup toolchain install stable --profile minimal && rustup toolchain install nightly --profile minimal --component miri,rust-src && rustup default stable
+      - run: cargo +nightly miri setup
       - run: cargo test --release --workspace
 
   # Short end-to-end run of every strategy on nightly (small batches).

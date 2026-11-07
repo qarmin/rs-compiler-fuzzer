@@ -13,6 +13,8 @@ pub struct Config {
     pub flags: Vec<String>,
     /// Takes much longer to compile than the rest (fat LTO, one codegen unit...); left out by `--profile fast`.
     pub slow: bool,
+    /// The program is interpreted by Miri instead of being compiled (see `miri::run_program`); the name starts with `miri`.
+    pub miri: bool,
 }
 
 impl Config {
@@ -21,6 +23,7 @@ impl Config {
             name: name.to_string(),
             flags: flags.split_whitespace().map(String::from).collect(),
             slow: false,
+            miri: name.starts_with("miri"),
         }
     }
 
@@ -71,7 +74,7 @@ pub fn compiler_for(_flags: &str) -> &'static str {
     "rustc +nightly"
 }
 
-const FN_ADDRESS_MESSAGE: &str =
+pub(crate) const FN_ADDRESS_MESSAGE: &str =
     "the program casts a function item into an integer: the address differs on every run";
 
 static COMMON_OVERRIDE: std::sync::Mutex<Option<Vec<String>>> = std::sync::Mutex::new(None);
@@ -198,6 +201,8 @@ pub enum Outcome {
     CompileFail(String),
     CompileTimeout,
     RunTimeout,
+    /// Miri refuses to run the program (undefined behaviour, an unsupported operation); the text is its stderr.
+    MiriError(String),
     Ran {
         code: Option<i32>,
         signal: Option<i32>,
@@ -213,6 +218,7 @@ impl Outcome {
             Outcome::CompileFail(_) => "compile-fail".into(),
             Outcome::CompileTimeout => "compile-timeout".into(),
             Outcome::RunTimeout => "run-timeout".into(),
+            Outcome::MiriError(_) => "miri-error".into(),
             Outcome::Ran {
                 code,
                 signal,
@@ -227,6 +233,7 @@ impl Outcome {
             Outcome::CompileFail(_) => "compilation failed".into(),
             Outcome::CompileTimeout => "compilation timed out".into(),
             Outcome::RunTimeout => "execution timed out".into(),
+            Outcome::MiriError(e) => format!("Miri reports: {}", crate::miri::headline(e)),
             Outcome::Ran {
                 code,
                 signal,
@@ -363,9 +370,23 @@ fn uses_float_min_max(src: &str) -> bool {
             .any(|p| src.contains(p))
 }
 
+/// Miri exposes no CPU features, so a program that asks for them runs differently there; a generated case that printed nothing under
+/// Miri (feature-gated code) leaves the hash of its output at the starting value.
+fn miri_cannot_tell(src: &str, a: &Outcome, b: &Outcome) -> bool {
+    const UNTOUCHED_HASH: &str = "cbf29ce484222325";
+    let detects_features = ["is_x86_feature_detected", "is_aarch64_feature_detected", "std_detect"]
+        .iter()
+        .any(|p| src.contains(p));
+    let untouched = |o: &Outcome| matches!(o, Outcome::Ran { stdout, .. } if stdout.contains(UNTOUCHED_HASH));
+    detects_features || untouched(a) || untouched(b)
+}
+
 /// [`differs`] for a known program text.
 pub fn differs_src(a: &Outcome, b: &Outcome, ca: &Config, cb: &Config, src: &str) -> bool {
     if !differs(a, b, ca, cb) {
+        return false;
+    }
+    if (ca.miri || cb.miri) && miri_cannot_tell(src, a, b) {
         return false;
     }
     if uses_float_min_max(src)
@@ -422,6 +443,9 @@ pub fn build_and_run(
     cfg: &Config,
     lim: &Limits,
 ) -> Outcome {
+    if cfg.miri {
+        return crate::miri::run_program(rustc, src, cfg, lim);
+    }
     let mut c = rustc_cmd(rustc);
     c.args(compile_args(src, bin, cfg));
     let r = match exec(c, lim.compile) {
@@ -486,6 +510,9 @@ pub use rs_minimizer::par_map;
 /// Stable fingerprint of a compiler crash, so the same crash found again (other batch, other
 /// run) is recognised: the first line naming an LLVM error / ICE / signal, digits normalised.
 pub fn crash_signature(o: &Outcome) -> Option<String> {
+    if let Outcome::MiriError(e) = o {
+        return Some(crate::miri::signature(e));
+    }
     let Outcome::CompileFail(e) = o else {
         return None;
     };
@@ -654,4 +681,16 @@ mod overflow_tests {
             &on
         ));
     }
+
+    #[test]
+    fn miri_cannot_tell_for_cpu_features_and_an_untouched_hash() {
+        let ran = |out: &str| Outcome::Ran { code: Some(0), signal: None, stdout: out.into(), stderr: String::new() };
+        let (native, miri) = (Config::new("native", ""), Config::new("miri-mismatch", ""));
+        assert!(differs_src(&ran("1 aa\n"), &ran("1 bb\n"), &native, &miri, "fn main() {}"));
+        assert!(!differs_src(&ran("1 aa\n"), &ran("1 bb\n"), &native, &miri, "if is_x86_feature_detected!(\"avx2\") {}"));
+        assert!(!differs_src(&ran("1 aa\n"), &ran("1 cbf29ce484222325\n"), &native, &miri, "fn main() {}"));
+        let (o3, o0) = (Config::new("O3", "-C opt-level=3"), Config::new("O0", "-C opt-level=0"));
+        assert!(differs_src(&ran("1 aa\n"), &ran("1 cbf29ce484222325\n"), &o3, &o0, "fn main() {}"), "only Miri comparisons have the exception");
+    }
+
 }

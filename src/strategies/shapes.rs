@@ -334,6 +334,7 @@ fn masked_fold(rng: &mut Rng, items: &mut String, body: &mut String, id: usize) 
     w!(items, "        }}");
     w!(items, "        valid");
     w!(items, "    }}");
+    // the sign of a NaN is unspecified (Miri randomises it): only "is NaN" is printed
     for _ in 0..rng.range(1, 3) {
         let n = rng.range(8, 70);
         let (k, r) = (rng.range(2, 5), rng.below(3));
@@ -341,7 +342,7 @@ fn masked_fold(rng: &mut Rng, items: &mut String, body: &mut String, id: usize) 
         let sp = *rng.pick(&["f64::NAN", "f64::INFINITY", "-1.25", "7.5"]);
         w!(
             body,
-            "        {{ let mask: Vec<bool> = (0..{n}).map(|i| i % {k} != {r}).collect(); let mut out: Vec<{fty}> = bb((0..{n}).map(|i| if i % {special} == {special} - 1 {{ {sp} as {fty} }} else {{ 0.75 + (i % 3) as {fty} }}).collect()); let ok = fold{id}(&mut out, &mask); h.put(&ok); h.put(&out.iter().map(|x| x.to_bits() as u64).collect::<Vec<u64>>()); }}"
+            "        {{ let mask: Vec<bool> = (0..{n}).map(|i| i % {k} != {r}).collect(); let mut out: Vec<{fty}> = bb((0..{n}).map(|i| if i % {special} == {special} - 1 {{ {sp} as {fty} }} else {{ 0.75 + (i % 3) as {fty} }}).collect()); let ok = fold{id}(&mut out, &mask); h.put(&ok); h.put(&out.iter().map(|x| if x.is_nan() {{ 1 }} else {{ x.to_bits() as u64 }}).collect::<Vec<u64>>()); }}"
         );
     }
 }

@@ -1124,13 +1124,7 @@ pub fn verify(o: &Opts, root: &Path, report_dir: &Path, label: &str) -> i32 {
         Ok(rd) => rd
             .filter_map(|e| e.ok())
             .map(|e| e.path())
-            .filter(|p| {
-                p.join("case.rs").exists()
-                    && p.join("repro.cfg").exists()
-                    && !std::fs::read_to_string(p.join("repro.cfg"))
-                        .unwrap_or_default()
-                        .contains("mode=miri")
-            })
+            .filter(|p| p.join("case.rs").exists() && p.join("repro.cfg").exists())
             .collect(),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             info!(
