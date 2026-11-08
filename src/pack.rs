@@ -219,7 +219,9 @@ fn nan_sign_miri_mismatch(dir: &Path) -> bool {
         return false;
     }
     let src = std::fs::read_to_string(dir.join("case.rs")).unwrap_or_default();
-    src.contains("NAN") && src.contains(".to_bits()") && !src.contains("is_nan()")
+    // the shared prelude (`impl Feed for f64/f32`) always mentions is_nan(), so it must not count as a guard
+    let body: String = src.lines().filter(|l| !l.contains("impl Feed for f")).collect::<Vec<_>>().join("\n");
+    body.contains("NAN") && body.contains(".to_bits()") && !body.contains("is_nan()")
 }
 
 fn class_of(dir: &Path) -> &'static str {
@@ -833,5 +835,9 @@ mod nan_tests {
         assert!(!nan_sign_miri_mismatch(&finding("O3", old)));
         let fixed = "let v = f64::NAN; h.put(&if v.is_nan() { 1 } else { v.to_bits() });";
         assert!(!nan_sign_miri_mismatch(&finding("miri-mismatch-b", fixed)));
+        let with_prelude = format!(
+            "impl Feed for f64 {{ fn feed_into(&self, h: &mut H) {{ h.feed(if self.is_nan() {{ 1 }} else {{ self.to_bits() }}) }} }}\n{old}"
+        );
+        assert!(nan_sign_miri_mismatch(&finding("miri-mismatch-c", &with_prelude)));
     }
 }
