@@ -211,6 +211,17 @@ pub fn key_of(dir: &Path) -> Option<String> {
     ))
 }
 
+/// A Miri mismatch that only comes from the unspecified sign of a NaN (Miri randomises it, the hardware does not): `to_bits()` of
+/// a float that is NaN. Stored by generators that did not canonicalise NaNs yet; such a finding says nothing about any compiler.
+fn nan_sign_miri_mismatch(dir: &Path) -> bool {
+    let bad = read_cfg(&dir.join("repro.cfg")).get("bad_name").cloned().unwrap_or_default();
+    if !bad.starts_with("miri") {
+        return false;
+    }
+    let src = std::fs::read_to_string(dir.join("case.rs")).unwrap_or_default();
+    src.contains("NAN") && src.contains(".to_bits()") && !src.contains("is_nan()")
+}
+
 fn class_of(dir: &Path) -> &'static str {
     let n = dir.file_name().and_then(|n| n.to_str()).unwrap_or("");
     let parent = dir
@@ -333,7 +344,13 @@ fn migrate(pkg: &Path) {
         .collect();
     keys.sort();
     for k in keys {
-        let st = read_cfg(&pkg.join("findings").join(&k).join("status.cfg"));
+        let dir = pkg.join("findings").join(&k);
+        if nan_sign_miri_mismatch(&dir) {
+            println!("DROPPED {k} (Miri mismatch caused by the unspecified sign of a NaN)");
+            let _ = std::fs::remove_dir_all(&dir);
+            continue;
+        }
+        let st = read_cfg(&dir.join("status.cfg"));
         if st.get("repro.nightly").map(String::as_str) == Some("no") {
             if ver.is_empty() {
                 ver = nightly_version();
@@ -384,6 +401,10 @@ pub fn run(pkg: &Path, adds: &[PathBuf], toolchain: &str, contains: Option<&Path
         dirs.sort();
         for d in dirs {
             let Some(key) = key_of(&d) else { continue };
+            if nan_sign_miri_mismatch(&d) {
+                println!("IGNORED {key} (Miri mismatch caused by the unspecified sign of a NaN)");
+                continue;
+            }
             let mut key = key;
             // the same reduced program under another key (e.g. found again by another seed) is the same finding
             let new_hash = read_cfg(&d.join("status.cfg"))
@@ -791,4 +812,26 @@ fn write_old_index(pkg: &Path) {
         );
     }
     let _ = std::fs::write(dir.join("INDEX.md"), s);
+}
+
+#[cfg(test)]
+mod nan_tests {
+    use super::*;
+
+    fn finding(bad: &str, src: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("nan_sign_{}_{}", std::process::id(), bad));
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("repro.cfg"), format!("bad_name={bad}\n")).unwrap();
+        std::fs::write(d.join("case.rs"), src).unwrap();
+        d
+    }
+
+    #[test]
+    fn miri_mismatch_on_nan_bits_is_ignored() {
+        let old = "let v = f64::NAN; h.put(&v.to_bits());";
+        assert!(nan_sign_miri_mismatch(&finding("miri-mismatch", old)));
+        assert!(!nan_sign_miri_mismatch(&finding("O3", old)));
+        let fixed = "let v = f64::NAN; h.put(&if v.is_nan() { 1 } else { v.to_bits() });";
+        assert!(!nan_sign_miri_mismatch(&finding("miri-mismatch-b", fixed)));
+    }
 }
