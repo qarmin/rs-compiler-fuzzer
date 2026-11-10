@@ -629,7 +629,7 @@ pub fn write_index(pkg: &Path) {
     let table = |s: &mut String, set: &[(String, Cfg)]| {
         let _ = writeln!(
             s,
-            "| steps done | open steps | finding | same bug | target | kind | reduced lines | fixed in llvm trunk | minimisation | seen | last seen |\n|---|---|---|---|---|---|---|---|---|---|---|"
+            "| steps done | open steps | finding | same bug | target | kind | error type | first bad rustc | regressing commit | reduced lines | fixed in llvm trunk | minimisation | seen | last seen |\n|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"
         );
         for (k, c) in set {
             let mut c2 = c.clone();
@@ -646,11 +646,14 @@ pub fn write_index(pkg: &Path) {
             };
             let _ = writeln!(
                 s,
-                "| {done}/{total} | {} | `{k}` | {} | {} | {} | {} | {} | {} | {}x | {} |",
+                "| {done}/{total} | {} | `{k}` | {} | {} | {} | {} | {} | {} | {} | {} | {} | {}x | {} |",
                 next.replace('|', "/"),
                 groups.iter().find(|(r, _)| r == k).map_or("-".to_string(), |(_, m)| format!("+{}", m.len())),
                 target_of(c),
                 g("kind"),
+                error_type(&root.join(k), c),
+                first_bad_rustc(c),
+                commit_link(c),
                 g("reduced_lines"),
                 fixed_on_llvm_trunk(&c2),
                 g("min_status"),
@@ -682,11 +685,7 @@ pub fn write_index(pkg: &Path) {
                 .map(|(k, c)| {
                     let pass = pass_of(&root.join(k), c).map(|(_, p)| p).unwrap_or_default();
                     let pr = c.get("regression_pr").cloned().unwrap_or_default();
-                    let sha = pr
-                        .split("/commit/")
-                        .nth(1)
-                        .map(|r| r.chars().take_while(char::is_ascii_hexdigit).collect::<String>())
-                        .unwrap_or_default();
+                    let sha = commit_sha(&pr);
                     let commit = crate::bisect::commit_label(&pr, &sha);
                     if commit.is_empty() { pass } else { format!("{pass}, {commit}") }
                 })
@@ -706,6 +705,46 @@ pub fn write_index(pkg: &Path) {
     table(&mut s, &partial);
     std::fs::write(pkg.join("INDEX.md"), s).unwrap();
     write_old_index(pkg);
+}
+
+/// `LLVM stack-coloring` / `MIR JumpThreading`-style label of the pass that changes the result; `-` when none was isolated.
+fn error_type(dir: &Path, c: &Cfg) -> String {
+    match pass_of(dir, c) {
+        Some((kind, pass)) => match kind.as_str() {
+            "llvm" => format!("LLVM {pass}"),
+            "mir" => format!("MIR {pass}"),
+            _ => pass,
+        },
+        None => "-".into(),
+    }
+}
+
+fn commit_sha(regression_pr: &str) -> String {
+    regression_pr
+        .split("/commit/")
+        .nth(1)
+        .map(|r| r.chars().take_while(char::is_ascii_hexdigit).collect())
+        .unwrap_or_default()
+}
+
+/// The nightly part of the stored bisection summary ("nightly: first bad nightly-2026-08-05" gives `nightly-2026-08-05`); `-` when unknown.
+fn first_bad_rustc(c: &Cfg) -> String {
+    let reg = c.get("regression").map_or("", String::as_str);
+    let Some(n) = reg.split("; ").find_map(|p| p.strip_prefix("nightly: ")) else {
+        return "-".into();
+    };
+    n.strip_prefix("first bad ").unwrap_or(n).to_string()
+}
+
+/// Markdown link to the regressing rust-lang/rust commit (`1b29cfdbee - 2026-08-05`); `-` when the commit is not known.
+fn commit_link(c: &Cfg) -> String {
+    let pr = c.get("regression_pr").map_or("", String::as_str);
+    let sha = commit_sha(pr);
+    if sha.is_empty() {
+        return "-".into();
+    }
+    let url = format!("https://github.com/rust-lang/rust/commit/{sha}");
+    format!("[{}]({url})", crate::bisect::commit_label(pr, &sha))
 }
 
 /// Findings that are very likely one bug: the same kind, target, culprit pass and regressing commit. Returns `(representative, folded members)`
